@@ -1,7 +1,4 @@
-"""
-Tutorial Video Player
-Shows tutorial video with skip and replay options
-"""
+
 
 import cv2
 import numpy as np
@@ -48,6 +45,17 @@ class TutorialPlayer:
         self.glow_phase = 0
         self.skipped = False
         self.completed = False
+        self.video_paused = False  # Track if video is paused at end
+        
+        # Progress bar position (updated during draw)
+        self.progress_bar = {'x': 0, 'y': 0, 'w': 0, 'h': 0}
+        
+        # Multi-video support for tutorial steps
+        self.current_step = 0  # Current video index (0-4 for 5 videos)
+        self.total_steps = 5
+        self.videos_base_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'videos', 'sewing-set-up')
+        self.video_files = []  # Will store paths to step1.mov through step5.mov
+        self.load_video_list()
         
         # Video capture
         self.video_path = video_path
@@ -76,24 +84,32 @@ class TutorialPlayer:
             except Exception as e:
                 print(f"Failed to load audio: {e}")
         
-        # Try to load video if path provided
-        if video_path and os.path.exists(video_path):
-            self.cap = cv2.VideoCapture(video_path)
-            if self.cap.isOpened():
-                self.max_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
-                self.fps = self.cap.get(cv2.CAP_PROP_FPS)
-                if self.fps > 0:
-                    self.frame_time = 1.0 / self.fps
-            else:
-                self.cap = None
+        # Load the first video
+        self.load_current_video()
         
-        # Buttons
-        self.skip_button = {
+        # Buttons - Next and Skip
+        self.next_button = {
             'x': self.width - 160,
             'y': self.height - 80,
             'w': 140,
             'h': 50,
-            'text': 'SKIP'
+            'text': 'NEXT'
+        }
+        
+        self.replay_current_button = {
+            'x': 20,
+            'y': self.height - 80,
+            'w': 140,
+            'h': 50,
+            'text': 'REPLAY'
+        }
+        
+        self.skip_all_button = {
+            'x': self.width - 160,
+            'y': 20,
+            'w': 140,
+            'h': 50,
+            'text': 'SKIP ALL'
         }
         
         self.replay_button = {
@@ -112,11 +128,124 @@ class TutorialPlayer:
             'text': 'CONTINUE'
         }
     
+    def load_video_list(self):
+        """Load the list of tutorial video files (step1 through step5)"""
+        self.video_files = []
+        
+        # Check for step1.mov/mp4 through step5.mov/mp4
+        for i in range(1, self.total_steps + 1):
+            # Try both .mov and .mp4 extensions
+            video_found = False
+            # Try different naming patterns: "Step 1.MOV", "step1.mov", "step 1.mov", etc.
+            patterns = [
+                f'Step {i}.MOV',
+                f'Step {i}.mov',
+                f'Step {i}.MP4',
+                f'Step {i}.mp4',
+                f'step{i}.MOV',
+                f'step{i}.mov',
+                f'step{i}.MP4',
+                f'step{i}.mp4',
+                f'step {i}.MOV',
+                f'step {i}.mov',
+                f'step {i}.MP4',
+                f'step {i}.mp4',
+            ]
+            
+            for pattern in patterns:
+                video_path = os.path.join(self.videos_base_path, pattern)
+                if os.path.exists(video_path):
+                    self.video_files.append(video_path)
+                    video_found = True
+                    print(f"Found tutorial video: {pattern}")
+                    break
+            
+            if not video_found:
+                # Add None as placeholder if video not found
+                self.video_files.append(None)
+                print(f"Warning: step{i} video not found in {self.videos_base_path}")
+    
+    def load_current_video(self):
+        """Load the video for the current step"""
+        # Release previous video if any
+        if self.cap:
+            self.cap.release()
+            self.cap = None
+        
+        # Reset video state
+        self.video_frame = 0
+        self.current_frame_img = None
+        self.completed = False
+        self.video_paused = False
+        self.last_frame_time = time.time()
+        self.frame_accumulator = 0.0
+        
+        # Load current step's video
+        if self.current_step < len(self.video_files) and self.video_files[self.current_step]:
+            video_path = self.video_files[self.current_step]
+            self.cap = cv2.VideoCapture(video_path)
+            if self.cap.isOpened():
+                self.max_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                self.fps = self.cap.get(cv2.CAP_PROP_FPS)
+                if self.fps > 0:
+                    self.frame_time = 1.0 / self.fps
+                print(f"Loaded video: {video_path} ({self.max_frames} frames @ {self.fps} fps)")
+            else:
+                self.cap = None
+                print(f"Failed to open video: {video_path}")
+    
+    def next_step(self):
+        """Move to the next tutorial step"""
+        if self.current_step < self.total_steps - 1:
+            self.current_step += 1
+            self.load_current_video()
+            return True
+        else:
+            # Last step completed
+            return False
+    
+    def replay_current_video(self):
+        """Replay the current video from the beginning"""
+        self.video_frame = 0
+        self.video_paused = False
+        self.current_frame_img = None
+        self.last_frame_time = time.time()
+        self.frame_accumulator = 0.0
+        
+        # Reset video capture to beginning
+        if self.cap and self.cap.isOpened():
+            self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+    
+    def seek_to_position(self, percentage):
+        """Seek to a specific position in the current video (0.0 to 1.0)"""
+        if self.cap and self.cap.isOpened() and self.max_frames > 0:
+            # Calculate target frame
+            target_frame = int(self.max_frames * percentage)
+            target_frame = max(0, min(target_frame, self.max_frames - 1))  # Clamp to valid range
+            
+            # Seek to the target frame
+            self.cap.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
+            self.video_frame = target_frame
+            
+            # Read the frame at this position
+            ret, frame = self.cap.read()
+            if ret:
+                self.current_frame_img = frame
+            
+            # Reset timing
+            self.last_frame_time = time.time()
+            self.frame_accumulator = 0.0
+            
+            # Unpause if video was paused
+            self.video_paused = False
+    
     def reset(self):
-        """Reset tutorial state"""
+        """Reset tutorial state to beginning"""
+        self.current_step = 0
         self.video_frame = 0
         self.skipped = False
         self.completed = False
+        self.video_paused = False
         self.current_frame_img = None
         self.last_frame_time = time.time()
         self.frame_accumulator = 0.0
@@ -129,15 +258,14 @@ class TutorialPlayer:
             except:
                 pass
         
-        # Reset video capture to beginning
-        if self.cap and self.cap.isOpened():
-            self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        # Load the first video
+        self.load_current_video()
     
     def handle_click(self, x, y):
-        """Handle mouse clicks, returns action: 'skip', 'replay', 'continue', or None"""
-        # Check skip button (only when video is playing)
+        """Handle mouse clicks, returns action: 'next', 'done', 'replay_current', 'replay', 'continue', or None"""
+        # Check skip all button (top right - skips entire tutorial)
         if not self.skipped and not self.completed:
-            btn = self.skip_button
+            btn = self.skip_all_button
             if btn['x'] <= x <= btn['x'] + btn['w'] and btn['y'] <= y <= btn['y'] + btn['h']:
                 self.skipped = True
                 # Stop audio when skipping
@@ -146,7 +274,38 @@ class TutorialPlayer:
                         pygame.mixer.music.stop()
                     except:
                         pass
-                return 'continue'  # Skip directly to continue
+                return 'continue'  # Skip all tutorials and go to mode selection
+        
+        # Check progress bar click for seeking (only when video is playing or paused)
+        if not self.skipped and not self.completed:
+            bar = self.progress_bar
+            if bar['x'] <= x <= bar['x'] + bar['w'] and bar['y'] <= y <= bar['y'] + bar['h']:
+                # Calculate the position clicked as a percentage
+                click_percentage = (x - bar['x']) / bar['w']
+                self.seek_to_position(click_percentage)
+                return 'seek'
+        
+        # Check replay current video button (only when video is playing or paused)
+        if not self.skipped and not self.completed:
+            btn = self.replay_current_button
+            if btn['x'] <= x <= btn['x'] + btn['w'] and btn['y'] <= y <= btn['y'] + btn['h']:
+                # Replay current video from beginning
+                self.replay_current_video()
+                return 'replay_current'
+        
+        # Check next/done button (only when video is playing or paused)
+        if not self.skipped and not self.completed:
+            btn = self.next_button
+            if btn['x'] <= x <= btn['x'] + btn['w'] and btn['y'] <= y <= btn['y'] + btn['h']:
+                # If on last step, this is the Done button
+                if self.current_step >= self.total_steps - 1:
+                    return 'continue'  # Done with all tutorials
+                else:
+                    # Move to next step
+                    if self.next_step():
+                        return 'next'
+                    else:
+                        return 'continue'
         
         # Check continue button (after skip or completion)
         if self.skipped or self.completed:
@@ -166,8 +325,8 @@ class TutorialPlayer:
         """Update animation and video progress"""
         self.glow_phase += 0.05
         
-        # Update video frame with proper timing
-        if not self.skipped and not self.completed:
+        # Update video frame with proper timing (only if not paused)
+        if not self.skipped and not self.completed and not self.video_paused:
             # Calculate delta time
             current_time = time.time()
             delta_time = current_time - self.last_frame_time
@@ -186,7 +345,8 @@ class TutorialPlayer:
                         self.video_frame += 1
                         self.frame_accumulator -= self.frame_time
                     else:
-                        self.completed = True
+                        # Video finished - pause instead of completing
+                        self.video_paused = True
                         break
             else:
                 # Fallback to placeholder animation
@@ -194,7 +354,7 @@ class TutorialPlayer:
                     self.video_frame += 1
                     self.frame_accumulator -= self.frame_time
                     if self.video_frame >= self.max_frames:
-                        self.completed = True
+                        self.video_paused = True
     
     def draw_button(self, img, btn, color_normal, color_hover=None):
         """Draw a button with glow effect"""
@@ -226,12 +386,12 @@ class TutorialPlayer:
     
     def draw_video_frame(self, img):
         """Draw actual video frame or placeholder"""
-        # Video area
+        # Video area - moved down for better spacing
         video_margin = 50
         video_x = video_margin
-        video_y = video_margin
+        video_y = 90  # Moved down from 50 to give more space for step indicator
         video_w = self.width - 2 * video_margin
-        video_h = self.height - 2 * video_margin - 100
+        video_h = self.height - video_y - video_margin - 100
         
         # Dark background for video
         cv2.rectangle(img, (video_x, video_y), (video_x + video_w, video_y + video_h), 
@@ -319,16 +479,8 @@ class TutorialPlayer:
         cv2.rectangle(img, (bar_x, bar_y), (bar_x + bar_width, bar_y + bar_height), 
                      COLORS['cyan'], 1)
         
-        # Progress text
-        progress_text = f"{self.video_frame}/{self.max_frames}"
-        font = cv2.FONT_HERSHEY_DUPLEX
-        font_scale = 0.6
-        thickness = 1
-        (text_w, text_h), _ = cv2.getTextSize(progress_text, font, font_scale, thickness)
-        text_x = bar_x + bar_width + 15
-        text_y = bar_y + bar_height
-        cv2.putText(img, progress_text, (text_x, text_y), font, font_scale, 
-                   COLORS['text_secondary'], thickness)
+        # Store progress bar position for click detection
+        self.progress_bar = {'x': bar_x, 'y': bar_y, 'w': bar_width, 'h': bar_height}
     
     def draw(self, img):
         """Main draw function"""
@@ -348,8 +500,22 @@ class TutorialPlayer:
             # Playing video
             self.draw_video_frame(img)
             
-            # Draw skip button
-            self.draw_button(img, self.skip_button, COLORS['button_normal'])
+            # Draw step indicator
+            self.draw_step_indicator(img)
+            
+            # Draw skip all button (top right)
+            self.draw_button(img, self.skip_all_button, COLORS['button_normal'])
+            
+            # Draw replay current button (left side)
+            self.draw_button(img, self.replay_current_button, COLORS['button_normal'])
+            
+            # Draw next/done button (right side)
+            # Change text to "DONE" on last step
+            if self.current_step >= self.total_steps - 1:
+                self.next_button['text'] = 'DONE'
+            else:
+                self.next_button['text'] = 'NEXT'
+            self.draw_button(img, self.next_button, COLORS['button_hover'])
             
         else:
             # Completed or skipped
@@ -368,6 +534,35 @@ class TutorialPlayer:
             # Draw replay and continue buttons
             self.draw_button(img, self.replay_button, COLORS['button_normal'])
             self.draw_button(img, self.continue_button, COLORS['button_hover'])
+    
+    def draw_step_indicator(self, img):
+        """Draw step indicator showing current progress (Step 1/5, etc.)"""
+        font = cv2.FONT_HERSHEY_DUPLEX
+        text = f"Step {self.current_step + 1} of {self.total_steps}"
+        font_scale = 0.8
+        thickness = 2
+        
+        (text_w, text_h), baseline = cv2.getTextSize(text, font, font_scale, thickness)
+        # Keep centered horizontally, align vertically with skip all button
+        text_x = (self.width - text_w) // 2
+        text_y = 20 + (50 + text_h) // 2  # Same Y position as skip all button
+        
+        # Background for better visibility
+        padding = 10
+        cv2.rectangle(img, 
+                     (text_x - padding, text_y - text_h - padding),
+                     (text_x + text_w + padding, text_y + padding),
+                     (40, 40, 40), -1)
+        
+        # Border
+        cv2.rectangle(img, 
+                     (text_x - padding, text_y - text_h - padding),
+                     (text_x + text_w + padding, text_y + padding),
+                     COLORS['cyan'], 2)
+        
+        # Text
+        cv2.putText(img, text, (text_x, text_y), font, font_scale, 
+                   COLORS['text_accent'], thickness)
     
     def cleanup(self):
         """Release video capture and audio resources"""
