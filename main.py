@@ -24,11 +24,8 @@ class SewBotApp:
         self.glow_phase = 0
         self.running = True
         
-        # Tutorial - Video and audio paths
-        video_path = os.path.join(os.path.dirname(__file__), '30 SECOND TIMER.mp4')
-        audio_path = os.path.join(os.path.dirname(__file__), '30 Second Countdown With Voice Over Sound Effect.mp3')
-        self.tutorial_player = TutorialPlayer(self.width, self.height, video_path=video_path, audio_path=audio_path)
-        self.tutorial_shown = False  # Track if tutorial was shown
+        # Tutorial player - initialize with tutorial videos from videos/sewing-set-up
+        self.tutorial_player = TutorialPlayer(self.width, self.height)
         
         # Pattern mode variables
         self.current_level = 1
