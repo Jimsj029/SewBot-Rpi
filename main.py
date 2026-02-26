@@ -163,6 +163,12 @@ class SewBotApp:
                     self.tutorial_player.reset()
                     
             elif self.state == 'tutorial':
+                # Check back button first
+                bb = self.back_button
+                if bb['x'] <= x <= bb['x'] + bb['w'] and bb['y'] <= y <= bb['y'] + bb['h']:
+                    self.state = 'main_menu'
+                    return
+                    
                 # Handle tutorial clicks
                 action = self.tutorial_player.handle_click(x, y)
                 if action == 'continue':
@@ -434,6 +440,9 @@ class SewBotApp:
         
         # Draw tutorial player
         self.tutorial_player.draw(frame)
+        
+        # Draw back button
+        self.draw_back_button(frame)
     
     def draw_mode_selection(self, frame):
         # Use pre-rendered grid background
@@ -646,6 +655,10 @@ class SewBotApp:
                 cv2.imshow(self.window_name, frame)
                 
                 # Check if window was closed (X button clicked)
+                # This needs to be checked after imshow
+                key = cv2.waitKey(30)
+                
+                # Check window property to detect X button click
                 try:
                     if cv2.getWindowProperty(self.window_name, cv2.WND_PROP_VISIBLE) < 1:
                         print("Window closed - Exiting...")
@@ -660,8 +673,6 @@ class SewBotApp:
                 print(f"Window closed: {e}")
                 self.running = False
                 break
-            
-            cv2.waitKey(30)
         
         self.release_camera()
         self.tutorial_player.cleanup()

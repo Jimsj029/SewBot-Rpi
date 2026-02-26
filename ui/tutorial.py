@@ -97,10 +97,10 @@ class TutorialPlayer:
         }
         
         self.replay_current_button = {
-            'x': 20,
-            'y': self.height - 80,
+            'x': 160,
+            'y': self.height - 60,
             'w': 140,
-            'h': 50,
+            'h': 40,
             'text': 'REPLAY'
         }
         
