@@ -335,7 +335,9 @@ class SewBotApp:
                 overlay_png = cv2.cvtColor(overlay_png, cv2.COLOR_GRAY2BGR)
             overlay = overlay_png
             gray = cv2.cvtColor(overlay_png, cv2.COLOR_BGR2GRAY)
-            alpha = (255 - gray) / 255.0
+            # Apply threshold to show only lines, not background
+            _, binary = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
+            alpha = (255 - binary) / 255.0
         
         return overlay, alpha
     

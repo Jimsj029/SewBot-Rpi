@@ -57,10 +57,13 @@ class BlueprintCameraOverlay:
                 overlay_png = cv2.cvtColor(overlay_png, cv2.COLOR_GRAY2BGR)
             
             overlay = overlay_png
-            # Create alpha channel: dark pixels = opaque, light pixels = transparent
+            # Create alpha channel: only show lines, not background
             gray = cv2.cvtColor(overlay_png, cv2.COLOR_BGR2GRAY)
-            # Invert: white background becomes transparent
-            alpha = (255 - gray) / 255.0
+            # Apply threshold to separate lines from background
+            # Lines (dark pixels below threshold) = opaque, background = transparent
+            _, binary = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
+            # Invert so dark lines become opaque (1.0) and white background becomes transparent (0.0)
+            alpha = (255 - binary) / 255.0
         
         return overlay, alpha
     
