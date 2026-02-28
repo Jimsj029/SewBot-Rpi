@@ -317,27 +317,24 @@ class SewBotApp:
             print("Camera released")
     
     def load_blueprint(self, level):
-        img_path = os.path.join(self.blueprint_folder, f'level{level}.png')
-        if not os.path.exists(img_path):
+        # Load binary mask instead of original PNG
+        mask_path = os.path.join(self.blueprint_folder, f'level{level}_mask.png')
+        if not os.path.exists(mask_path):
             return None, None
         
-        overlay_png = cv2.imread(img_path, cv2.IMREAD_UNCHANGED)
-        if overlay_png is None:
+        # Load binary mask as grayscale
+        mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+        if mask is None:
             return None, None
         
-        overlay_png = cv2.resize(overlay_png, (self.uniform_width, self.uniform_height))
+        # Resize mask
+        mask = cv2.resize(mask, (self.uniform_width, self.uniform_height))
         
-        if len(overlay_png.shape) == 3 and overlay_png.shape[2] == 4:
-            overlay = overlay_png[:, :, :3]
-            alpha = overlay_png[:, :, 3] / 255.0
-        else:
-            if len(overlay_png.shape) == 2:
-                overlay_png = cv2.cvtColor(overlay_png, cv2.COLOR_GRAY2BGR)
-            overlay = overlay_png
-            gray = cv2.cvtColor(overlay_png, cv2.COLOR_BGR2GRAY)
-            # Apply threshold to show only lines, not background
-            _, binary = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
-            alpha = (255 - binary) / 255.0
+        # Convert mask to BGR for overlay (white lines will show)
+        overlay = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+        
+        # Use mask itself as alpha channel (white=opaque, black=transparent)
+        alpha = mask / 255.0
         
         return overlay, alpha
     
