@@ -13,6 +13,7 @@ import threading
 # Add ui directory to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'ui'))
 from tutorial import TutorialPlayer
+from stitch_detector import StitchDetector
 
 
 class SewBotApp:
@@ -36,7 +37,12 @@ class SewBotApp:
         self.blueprint_folder = 'blueprint'
         self.uniform_width = 200
         self.uniform_height = 300
-        self.alpha_blend = 0.9
+        self.alpha_blend = 0.6  # Reduced from 0.9 for better AI visibility
+        
+        # Stitch detection (YOLOv8) - combined with blueprint overlay
+        self.stitch_detector = StitchDetector()
+        self.detection_enabled = True  # AI detection enabled by default
+        self.show_detection_info = True  # Show info to see both features working
         
         # Camera display area (centered, with borders)
         self.camera_width = 560
@@ -592,7 +598,16 @@ class SewBotApp:
             else:
                 cam_frame = cv2.resize(cam_frame, (self.camera_width, self.camera_height))
                 
-                # Apply blueprint overlay
+                # Apply AI stitch detection (visible with colored masks)
+                detection_count = 0
+                if self.detection_enabled and self.stitch_detector.is_loaded():
+                    cam_frame, detection_count, _ = self.stitch_detector.detect(
+                        cam_frame, 
+                        show_boxes=False, 
+                        show_labels=False
+                    )
+                
+                # Apply blueprint overlay (semi-transparent to see AI detection)
                 overlay, alpha = self.load_blueprint(self.current_level)
                 if overlay is not None and alpha is not None:
                     overlay_h, overlay_w = overlay.shape[:2]
@@ -605,6 +620,28 @@ class SewBotApp:
                             roi[:, :, c] = (alpha * overlay[:, :, c] * self.alpha_blend + 
                                           (1 - alpha * self.alpha_blend) * roi[:, :, c])
                         cam_frame[y_offset:y_offset+overlay_h, x_offset:x_offset+overlay_w] = roi
+                
+                # Display combined info (AI Detection + Blueprint)
+                if self.show_detection_info:
+                    # AI Detection status (top-left)
+                    ai_status = f'AI: {detection_count} stitches' if self.detection_enabled else 'AI: OFF'
+                    ai_color = (0, 255, 0) if self.detection_enabled else (100, 100, 100)
+                    cv2.putText(cam_frame, ai_status, (10, 25), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, ai_color, 2)
+                    
+                    # Blueprint status (top-right)
+                    blueprint_status = f'Blueprint: LVL {self.current_level}'
+                    text_size = cv2.getTextSize(blueprint_status, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
+                    cv2.putText(cam_frame, blueprint_status, 
+                               (self.camera_width - text_size[0] - 10, 25), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+                    
+                    # Help text (bottom)
+                    help_text = "D:Toggle AI | I:Hide Info | +/-:Confidence"
+                    help_size = cv2.getTextSize(help_text, cv2.FONT_HERSHEY_SIMPLEX, 0.4, 1)[0]
+                    cv2.putText(cam_frame, help_text, 
+                               ((self.camera_width - help_size[0]) // 2, self.camera_height - 10), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
                 
                 frame[self.camera_y:self.camera_y+self.camera_height, 
                       self.camera_x:self.camera_x+self.camera_width] = cam_frame
@@ -659,6 +696,19 @@ class SewBotApp:
                 # Check if window was closed (X button clicked)
                 # This needs to be checked after imshow
                 key = cv2.waitKey(30)
+                
+                # Handle keyboard shortcuts for pattern mode
+                if self.state == 'pattern':
+                    if key == ord('d') or key == ord('D'):
+                        self.detection_enabled = not self.detection_enabled
+                        status = "enabled" if self.detection_enabled else "disabled"
+                        print(f"AI Detection {status}")
+                    elif key == ord('+') or key == ord('='):
+                        self.stitch_detector.increase_confidence()
+                    elif key == ord('-') or key == ord('_'):
+                        self.stitch_detector.decrease_confidence()
+                    elif key == ord('i') or key == ord('I'):
+                        self.show_detection_info = not self.show_detection_info
                 
                 # Check window property to detect X button click
                 try:
