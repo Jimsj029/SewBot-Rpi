@@ -225,6 +225,9 @@ class PatternMode:
             cam_frame = cv2.resize(camera_frame, (self.camera_width, self.camera_height))
             
             # Detect cloth of selected color
+            cloth_center_x = None
+            cloth_center_y = None
+            
             if self.selected_fabric_color:
                 self.cloth_mask = self.detect_cloth(cam_frame)
                 
@@ -233,15 +236,38 @@ class PatternMode:
                     # Find contours and draw only the outline
                     contours, _ = cv2.findContours(self.cloth_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                     cv2.drawContours(cam_frame, contours, -1, (0, 255, 0), 3)
+                    
+                    # Calculate the center of the detected cloth
+                    if len(contours) > 0:
+                        # Find the largest contour (main cloth piece)
+                        largest_contour = max(contours, key=cv2.contourArea)
+                        
+                        # Calculate moments to find centroid
+                        M = cv2.moments(largest_contour)
+                        if M["m00"] != 0:
+                            cloth_center_x = int(M["m10"] / M["m00"])
+                            cloth_center_y = int(M["m01"] / M["m00"])
             
             # Apply blueprint overlay
             overlay, alpha = self.load_blueprint(self.current_level)
             if overlay is not None and alpha is not None:
                 overlay_h, overlay_w = overlay.shape[:2]
-                x_offset = (self.camera_width - overlay_w) // 2
-                y_offset = (self.camera_height - overlay_h) // 2
                 
-                if x_offset >= 0 and y_offset >= 0:
+                # If cloth is detected, center on cloth; otherwise center on camera frame
+                if cloth_center_x is not None and cloth_center_y is not None:
+                    # Center overlay on detected cloth
+                    x_offset = cloth_center_x - overlay_w // 2
+                    y_offset = cloth_center_y - overlay_h // 2
+                    
+                    # Clamp to camera bounds
+                    x_offset = max(0, min(x_offset, self.camera_width - overlay_w))
+                    y_offset = max(0, min(y_offset, self.camera_height - overlay_h))
+                else:
+                    # Default: center on camera frame
+                    x_offset = (self.camera_width - overlay_w) // 2
+                    y_offset = (self.camera_height - overlay_h) // 2
+                
+                if x_offset >= 0 and y_offset >= 0 and x_offset + overlay_w <= self.camera_width and y_offset + overlay_h <= self.camera_height:
                     roi = cam_frame[y_offset:y_offset+overlay_h, x_offset:x_offset+overlay_w]
                     for c in range(3):
                         roi[:, :, c] = (alpha * overlay[:, :, c] * self.alpha_blend + 
