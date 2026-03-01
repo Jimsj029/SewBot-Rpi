@@ -13,6 +13,7 @@ import threading
 # Add ui directory to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'ui'))
 from tutorial import TutorialPlayer
+from wallet_tutorial import WalletTutorialPlayer
 from pattern_mode import PatternMode
 
 
@@ -21,12 +22,15 @@ class SewBotApp:
         self.width = 1024
         self.height = 600
         self.window_name = 'SewBot - Pattern Recognition System'
-        self.state = 'main_menu'  # main_menu, tutorial, mode_selection, pattern
+        self.state = 'main_menu'  # main_menu, tutorial, wallet_tutorial, mode_selection, pattern
         self.glow_phase = 0
         self.running = True
         
         # Tutorial player - initialize with tutorial videos from videos/sewing-set-up
         self.tutorial_player = TutorialPlayer(self.width, self.height)
+        
+        # Wallet tutorial player - initialize with wallet videos
+        self.wallet_tutorial_player = WalletTutorialPlayer(self.width, self.height)
         
         # Camera variables
         self.camera = None
@@ -151,6 +155,20 @@ class SewBotApp:
                     self.state = 'mode_selection'
                 elif action == 'replay':
                     self.tutorial_player.reset()
+            
+            elif self.state == 'wallet_tutorial':
+                # Check back button first
+                bb = self.back_button
+                if bb['x'] <= x <= bb['x'] + bb['w'] and bb['y'] <= y <= bb['y'] + bb['h']:
+                    self.state = 'mode_selection'
+                    return
+                    
+                # Handle wallet tutorial clicks
+                action = self.wallet_tutorial_player.handle_click(x, y)
+                if action == 'continue':
+                    self.state = 'mode_selection'
+                elif action == 'replay':
+                    self.wallet_tutorial_player.reset()
                     
             elif self.state == 'mode_selection':
                 # Check quit button
@@ -169,8 +187,9 @@ class SewBotApp:
                 
                 wb = self.wallet_button
                 if wb['x'] <= x <= wb['x'] + wb['w'] and wb['y'] <= y <= wb['y'] + wb['h']:
-                    # Wallet mode not implemented yet
-                    print("Wallet mode - Coming soon!")
+                    # Go to wallet tutorial
+                    self.state = 'wallet_tutorial'
+                    self.wallet_tutorial_player.reset()
                 
                 tb = self.tutorial_button
                 if tb['x'] <= x <= tb['x'] + tb['w'] and tb['y'] <= y <= tb['y'] + tb['h']:
@@ -391,6 +410,16 @@ class SewBotApp:
         # Draw back button
         self.draw_back_button(frame)
     
+    def draw_wallet_tutorial(self, frame):
+        # Use pre-rendered grid background
+        frame[:] = self.grid_background
+        
+        # Draw wallet tutorial player
+        self.wallet_tutorial_player.draw(frame)
+        
+        # Draw back button
+        self.draw_back_button(frame)
+    
     def draw_mode_selection(self, frame):
         # Use pre-rendered grid background
         frame[:] = self.grid_background
@@ -492,6 +521,8 @@ class SewBotApp:
                     self.draw_main_menu(frame)
                 elif self.state == 'tutorial':
                     self.draw_tutorial(frame)
+                elif self.state == 'wallet_tutorial':
+                    self.draw_wallet_tutorial(frame)
                 elif self.state == 'mode_selection':
                     self.draw_mode_selection(frame)
                 elif self.state == 'pattern':
@@ -530,6 +561,7 @@ class SewBotApp:
         
         self.release_camera()
         self.tutorial_player.cleanup()
+        self.wallet_tutorial_player.cleanup()
         cv2.destroyAllWindows()
         print("Program closed.")
 
