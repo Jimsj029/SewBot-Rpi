@@ -51,8 +51,8 @@ class WalletTutorialPlayer:
         self.progress_bar = {'x': 0, 'y': 0, 'w': 0, 'h': 0}
         
         # Multi-video support for wallet tutorial steps
-        self.current_step = 0  # Current video index (0-8 for 9 videos)
-        self.total_steps = 9  # Wallet has 9 steps
+        self.current_step = 0  # Current video index (0-10 for 11 videos)
+        self.total_steps = 11  # Wallet: Materials + 9 steps + Showcase
         self.videos_base_path = r'c:\Users\Ron Cristian Mendoza\Downloads\Steps Wallet-20260301T072112Z-1-001\Steps Wallet'
         self.video_files = []  # Will store paths to wallet videos
         self.load_video_list()
@@ -129,12 +129,32 @@ class WalletTutorialPlayer:
         }
     
     def load_video_list(self):
-        """Load the list of wallet tutorial video files (Step 1 Wallet through Step 9)"""
+        """Load the list of wallet tutorial video files (Materials + Step 1-9 + Showcase)"""
         self.video_files = []
         
-        # Check for wallet tutorial videos
-        for i in range(1, self.total_steps + 1):
-            # Try different naming patterns
+        # Step 0: Wallet Materials video
+        materials_patterns = [
+            'Wallet Materials.mp4',
+            'Wallet Materials.MP4',
+            'Wallet Materials.mov',
+            'Wallet Materials.MOV',
+            'wallet materials.mp4',
+            'wallet materials.MP4',
+        ]
+        materials_found = False
+        for pattern in materials_patterns:
+            video_path = os.path.join(self.videos_base_path, pattern)
+            if os.path.exists(video_path):
+                self.video_files.append(video_path)
+                materials_found = True
+                print(f"Found wallet materials video: {pattern}")
+                break
+        if not materials_found:
+            self.video_files.append(None)
+            print(f"Warning: Wallet Materials video not found in {self.videos_base_path}")
+        
+        # Steps 1-9: Wallet construction steps
+        for i in range(1, 10):  # Steps 1 through 9
             video_found = False
             patterns = []
             
@@ -171,9 +191,33 @@ class WalletTutorialPlayer:
                     break
             
             if not video_found:
-                # Add None as placeholder if video not found
                 self.video_files.append(None)
                 print(f"Warning: wallet step{i} video not found in {self.videos_base_path}")
+        
+        # Step 10: Showcase video
+        showcase_patterns = [
+            'Showcase .mp4',  # Note the space in the filename
+            'Showcase.mp4',
+            'Showcase .MP4',
+            'Showcase.MP4',
+            'Showcase .mov',
+            'Showcase.mov',
+            'Showcase .MOV',
+            'Showcase.MOV',
+            'showcase.mp4',
+            'showcase.MP4',
+        ]
+        showcase_found = False
+        for pattern in showcase_patterns:
+            video_path = os.path.join(self.videos_base_path, pattern)
+            if os.path.exists(video_path):
+                self.video_files.append(video_path)
+                showcase_found = True
+                print(f"Found wallet showcase video: {pattern}")
+                break
+        if not showcase_found:
+            self.video_files.append(None)
+            print(f"Warning: Showcase video not found in {self.videos_base_path}")
     
     def load_current_video(self):
         """Load the video for the current step"""
@@ -546,9 +590,17 @@ class WalletTutorialPlayer:
             self.draw_button(img, self.continue_button, COLORS['button_hover'])
     
     def draw_step_indicator(self, img):
-        """Draw step indicator showing current progress (Step 1/9, etc.)"""
+        """Draw step indicator showing current progress (Materials, Step 1-9, Showcase)"""
         font = cv2.FONT_HERSHEY_DUPLEX
-        text = f"Wallet Step {self.current_step + 1} of {self.total_steps}"
+        
+        # Determine the text based on current step
+        if self.current_step == 0:
+            text = "Wallet Materials"
+        elif self.current_step == self.total_steps - 1:
+            text = "Wallet Showcase"
+        else:
+            text = f"Wallet Step {self.current_step} of {self.total_steps - 2}"  # -2 for materials and showcase
+        
         font_scale = 0.8
         thickness = 2
         
