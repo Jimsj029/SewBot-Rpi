@@ -6,6 +6,7 @@ import cv2
 import numpy as np
 import math
 import os
+from ultralytics import YOLO
 
 
 class PatternMode:
@@ -69,6 +70,15 @@ class PatternMode:
         
         self.selected_fabric_color = None
         self.cloth_mask = None  # Mask of detected cloth
+        
+        # Load YOLO model
+        try:
+            model_path = os.path.join(os.path.dirname(__file__), 'best.pt')
+            self.yolo_model = YOLO(model_path)
+            print(f"YOLOv8 model loaded: {model_path}")
+        except Exception as e:
+            print(f"Warning: Could not load YOLO model: {e}")
+            self.yolo_model = None
         
         # Create color buttons (adjusted to fit in panel)
         self.color_buttons = []
@@ -224,55 +234,139 @@ class PatternMode:
         else:
             cam_frame = cv2.resize(camera_frame, (self.camera_width, self.camera_height))
             
-            # Detect cloth of selected color
-            cloth_center_x = None
-            cloth_center_y = None
-            
+            # Detect fabric to center pattern mask
+            fabric_centroid = None
             if self.selected_fabric_color:
                 self.cloth_mask = self.detect_cloth(cam_frame)
-                
-                # Draw green outline around detected cloth
                 if self.cloth_mask is not None:
-                    # Find contours and draw only the outline
+                    # Find largest contour (main fabric piece)
                     contours, _ = cv2.findContours(self.cloth_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                    cv2.drawContours(cam_frame, contours, -1, (0, 255, 0), 3)
-                    
-                    # Calculate the center of the detected cloth
-                    if len(contours) > 0:
-                        # Find the largest contour (main cloth piece)
+                    if contours:
                         largest_contour = max(contours, key=cv2.contourArea)
-                        
-                        # Calculate moments to find centroid
+                        # Get centroid of fabric
                         M = cv2.moments(largest_contour)
                         if M["m00"] != 0:
-                            cloth_center_x = int(M["m10"] / M["m00"])
-                            cloth_center_y = int(M["m01"] / M["m00"])
+                            fabric_centroid = (int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"]))
+                            # Draw fabric outline
+                            cv2.drawContours(cam_frame, [largest_contour], -1, (0, 255, 0), 2)
             
-            # Apply blueprint overlay
-            overlay, alpha = self.load_blueprint(self.current_level)
-            if overlay is not None and alpha is not None:
-                overlay_h, overlay_w = overlay.shape[:2]
-                
-                # If cloth is detected, center on cloth; otherwise center on camera frame
-                if cloth_center_x is not None and cloth_center_y is not None:
-                    # Center overlay on detected cloth
-                    x_offset = cloth_center_x - overlay_w // 2
-                    y_offset = cloth_center_y - overlay_h // 2
+            # Load pattern mask for comparison
+            pattern_overlay, pattern_alpha = self.load_blueprint(self.current_level)
+            
+            # Run YOLO stitch detection
+            detected_stitches = []
+            stitch_positions = []
+            
+            if self.yolo_model is not None:
+                try:
+                    results = self.yolo_model(cam_frame, verbose=False)
                     
+                    for result in results:
+                        # Check if model has masks (segmentation)
+                        if hasattr(result, 'masks') and result.masks is not None:
+                            masks = result.masks.data.cpu().numpy()
+                            boxes = result.boxes
+                            
+                            for i, (mask, box) in enumerate(zip(masks, boxes)):
+                                conf = box.conf[0].cpu().numpy()
+                                cls = int(box.cls[0].cpu().numpy())
+                                
+                                # Resize mask to frame size
+                                mask_resized = cv2.resize(mask, (self.camera_width, self.camera_height))
+                                mask_binary = (mask_resized > 0.5).astype(np.uint8)
+                                
+                                # Get center of stitch for comparison
+                                M = cv2.moments(mask_binary)
+                                if M["m00"] != 0:
+                                    cx = int(M["m10"] / M["m00"])
+                                    cy = int(M["m01"] / M["m00"])
+                                    stitch_positions.append((cx, cy))
+                                
+                                detected_stitches.append({
+                                    'mask': mask_binary,
+                                    'confidence': float(conf),
+                                    'class': cls
+                                })
+                        
+                        # If no segmentation, use bounding boxes as stitch locations
+                        elif hasattr(result, 'boxes') and result.boxes is not None:
+                            boxes = result.boxes
+                            for box in boxes:
+                                x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                                conf = box.conf[0].cpu().numpy()
+                                cls = int(box.cls[0].cpu().numpy())
+                                
+                                # Draw stitch point at center of box
+                                center_x = int((x1 + x2) / 2)
+                                center_y = int((y1 + y2) / 2)
+                                stitch_positions.append((center_x, center_y))
+                                
+                                detected_stitches.append({
+                                    'position': (center_x, center_y),
+                                    'confidence': float(conf),
+                                    'class': cls
+                                })
+                    
+                except Exception as e:
+                    print(f"YOLO stitch detection error: {e}")
+            
+            # Overlay pattern mask and compare with detected stitches
+            if pattern_overlay is not None and pattern_alpha is not None:
+                overlay_h, overlay_w = pattern_overlay.shape[:2]
+                
+                # Center pattern on fabric centroid if detected, otherwise center on camera
+                if fabric_centroid is not None:
+                    x_offset = fabric_centroid[0] - (overlay_w // 2)
+                    y_offset = fabric_centroid[1] - (overlay_h // 2)
                     # Clamp to camera bounds
                     x_offset = max(0, min(x_offset, self.camera_width - overlay_w))
                     y_offset = max(0, min(y_offset, self.camera_height - overlay_h))
                 else:
-                    # Default: center on camera frame
+                    # Fallback to center of camera
                     x_offset = (self.camera_width - overlay_w) // 2
                     y_offset = (self.camera_height - overlay_h) // 2
                 
                 if x_offset >= 0 and y_offset >= 0 and x_offset + overlay_w <= self.camera_width and y_offset + overlay_h <= self.camera_height:
+                    # Create pattern mask for comparison
+                    pattern_mask_full = np.zeros((self.camera_height, self.camera_width), dtype=np.uint8)
+                    pattern_mask_region = (pattern_alpha * 255).astype(np.uint8)
+                    pattern_mask_full[y_offset:y_offset+overlay_h, x_offset:x_offset+overlay_w] = pattern_mask_region
+                    
+                    # Compare detected stitches with pattern (pixel-perfect accuracy)
+                    correct_stitches = 0
+                    total_stitches = len(stitch_positions)
+                    
+                    for sx, sy in stitch_positions:
+                        # Pixel-perfect check (tolerance = 1 pixel)
+                        tolerance = 1
+                        y_min = max(0, sy - tolerance)
+                        y_max = min(self.camera_height, sy + tolerance + 1)
+                        x_min = max(0, sx - tolerance)
+                        x_max = min(self.camera_width, sx + tolerance + 1)
+                        
+                        region = pattern_mask_full[y_min:y_max, x_min:x_max]
+                        if np.any(region > 0):
+                            correct_stitches += 1
+                            # Mark correct stitch with green
+                            cv2.circle(cam_frame, (sx, sy), 4, (0, 255, 0), -1)
+                        else:
+                            # Mark incorrect stitch with red
+                            cv2.circle(cam_frame, (sx, sy), 4, (0, 0, 255), -1)
+                    
+                    # Apply pattern overlay (semi-transparent white lines)
                     roi = cam_frame[y_offset:y_offset+overlay_h, x_offset:x_offset+overlay_w]
                     for c in range(3):
-                        roi[:, :, c] = (alpha * overlay[:, :, c] * self.alpha_blend + 
-                                      (1 - alpha * self.alpha_blend) * roi[:, :, c])
+                        roi[:, :, c] = (pattern_alpha * pattern_overlay[:, :, c] * 0.5 + 
+                                      (1 - pattern_alpha * 0.5) * roi[:, :, c])
                     cam_frame[y_offset:y_offset+overlay_h, x_offset:x_offset+overlay_w] = roi
+                    
+                    # Display accuracy feedback
+                    if total_stitches > 0:
+                        accuracy = (correct_stitches / total_stitches) * 100
+                        accuracy_text = f"Accuracy: {accuracy:.1f}% ({correct_stitches}/{total_stitches})"
+                        accuracy_color = (0, 255, 0) if accuracy >= 80 else (0, 165, 255) if accuracy >= 60 else (0, 0, 255)
+                        cv2.putText(cam_frame, accuracy_text, (10, self.camera_height - 20),
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, accuracy_color, 2)
             
             frame[self.camera_y:self.camera_y+self.camera_height, 
                   self.camera_x:self.camera_x+self.camera_width] = cam_frame
