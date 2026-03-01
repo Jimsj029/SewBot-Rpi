@@ -13,6 +13,7 @@ import threading
 # Add ui directory to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'ui'))
 from tutorial import TutorialPlayer
+from pattern_mode import PatternMode
 
 
 class SewBotApp:
@@ -27,22 +28,11 @@ class SewBotApp:
         # Tutorial player - initialize with tutorial videos from videos/sewing-set-up
         self.tutorial_player = TutorialPlayer(self.width, self.height)
         
-        # Pattern mode variables
-        self.current_level = 1
+        # Camera variables
         self.camera = None
         self.camera_initializing = False
         self.camera_detected = False
         self.camera_status_message = "Checking camera..."
-        self.blueprint_folder = 'blueprint'
-        self.uniform_width = 200
-        self.uniform_height = 300
-        self.alpha_blend = 0.9
-        
-        # Camera display area (centered, with borders)
-        self.camera_width = 560
-        self.camera_height = 420
-        self.camera_x = (self.width - self.camera_width) // 2
-        self.camera_y = 80
         
         # Theme colors
         self.COLORS = {
@@ -99,22 +89,8 @@ class SewBotApp:
         self.back_button = {'x': 20, 'y': self.height - 60, 'w': 120, 'h': 40}
         self.quit_button = {'x': self.width - 140, 'y': self.height - 60, 'w': 120, 'h': 40}
         
-        # Level buttons for pattern mode (horizontal layout at top)
-        self.level_buttons = []
-        button_width, button_height = 70, 45
-        spacing = 15
-        total_width = (button_width * 5) + (spacing * 4)
-        start_x = (self.width - total_width) // 2
-        start_y = 20
-        
-        for i in range(1, 6):
-            self.level_buttons.append({
-                'level': i,
-                'x': start_x + (button_width + spacing) * (i - 1),
-                'y': start_y,
-                'w': button_width,
-                'h': button_height
-            })
+        # Pattern mode - separate module
+        self.pattern_mode = PatternMode(self.width, self.height, self.COLORS, 'blueprint')
         
         # Pre-render grid background (performance optimization)
         self.grid_background = self.create_grid_background()
@@ -207,15 +183,9 @@ class SewBotApp:
                     self.state = 'main_menu'
                     
             elif self.state == 'pattern':
-                # Check level buttons
-                for btn in self.level_buttons:
-                    if btn['x'] <= x <= btn['x'] + btn['w'] and btn['y'] <= y <= btn['y'] + btn['h']:
-                        self.current_level = btn['level']
-                        break
-                
-                # Check back button
-                bb = self.back_button
-                if bb['x'] <= x <= bb['x'] + bb['w'] and bb['y'] <= y <= bb['y'] + bb['h']:
+                # Handle pattern mode clicks
+                result = self.pattern_mode.handle_click(x, y)
+                if result == 'back':
                     self.release_camera()
                     self.state = 'mode_selection'
     
@@ -315,28 +285,6 @@ class SewBotApp:
             self.camera.release()
             self.camera = None
             print("Camera released")
-    
-    def load_blueprint(self, level):
-        # Load binary mask instead of original PNG
-        mask_path = os.path.join(self.blueprint_folder, f'level{level}_mask.png')
-        if not os.path.exists(mask_path):
-            return None, None
-        
-        # Load binary mask as grayscale
-        mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
-        if mask is None:
-            return None, None
-        
-        # Resize mask
-        mask = cv2.resize(mask, (self.uniform_width, self.uniform_height))
-        
-        # Convert mask to BGR for overlay (white lines will show)
-        overlay = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
-        
-        # Use mask itself as alpha channel (white=opaque, black=transparent)
-        alpha = mask / 255.0
-        
-        return overlay, alpha
     
     def draw_glow_rect(self, img, x, y, w, h, color, glow_intensity):
         """Optimized glow - reduced iterations"""
@@ -527,107 +475,6 @@ class SewBotApp:
             line_y = start_y + i * line_height
             cv2.putText(img, line, (line_x, line_y), cv2.FONT_HERSHEY_SIMPLEX, desc_font_scale, self.COLORS['text_secondary'], desc_thickness)
     
-    def draw_pattern_mode(self, frame):
-        # Use pre-rendered grid background
-        frame[:] = self.grid_background
-        
-        # Draw level buttons at top
-        for btn in self.level_buttons:
-            is_selected = (btn['level'] == self.current_level)
-            pulse = 0.5 + 0.5 * abs(math.sin(self.glow_phase * 1.3))
-            
-            if is_selected:
-                self.draw_glow_rect(frame, btn['x'], btn['y'], btn['w'], btn['h'], self.COLORS['neon_blue'], pulse)
-                
-                overlay = frame.copy()
-                cv2.rectangle(overlay, (btn['x'] + 2, btn['y'] + 2), (btn['x'] + btn['w'] - 2, btn['y'] + btn['h'] - 2), self.COLORS['button_hover'], -1)
-                cv2.addWeighted(overlay, 0.8, frame, 0.2, 0, frame)
-                
-                text = f"LVL {btn['level']}"
-                font_scale, thickness = 0.7, 2
-                (text_w, text_h), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_DUPLEX, font_scale, thickness)
-                text_x = btn['x'] + (btn['w'] - text_w) // 2
-                text_y = btn['y'] + (btn['h'] + text_h) // 2
-                cv2.putText(frame, text, (text_x, text_y), cv2.FONT_HERSHEY_DUPLEX, font_scale, self.COLORS['glow_cyan'], thickness + 1)
-                cv2.putText(frame, text, (text_x, text_y), cv2.FONT_HERSHEY_DUPLEX, font_scale, self.COLORS['text_primary'], thickness)
-            else:
-                cv2.rectangle(frame, (btn['x'], btn['y']), (btn['x'] + btn['w'], btn['y'] + btn['h']), self.COLORS['medium_blue'], 2)
-                
-                overlay = frame.copy()
-                cv2.rectangle(overlay, (btn['x'] + 2, btn['y'] + 2), (btn['x'] + btn['w'] - 2, btn['y'] + btn['h'] - 2), self.COLORS['dark_blue'], -1)
-                cv2.addWeighted(overlay, 0.5, frame, 0.5, 0, frame)
-                
-                text = f"LVL {btn['level']}"
-                font_scale, thickness = 0.7, 1
-                (text_w, text_h), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_DUPLEX, font_scale, thickness)
-                text_x = btn['x'] + (btn['w'] - text_w) // 2
-                text_y = btn['y'] + (btn['h'] + text_h) // 2
-                cv2.putText(frame, text, (text_x, text_y), cv2.FONT_HERSHEY_DUPLEX, font_scale, self.COLORS['text_secondary'], thickness)
-        
-        # Draw camera frame border with glow effect
-        border_pulse = 0.4 + 0.3 * abs(math.sin(self.glow_phase * 0.7))
-        self.draw_glow_rect(frame, self.camera_x - 5, self.camera_y - 5, 
-                           self.camera_width + 10, self.camera_height + 10, 
-                           self.COLORS['bright_blue'], border_pulse)
-        
-        # Get and display camera feed
-        if self.camera is None or not self.camera.isOpened():
-            cv2.rectangle(frame, (self.camera_x, self.camera_y), 
-                         (self.camera_x + self.camera_width, self.camera_y + self.camera_height), 
-                         self.COLORS['dark_blue'], -1)
-            text = "Initializing camera..." if self.camera_initializing else "Camera not available"
-            cv2.putText(frame, text, (self.camera_x + 80, self.camera_y + self.camera_height // 2), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, self.COLORS['text_primary'], 2)
-        else:
-            ret, cam_frame = self.camera.read()
-            if not ret:
-                cv2.rectangle(frame, (self.camera_x, self.camera_y), 
-                             (self.camera_x + self.camera_width, self.camera_y + self.camera_height), 
-                             self.COLORS['dark_blue'], -1)
-                cv2.putText(frame, "Failed to read camera", (self.camera_x + 100, self.camera_y + self.camera_height // 2), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.8, self.COLORS['text_primary'], 2)
-            else:
-                cam_frame = cv2.resize(cam_frame, (self.camera_width, self.camera_height))
-                
-                # Apply blueprint overlay
-                overlay, alpha = self.load_blueprint(self.current_level)
-                if overlay is not None and alpha is not None:
-                    overlay_h, overlay_w = overlay.shape[:2]
-                    x_offset = (self.camera_width - overlay_w) // 2
-                    y_offset = (self.camera_height - overlay_h) // 2
-                    
-                    if x_offset >= 0 and y_offset >= 0:
-                        roi = cam_frame[y_offset:y_offset+overlay_h, x_offset:x_offset+overlay_w]
-                        for c in range(3):
-                            roi[:, :, c] = (alpha * overlay[:, :, c] * self.alpha_blend + 
-                                          (1 - alpha * self.alpha_blend) * roi[:, :, c])
-                        cam_frame[y_offset:y_offset+overlay_h, x_offset:x_offset+overlay_w] = roi
-                
-                frame[self.camera_y:self.camera_y+self.camera_height, 
-                      self.camera_x:self.camera_x+self.camera_width] = cam_frame
-        
-        # Draw corner accents
-        corner_size = 25
-        corner_thickness = 3
-        cv2.line(frame, (self.camera_x - 15, self.camera_y - 15), 
-                (self.camera_x - 15 + corner_size, self.camera_y - 15), self.COLORS['cyan'], corner_thickness)
-        cv2.line(frame, (self.camera_x - 15, self.camera_y - 15), 
-                (self.camera_x - 15, self.camera_y - 15 + corner_size), self.COLORS['cyan'], corner_thickness)
-        cv2.line(frame, (self.camera_x + self.camera_width + 15, self.camera_y - 15), 
-                (self.camera_x + self.camera_width + 15 - corner_size, self.camera_y - 15), self.COLORS['cyan'], corner_thickness)
-        cv2.line(frame, (self.camera_x + self.camera_width + 15, self.camera_y - 15), 
-                (self.camera_x + self.camera_width + 15, self.camera_y - 15 + corner_size), self.COLORS['cyan'], corner_thickness)
-        cv2.line(frame, (self.camera_x - 15, self.camera_y + self.camera_height + 15), 
-                (self.camera_x - 15 + corner_size, self.camera_y + self.camera_height + 15), self.COLORS['cyan'], corner_thickness)
-        cv2.line(frame, (self.camera_x - 15, self.camera_y + self.camera_height + 15), 
-                (self.camera_x - 15, self.camera_y + self.camera_height + 15 - corner_size), self.COLORS['cyan'], corner_thickness)
-        cv2.line(frame, (self.camera_x + self.camera_width + 15, self.camera_y + self.camera_height + 15), 
-                (self.camera_x + self.camera_width + 15 - corner_size, self.camera_y + self.camera_height + 15), self.COLORS['cyan'], corner_thickness)
-        cv2.line(frame, (self.camera_x + self.camera_width + 15, self.camera_y + self.camera_height + 15), 
-                (self.camera_x + self.camera_width + 15, self.camera_y + self.camera_height + 15 - corner_size), self.COLORS['cyan'], corner_thickness)
-        
-        self.draw_back_button(frame)
-    
     def run(self):
         print("=" * 60)
         print("SEWBOT - PATTERN RECOGNITION SYSTEM")
@@ -648,7 +495,15 @@ class SewBotApp:
                 elif self.state == 'mode_selection':
                     self.draw_mode_selection(frame)
                 elif self.state == 'pattern':
-                    self.draw_pattern_mode(frame)
+                    # Get camera frame
+                    camera_frame = None
+                    if self.camera is not None and self.camera.isOpened():
+                        ret, camera_frame = self.camera.read()
+                        if not ret:
+                            camera_frame = None
+                    
+                    # Draw pattern mode
+                    self.pattern_mode.draw(frame, camera_frame, self.grid_background)
                 
                 self.glow_phase += 0.05
                 cv2.imshow(self.window_name, frame)
