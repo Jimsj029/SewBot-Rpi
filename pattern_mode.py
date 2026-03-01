@@ -23,39 +23,23 @@ class PatternMode:
         self.alpha_blend = 0.9
         self.glow_phase = 0
         
-        # Camera display area (centered)
+        # Level info display at top center
+        self.level_display_y = 30
+        
+        # Camera display area (centered, moved higher)
         self.camera_width = 560
         self.camera_height = 420
         self.camera_x = 216  # Centered horizontally (1000 - 560) // 2
-        self.camera_y = 80
+        self.camera_y = 80  # Moved up since no level buttons
         
         # Fabric color panel (right side of camera)
         self.color_panel_x = self.camera_x + self.camera_width + 37
-        self.color_panel_y = 100
+        self.color_panel_y = 90
         self.color_panel_width = 180
         self.color_panel_height = 400
         
         # Back button (top left)
         self.back_button = {'x': 20, 'y': 20, 'w': 120, 'h': 50}
-        
-        # Level buttons at top (centered over camera)
-        self.level_buttons = []
-        button_width = 80
-        button_height = 40
-        # Center buttons over camera area
-        buttons_total_width = (button_width * 5) + (20 * 4)
-        camera_center = self.camera_x + (self.camera_width // 2)
-        start_x = camera_center - (buttons_total_width // 2)
-        start_y = 20
-        
-        for i in range(1, 6):
-            self.level_buttons.append({
-                'level': i,
-                'x': start_x + (i - 1) * (button_width + 20),
-                'y': start_y,
-                'w': button_width,
-                'h': button_height
-            })
         
         # Fabric color detection settings
         self.fabric_colors = {
@@ -159,36 +143,33 @@ class PatternMode:
         # Increment glow phase for animations
         self.glow_phase += 0.05
         
-        # Draw level buttons at top
-        for btn in self.level_buttons:
-            is_selected = (btn['level'] == self.current_level)
-            pulse = 0.5 + 0.5 * abs(math.sin(self.glow_phase * 1.3))
-            
-            if is_selected:
-                self.draw_glow_rect(frame, btn['x'], btn['y'], btn['w'], btn['h'], self.COLORS['neon_blue'], pulse)
-                overlay = frame.copy()
-                cv2.rectangle(overlay, (btn['x'] + 2, btn['y'] + 2), (btn['x'] + btn['w'] - 2, btn['y'] + btn['h'] - 2), self.COLORS['button_hover'], -1)
-                cv2.addWeighted(overlay, 0.8, frame, 0.2, 0, frame)
-                
-                text = f"LVL {btn['level']}"
-                font_scale, thickness = 0.7, 2
-                (text_w, text_h), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_DUPLEX, font_scale, thickness)
-                text_x = btn['x'] + (btn['w'] - text_w) // 2
-                text_y = btn['y'] + (btn['h'] + text_h) // 2
-                cv2.putText(frame, text, (text_x, text_y), cv2.FONT_HERSHEY_DUPLEX, font_scale, self.COLORS['glow_cyan'], thickness + 1)
-                cv2.putText(frame, text, (text_x, text_y), cv2.FONT_HERSHEY_DUPLEX, font_scale, self.COLORS['text_primary'], thickness)
-            else:
-                cv2.rectangle(frame, (btn['x'], btn['y']), (btn['x'] + btn['w'], btn['y'] + btn['h']), self.COLORS['medium_blue'], 2)
-                overlay = frame.copy()
-                cv2.rectangle(overlay, (btn['x'] + 2, btn['y'] + 2), (btn['x'] + btn['w'] - 2, btn['y'] + btn['h'] - 2), self.COLORS['dark_blue'], -1)
-                cv2.addWeighted(overlay, 0.5, frame, 0.5, 0, frame)
-                
-                text = f"LVL {btn['level']}"
-                font_scale, thickness = 0.7, 1
-                (text_w, text_h), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_DUPLEX, font_scale, thickness)
-                text_x = btn['x'] + (btn['w'] - text_w) // 2
-                text_y = btn['y'] + (btn['h'] + text_h) // 2
-                cv2.putText(frame, text, (text_x, text_y), cv2.FONT_HERSHEY_DUPLEX, font_scale, self.COLORS['text_secondary'], thickness)
+        # Draw current level display at top center
+        level_text = f"LEVEL {self.current_level}"
+        difficulty_texts = ["EASY", "MEDIUM", "HARD", "EXPERT", "MASTER"]
+        difficulty_text = f"[ {difficulty_texts[self.current_level - 1]} ]"
+        
+        pulse = 0.6 + 0.4 * abs(math.sin(self.glow_phase * 0.8))
+        
+        font_scale = 1.2
+        thickness = 3
+        (level_w, level_h), _ = cv2.getTextSize(level_text, cv2.FONT_HERSHEY_DUPLEX, font_scale, thickness)
+        level_x = (self.width - level_w) // 2
+        level_y = self.level_display_y
+        
+        # Draw with glow effect
+        cv2.putText(frame, level_text, (level_x, level_y), cv2.FONT_HERSHEY_DUPLEX, 
+                   font_scale, self.COLORS['glow_cyan'], thickness + 1)
+        cv2.putText(frame, level_text, (level_x, level_y), cv2.FONT_HERSHEY_DUPLEX, 
+                   font_scale, self.COLORS['bright_blue'], thickness)
+        
+        # Draw difficulty text below
+        diff_font_scale = 0.6
+        diff_thickness = 1
+        (diff_w, diff_h), _ = cv2.getTextSize(difficulty_text, cv2.FONT_HERSHEY_SIMPLEX, diff_font_scale, diff_thickness)
+        diff_x = (self.width - diff_w) // 2
+        diff_y = level_y + 30
+        cv2.putText(frame, difficulty_text, (diff_x, diff_y), cv2.FONT_HERSHEY_SIMPLEX, 
+                   diff_font_scale, self.COLORS['text_secondary'], diff_thickness)
         
         # Draw back button (top left)
         self.draw_back_button(frame)
@@ -453,12 +434,6 @@ class PatternMode:
         bb = self.back_button
         if bb['x'] <= x <= bb['x'] + bb['w'] and bb['y'] <= y <= bb['y'] + bb['h']:
             return 'back'
-        
-        # Check level buttons
-        for btn in self.level_buttons:
-            if btn['x'] <= x <= btn['x'] + btn['w'] and btn['y'] <= y <= btn['y'] + btn['h']:
-                self.current_level = btn['level']
-                return 'level_changed'
         
         # Check color buttons
         for btn in self.color_buttons:
