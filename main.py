@@ -26,6 +26,7 @@ class SewBotApp:
         self.state = 'main_menu'  # main_menu, tutorial, wallet_tutorial, mode_selection, level_selection, pattern
         self.glow_phase = 0
         self.running = True
+        self.fullscreen = False  # Fullscreen state
         
         # Theme colors
         self.COLORS = {
@@ -104,7 +105,7 @@ class SewBotApp:
         self.grid_background = self.create_grid_background()
         
         try:
-            cv2.namedWindow(self.window_name)
+            cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
             cv2.setMouseCallback(self.window_name, self.mouse_callback)
         except:
             print("Failed to create window")
@@ -112,6 +113,16 @@ class SewBotApp:
         
         # Detect camera at startup
         self.detect_camera_at_startup()
+    
+    def toggle_fullscreen(self):
+        """Toggle between fullscreen and windowed mode"""
+        self.fullscreen = not self.fullscreen
+        if self.fullscreen:
+            cv2.setWindowProperty(self.window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+            print("Fullscreen mode enabled")
+        else:
+            cv2.setWindowProperty(self.window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_NORMAL)
+            print("Fullscreen mode disabled")
     
     def create_grid_background(self):
         """Pre-render grid background once for better performance"""
@@ -533,7 +544,10 @@ class SewBotApp:
         print("=" * 60)
         print("Optimized for Raspberry Pi")
         print(f"Camera Status: {self.camera_status_message}")
-        print("Click the X button to quit")
+        print("Controls:")
+        print("  - Press F to toggle fullscreen")
+        print("  - Press ESC to exit fullscreen or quit")
+        print("  - Click the X button to quit")
         print()
         
         while self.running:
@@ -566,7 +580,18 @@ class SewBotApp:
                 
                 # Check if window was closed (X button clicked)
                 # This needs to be checked after imshow
-                key = cv2.waitKey(30)
+                key = cv2.waitKey(30) & 0xFF
+                
+                # Handle keyboard shortcuts
+                if key == ord('f') or key == ord('F'):  # F key to toggle fullscreen
+                    self.toggle_fullscreen()
+                elif key == 27:  # ESC key to exit fullscreen or quit
+                    if self.fullscreen:
+                        self.toggle_fullscreen()
+                    else:
+                        print("ESC pressed - Exiting...")
+                        self.running = False
+                        break
                 
                 # Check window property to detect X button click
                 try:
