@@ -14,7 +14,6 @@ import threading
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'ui'))
 from tutorial import TutorialPlayer
 from wallet_tutorial import WalletTutorialPlayer
-from level_selection import LevelSelection
 from pattern_mode import PatternMode
 
 
@@ -23,7 +22,7 @@ class SewBotApp:
         self.width = 1024
         self.height = 600
         self.window_name = 'SewBot - Pattern Recognition System'
-        self.state = 'main_menu'  # main_menu, tutorial, wallet_tutorial, mode_selection, level_selection, pattern
+        self.state = 'main_menu'  # main_menu, tutorial, wallet_tutorial, mode_selection, pattern
         self.glow_phase = 0
         self.running = True
         
@@ -93,9 +92,6 @@ class SewBotApp:
         
         self.back_button = {'x': 20, 'y': self.height - 60, 'w': 120, 'h': 40}
         self.quit_button = {'x': self.width - 140, 'y': self.height - 60, 'w': 120, 'h': 40}
-        
-        # Level selection screen
-        self.level_selection = LevelSelection(self.width, self.height, self.COLORS)
         
         # Pattern mode - separate module
         self.pattern_mode = PatternMode(self.width, self.height, self.COLORS, 'blueprint')
@@ -184,8 +180,10 @@ class SewBotApp:
                 
                 pb = self.pattern_button
                 if pb['x'] <= x <= pb['x'] + pb['w'] and pb['y'] <= y <= pb['y'] + pb['h']:
-                    # Go to level selection instead of pattern mode directly
-                    self.state = 'level_selection'
+                    self.state = 'pattern'
+                    # Start camera initialization in background
+                    if self.camera is None and not self.camera_initializing:
+                        threading.Thread(target=self.init_camera, daemon=True).start()
                 
                 wb = self.wallet_button
                 if wb['x'] <= x <= wb['x'] + wb['w'] and wb['y'] <= y <= wb['y'] + wb['h']:
@@ -202,26 +200,13 @@ class SewBotApp:
                 bb = self.back_button
                 if bb['x'] <= x <= bb['x'] + bb['w'] and bb['y'] <= y <= bb['y'] + bb['h']:
                     self.state = 'main_menu'
-            
-            elif self.state == 'level_selection':
-                # Handle level selection clicks
-                action, level = self.level_selection.handle_click(x, y)
-                if action == 'back':
-                    self.state = 'mode_selection'
-                elif action == 'level_selected' and level is not None:
-                    # Set the level in pattern mode and transition to pattern state
-                    self.pattern_mode.current_level = level
-                    self.state = 'pattern'
-                    # Start camera initialization in background
-                    if self.camera is None and not self.camera_initializing:
-                        threading.Thread(target=self.init_camera, daemon=True).start()
                     
             elif self.state == 'pattern':
                 # Handle pattern mode clicks
                 result = self.pattern_mode.handle_click(x, y)
                 if result == 'back':
                     self.release_camera()
-                    self.state = 'level_selection'
+                    self.state = 'mode_selection'
     
     def detect_camera_at_startup(self):
         """Detect camera availability at app startup"""
@@ -540,9 +525,6 @@ class SewBotApp:
                     self.draw_wallet_tutorial(frame)
                 elif self.state == 'mode_selection':
                     self.draw_mode_selection(frame)
-                elif self.state == 'level_selection':
-                    # Draw level selection screen
-                    self.level_selection.draw(frame, self.grid_background)
                 elif self.state == 'pattern':
                     # Get camera frame
                     camera_frame = None
