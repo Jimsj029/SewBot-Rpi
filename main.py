@@ -500,7 +500,7 @@ class SewBotApp:
         title_font_scale, title_thickness = 1.0, 2
         (title_w, title_h), _ = cv2.getTextSize(button_data['title'], cv2.FONT_HERSHEY_DUPLEX, title_font_scale, title_thickness)
         title_x = x + (w - title_w) // 2
-        title_y = y + 35
+        title_y = y + 40  # Better vertical positioning
         
         # Title with glow
         cv2.putText(img, button_data['title'], (title_x, title_y), cv2.FONT_HERSHEY_DUPLEX, title_font_scale, self.COLORS['glow_cyan'], title_thickness + 2)
@@ -531,7 +531,7 @@ class SewBotApp:
         
         # Draw description lines
         line_height = 18
-        start_y = title_y + 20
+        start_y = title_y + 25  # More space below title
         for i, line in enumerate(lines):
             (line_w, line_h), _ = cv2.getTextSize(line, cv2.FONT_HERSHEY_SIMPLEX, desc_font_scale, desc_thickness)
             line_x = x + (w - line_w) // 2
