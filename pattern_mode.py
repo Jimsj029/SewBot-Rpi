@@ -6,7 +6,20 @@ import cv2
 import numpy as np
 import math
 import os
-from ultralytics import YOLO
+
+# Try to import ONNX wrapper first (for RPi), fallback to ultralytics
+try:
+    from onnx_yolo import ONNXYOLOModel
+    USE_ONNX = True
+    print("Using ONNX Runtime for inference")
+except ImportError:
+    try:
+        from ultralytics import YOLO
+        USE_ONNX = False
+        print("Using Ultralytics YOLO for inference")
+    except ImportError:
+        print("WARNING: Neither ONNX Runtime nor Ultralytics available!")
+        USE_ONNX = None
 
 
 class PatternMode:
@@ -40,29 +53,53 @@ class PatternMode:
         
         # Load stitch detection model
         try:
-            stitch_model_path = os.path.join(models_dir, 'stitch.pt')
+            # Try ONNX first (for RPi), then fallback to .pt
+            if USE_ONNX:
+                stitch_model_path = os.path.join(models_dir, 'stitch.onnx')
+            else:
+                stitch_model_path = os.path.join(models_dir, 'stitch.pt')
+            
             if os.path.exists(stitch_model_path):
-                self.stitch_model = YOLO(stitch_model_path)
+                if USE_ONNX:
+                    # Higher threshold for stitch detection to reduce false positives
+                    self.stitch_model = ONNXYOLOModel(stitch_model_path, conf_threshold=0.5)
+                else:
+                    self.stitch_model = YOLO(stitch_model_path)
                 print(f"✓ Stitch detection model loaded: {stitch_model_path}")
+                self.use_onnx_stitch = USE_ONNX
             else:
                 print(f"⚠ Stitch model not found: {stitch_model_path}")
                 self.stitch_model = None
+                self.use_onnx_stitch = False
         except Exception as e:
             print(f"Warning: Could not load stitch model: {e}")
             self.stitch_model = None
+            self.use_onnx_stitch = False
         
         # Load cloth detection model
         try:
-            cloth_model_path = os.path.join(models_dir, 'cloth.pt')
+            # Try ONNX first (for RPi), then fallback to .pt
+            if USE_ONNX:
+                cloth_model_path = os.path.join(models_dir, 'cloth.onnx')
+            else:
+                cloth_model_path = os.path.join(models_dir, 'cloth.pt')
+            
             if os.path.exists(cloth_model_path):
-                self.cloth_model = YOLO(cloth_model_path)
+                if USE_ONNX:
+                    # Lower threshold for cloth detection (broader detection is okay)
+                    self.cloth_model = ONNXYOLOModel(cloth_model_path, conf_threshold=0.3)
+                else:
+                    self.cloth_model = YOLO(cloth_model_path)
                 print(f"✓ Cloth detection model loaded: {cloth_model_path}")
+                self.use_onnx_cloth = USE_ONNX
             else:
                 print(f"⚠ Cloth model not found: {cloth_model_path}")
                 self.cloth_model = None
+                self.use_onnx_cloth = False
         except Exception as e:
             print(f"Warning: Could not load cloth model: {e}")
             self.cloth_model = None
+            self.use_onnx_cloth = False
         
         # Angle smoothing variables
         self.previous_angle = 0
