@@ -13,6 +13,9 @@ import threading
 # Add ui directory to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'ui'))
 from tutorial import TutorialPlayer
+from wallet_tutorial import WalletTutorialPlayer
+from level_selection import LevelSelection
+from pattern_mode import PatternMode
 
 
 class SewBotApp:
@@ -20,29 +23,9 @@ class SewBotApp:
         self.width = 1024
         self.height = 600
         self.window_name = 'SewBot - Pattern Recognition System'
-        self.state = 'main_menu'  # main_menu, tutorial, mode_selection, pattern
+        self.state = 'main_menu'  # main_menu, tutorial, wallet_tutorial, mode_selection, level_selection, pattern
         self.glow_phase = 0
         self.running = True
-        
-        # Tutorial player - initialize with tutorial videos from videos/sewing-set-up
-        self.tutorial_player = TutorialPlayer(self.width, self.height)
-        
-        # Pattern mode variables
-        self.current_level = 1
-        self.camera = None
-        self.camera_initializing = False
-        self.camera_detected = False
-        self.camera_status_message = "Checking camera..."
-        self.blueprint_folder = 'blueprint'
-        self.uniform_width = 200
-        self.uniform_height = 300
-        self.alpha_blend = 0.9
-        
-        # Camera display area (centered, with borders)
-        self.camera_width = 560
-        self.camera_height = 420
-        self.camera_x = (self.width - self.camera_width) // 2
-        self.camera_y = 80
         
         # Theme colors
         self.COLORS = {
@@ -60,6 +43,21 @@ class SewBotApp:
             'glow_cyan': (255, 255, 0),
             'glow_blue': (255, 150, 0),
         }
+        
+        # Tutorial player - initialize with tutorial videos from videos/sewing-set-up
+        self.tutorial_player = TutorialPlayer(self.width, self.height)
+        
+        # Wallet tutorial player - initialize with wallet videos
+        self.wallet_tutorial_player = WalletTutorialPlayer(self.width, self.height)
+        
+        # Level selection screen
+        self.level_selection = LevelSelection(self.width, self.height, self.COLORS)
+        
+        # Camera variables
+        self.camera = None
+        self.camera_initializing = False
+        self.camera_detected = False
+        self.camera_status_message = "Checking camera..."
         
         # Button positions
         self.start_button = {'x': (self.width - 300) // 2, 'y': self.height // 2 + 50, 'w': 300, 'h': 80}
@@ -99,22 +97,8 @@ class SewBotApp:
         self.back_button = {'x': 20, 'y': self.height - 60, 'w': 120, 'h': 40}
         self.quit_button = {'x': self.width - 140, 'y': self.height - 60, 'w': 120, 'h': 40}
         
-        # Level buttons for pattern mode (horizontal layout at top)
-        self.level_buttons = []
-        button_width, button_height = 70, 45
-        spacing = 15
-        total_width = (button_width * 5) + (spacing * 4)
-        start_x = (self.width - total_width) // 2
-        start_y = 20
-        
-        for i in range(1, 6):
-            self.level_buttons.append({
-                'level': i,
-                'x': start_x + (button_width + spacing) * (i - 1),
-                'y': start_y,
-                'w': button_width,
-                'h': button_height
-            })
+        # Pattern mode - separate module
+        self.pattern_mode = PatternMode(self.width, self.height, self.COLORS, 'blueprint')
         
         # Pre-render grid background (performance optimization)
         self.grid_background = self.create_grid_background()
@@ -175,6 +159,20 @@ class SewBotApp:
                     self.state = 'mode_selection'
                 elif action == 'replay':
                     self.tutorial_player.reset()
+            
+            elif self.state == 'wallet_tutorial':
+                # Check back button first
+                bb = self.back_button
+                if bb['x'] <= x <= bb['x'] + bb['w'] and bb['y'] <= y <= bb['y'] + bb['h']:
+                    self.state = 'mode_selection'
+                    return
+                    
+                # Handle wallet tutorial clicks
+                action = self.wallet_tutorial_player.handle_click(x, y)
+                if action == 'continue':
+                    self.state = 'mode_selection'
+                elif action == 'replay':
+                    self.wallet_tutorial_player.reset()
                     
             elif self.state == 'mode_selection':
                 # Check quit button
@@ -186,15 +184,16 @@ class SewBotApp:
                 
                 pb = self.pattern_button
                 if pb['x'] <= x <= pb['x'] + pb['w'] and pb['y'] <= y <= pb['y'] + pb['h']:
-                    self.state = 'pattern'
+                    self.state = 'level_selection'
                     # Start camera initialization in background
                     if self.camera is None and not self.camera_initializing:
                         threading.Thread(target=self.init_camera, daemon=True).start()
                 
                 wb = self.wallet_button
                 if wb['x'] <= x <= wb['x'] + wb['w'] and wb['y'] <= y <= wb['y'] + wb['h']:
-                    # Wallet mode not implemented yet
-                    print("Wallet mode - Coming soon!")
+                    # Go to wallet tutorial
+                    self.state = 'wallet_tutorial'
+                    self.wallet_tutorial_player.reset()
                 
                 tb = self.tutorial_button
                 if tb['x'] <= x <= tb['x'] + tb['w'] and tb['y'] <= y <= tb['y'] + tb['h']:
@@ -205,19 +204,22 @@ class SewBotApp:
                 bb = self.back_button
                 if bb['x'] <= x <= bb['x'] + bb['w'] and bb['y'] <= y <= bb['y'] + bb['h']:
                     self.state = 'main_menu'
+            
+            elif self.state == 'level_selection':
+                # Handle level selection clicks
+                action, value = self.level_selection.handle_click(x, y)
+                if action == 'back':
+                    self.state = 'mode_selection'
+                elif action == 'level_selected':  # Level number selected
+                    self.pattern_mode.current_level = value
+                    self.state = 'pattern'
                     
             elif self.state == 'pattern':
-                # Check level buttons
-                for btn in self.level_buttons:
-                    if btn['x'] <= x <= btn['x'] + btn['w'] and btn['y'] <= y <= btn['y'] + btn['h']:
-                        self.current_level = btn['level']
-                        break
-                
-                # Check back button
-                bb = self.back_button
-                if bb['x'] <= x <= bb['x'] + bb['w'] and bb['y'] <= y <= bb['y'] + bb['h']:
+                # Handle pattern mode clicks
+                result = self.pattern_mode.handle_click(x, y)
+                if result == 'back':
                     self.release_camera()
-                    self.state = 'mode_selection'
+                    self.state = 'level_selection'
     
     def detect_camera_at_startup(self):
         """Detect camera availability at app startup"""
@@ -315,31 +317,6 @@ class SewBotApp:
             self.camera.release()
             self.camera = None
             print("Camera released")
-    
-    def load_blueprint(self, level):
-        img_path = os.path.join(self.blueprint_folder, f'level{level}.png')
-        if not os.path.exists(img_path):
-            return None, None
-        
-        overlay_png = cv2.imread(img_path, cv2.IMREAD_UNCHANGED)
-        if overlay_png is None:
-            return None, None
-        
-        overlay_png = cv2.resize(overlay_png, (self.uniform_width, self.uniform_height))
-        
-        if len(overlay_png.shape) == 3 and overlay_png.shape[2] == 4:
-            overlay = overlay_png[:, :, :3]
-            alpha = overlay_png[:, :, 3] / 255.0
-        else:
-            if len(overlay_png.shape) == 2:
-                overlay_png = cv2.cvtColor(overlay_png, cv2.COLOR_GRAY2BGR)
-            overlay = overlay_png
-            gray = cv2.cvtColor(overlay_png, cv2.COLOR_BGR2GRAY)
-            # Apply threshold to show only lines, not background
-            _, binary = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
-            alpha = (255 - binary) / 255.0
-        
-        return overlay, alpha
     
     def draw_glow_rect(self, img, x, y, w, h, color, glow_intensity):
         """Optimized glow - reduced iterations"""
@@ -446,6 +423,20 @@ class SewBotApp:
         # Draw back button
         self.draw_back_button(frame)
     
+    def draw_wallet_tutorial(self, frame):
+        # Use pre-rendered grid background
+        frame[:] = self.grid_background
+        
+        # Draw wallet tutorial player
+        self.wallet_tutorial_player.draw(frame)
+        
+        # Draw back button
+        self.draw_back_button(frame)
+    
+    def draw_level_selection(self, frame):
+        """Draw level selection screen"""
+        self.level_selection.draw(frame, self.grid_background)
+    
     def draw_mode_selection(self, frame):
         # Use pre-rendered grid background
         frame[:] = self.grid_background
@@ -530,107 +521,6 @@ class SewBotApp:
             line_y = start_y + i * line_height
             cv2.putText(img, line, (line_x, line_y), cv2.FONT_HERSHEY_SIMPLEX, desc_font_scale, self.COLORS['text_secondary'], desc_thickness)
     
-    def draw_pattern_mode(self, frame):
-        # Use pre-rendered grid background
-        frame[:] = self.grid_background
-        
-        # Draw level buttons at top
-        for btn in self.level_buttons:
-            is_selected = (btn['level'] == self.current_level)
-            pulse = 0.5 + 0.5 * abs(math.sin(self.glow_phase * 1.3))
-            
-            if is_selected:
-                self.draw_glow_rect(frame, btn['x'], btn['y'], btn['w'], btn['h'], self.COLORS['neon_blue'], pulse)
-                
-                overlay = frame.copy()
-                cv2.rectangle(overlay, (btn['x'] + 2, btn['y'] + 2), (btn['x'] + btn['w'] - 2, btn['y'] + btn['h'] - 2), self.COLORS['button_hover'], -1)
-                cv2.addWeighted(overlay, 0.8, frame, 0.2, 0, frame)
-                
-                text = f"LVL {btn['level']}"
-                font_scale, thickness = 0.7, 2
-                (text_w, text_h), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_DUPLEX, font_scale, thickness)
-                text_x = btn['x'] + (btn['w'] - text_w) // 2
-                text_y = btn['y'] + (btn['h'] + text_h) // 2
-                cv2.putText(frame, text, (text_x, text_y), cv2.FONT_HERSHEY_DUPLEX, font_scale, self.COLORS['glow_cyan'], thickness + 1)
-                cv2.putText(frame, text, (text_x, text_y), cv2.FONT_HERSHEY_DUPLEX, font_scale, self.COLORS['text_primary'], thickness)
-            else:
-                cv2.rectangle(frame, (btn['x'], btn['y']), (btn['x'] + btn['w'], btn['y'] + btn['h']), self.COLORS['medium_blue'], 2)
-                
-                overlay = frame.copy()
-                cv2.rectangle(overlay, (btn['x'] + 2, btn['y'] + 2), (btn['x'] + btn['w'] - 2, btn['y'] + btn['h'] - 2), self.COLORS['dark_blue'], -1)
-                cv2.addWeighted(overlay, 0.5, frame, 0.5, 0, frame)
-                
-                text = f"LVL {btn['level']}"
-                font_scale, thickness = 0.7, 1
-                (text_w, text_h), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_DUPLEX, font_scale, thickness)
-                text_x = btn['x'] + (btn['w'] - text_w) // 2
-                text_y = btn['y'] + (btn['h'] + text_h) // 2
-                cv2.putText(frame, text, (text_x, text_y), cv2.FONT_HERSHEY_DUPLEX, font_scale, self.COLORS['text_secondary'], thickness)
-        
-        # Draw camera frame border with glow effect
-        border_pulse = 0.4 + 0.3 * abs(math.sin(self.glow_phase * 0.7))
-        self.draw_glow_rect(frame, self.camera_x - 5, self.camera_y - 5, 
-                           self.camera_width + 10, self.camera_height + 10, 
-                           self.COLORS['bright_blue'], border_pulse)
-        
-        # Get and display camera feed
-        if self.camera is None or not self.camera.isOpened():
-            cv2.rectangle(frame, (self.camera_x, self.camera_y), 
-                         (self.camera_x + self.camera_width, self.camera_y + self.camera_height), 
-                         self.COLORS['dark_blue'], -1)
-            text = "Initializing camera..." if self.camera_initializing else "Camera not available"
-            cv2.putText(frame, text, (self.camera_x + 80, self.camera_y + self.camera_height // 2), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, self.COLORS['text_primary'], 2)
-        else:
-            ret, cam_frame = self.camera.read()
-            if not ret:
-                cv2.rectangle(frame, (self.camera_x, self.camera_y), 
-                             (self.camera_x + self.camera_width, self.camera_y + self.camera_height), 
-                             self.COLORS['dark_blue'], -1)
-                cv2.putText(frame, "Failed to read camera", (self.camera_x + 100, self.camera_y + self.camera_height // 2), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.8, self.COLORS['text_primary'], 2)
-            else:
-                cam_frame = cv2.resize(cam_frame, (self.camera_width, self.camera_height))
-                
-                # Apply blueprint overlay
-                overlay, alpha = self.load_blueprint(self.current_level)
-                if overlay is not None and alpha is not None:
-                    overlay_h, overlay_w = overlay.shape[:2]
-                    x_offset = (self.camera_width - overlay_w) // 2
-                    y_offset = (self.camera_height - overlay_h) // 2
-                    
-                    if x_offset >= 0 and y_offset >= 0:
-                        roi = cam_frame[y_offset:y_offset+overlay_h, x_offset:x_offset+overlay_w]
-                        for c in range(3):
-                            roi[:, :, c] = (alpha * overlay[:, :, c] * self.alpha_blend + 
-                                          (1 - alpha * self.alpha_blend) * roi[:, :, c])
-                        cam_frame[y_offset:y_offset+overlay_h, x_offset:x_offset+overlay_w] = roi
-                
-                frame[self.camera_y:self.camera_y+self.camera_height, 
-                      self.camera_x:self.camera_x+self.camera_width] = cam_frame
-        
-        # Draw corner accents
-        corner_size = 25
-        corner_thickness = 3
-        cv2.line(frame, (self.camera_x - 15, self.camera_y - 15), 
-                (self.camera_x - 15 + corner_size, self.camera_y - 15), self.COLORS['cyan'], corner_thickness)
-        cv2.line(frame, (self.camera_x - 15, self.camera_y - 15), 
-                (self.camera_x - 15, self.camera_y - 15 + corner_size), self.COLORS['cyan'], corner_thickness)
-        cv2.line(frame, (self.camera_x + self.camera_width + 15, self.camera_y - 15), 
-                (self.camera_x + self.camera_width + 15 - corner_size, self.camera_y - 15), self.COLORS['cyan'], corner_thickness)
-        cv2.line(frame, (self.camera_x + self.camera_width + 15, self.camera_y - 15), 
-                (self.camera_x + self.camera_width + 15, self.camera_y - 15 + corner_size), self.COLORS['cyan'], corner_thickness)
-        cv2.line(frame, (self.camera_x - 15, self.camera_y + self.camera_height + 15), 
-                (self.camera_x - 15 + corner_size, self.camera_y + self.camera_height + 15), self.COLORS['cyan'], corner_thickness)
-        cv2.line(frame, (self.camera_x - 15, self.camera_y + self.camera_height + 15), 
-                (self.camera_x - 15, self.camera_y + self.camera_height + 15 - corner_size), self.COLORS['cyan'], corner_thickness)
-        cv2.line(frame, (self.camera_x + self.camera_width + 15, self.camera_y + self.camera_height + 15), 
-                (self.camera_x + self.camera_width + 15 - corner_size, self.camera_y + self.camera_height + 15), self.COLORS['cyan'], corner_thickness)
-        cv2.line(frame, (self.camera_x + self.camera_width + 15, self.camera_y + self.camera_height + 15), 
-                (self.camera_x + self.camera_width + 15, self.camera_y + self.camera_height + 15 - corner_size), self.COLORS['cyan'], corner_thickness)
-        
-        self.draw_back_button(frame)
-    
     def run(self):
         print("=" * 60)
         print("SEWBOT - PATTERN RECOGNITION SYSTEM")
@@ -648,10 +538,22 @@ class SewBotApp:
                     self.draw_main_menu(frame)
                 elif self.state == 'tutorial':
                     self.draw_tutorial(frame)
+                elif self.state == 'wallet_tutorial':
+                    self.draw_wallet_tutorial(frame)
                 elif self.state == 'mode_selection':
                     self.draw_mode_selection(frame)
+                elif self.state == 'level_selection':
+                    self.draw_level_selection(frame)
                 elif self.state == 'pattern':
-                    self.draw_pattern_mode(frame)
+                    # Get camera frame
+                    camera_frame = None
+                    if self.camera is not None and self.camera.isOpened():
+                        ret, camera_frame = self.camera.read()
+                        if not ret:
+                            camera_frame = None
+                    
+                    # Draw pattern mode
+                    self.pattern_mode.draw(frame, camera_frame, self.grid_background)
                 
                 self.glow_phase += 0.05
                 cv2.imshow(self.window_name, frame)
@@ -678,6 +580,7 @@ class SewBotApp:
         
         self.release_camera()
         self.tutorial_player.cleanup()
+        self.wallet_tutorial_player.cleanup()
         cv2.destroyAllWindows()
         print("Program closed.")
 
