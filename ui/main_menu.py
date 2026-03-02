@@ -1,7 +1,13 @@
 ﻿import cv2
 import numpy as np
 import math
+import sys
+import os
 from .theme import COLORS, FONTS, ANIMATION
+
+# Add parent directory to path for music_manager import
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+from music_manager import get_music_manager
 
 
 class MainMenu:
@@ -157,6 +163,10 @@ class MainMenu:
         print("SewBot - Main Menu")
         print("Click START to begin")
         
+        # Start main menu music
+        music_manager = get_music_manager()
+        music_manager.play('main_menu.mp3', loops=-1, fade_ms=1000)
+        
         while True:
             # Create frame with dark background
             frame = np.zeros((self.height, self.width, 3), dtype=np.uint8)
@@ -177,10 +187,12 @@ class MainMenu:
             key = cv2.waitKey(30) & 0xFF
             
             if key == 27 or key == ord('q'):  # ESC or Q to quit
+                music_manager.stop(fade_ms=1000)
                 cv2.destroyAllWindows()
                 return None
             
             if self.selected:
+                music_manager.stop(fade_ms=1000)
                 cv2.destroyAllWindows()
                 return 'mode_selection'
         

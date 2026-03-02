@@ -7,6 +7,7 @@ import numpy as np
 import math
 import os
 from ultralytics import YOLO
+from music_manager import get_music_manager
 
 
 class PatternMode:
@@ -62,6 +63,23 @@ class PatternMode:
         except Exception as e:
             print(f"Warning: Could not load stitch model: {e}")
             self.stitch_model = None
+        
+        # Music flag to track if music is playing
+        self.music_playing = False
+    
+    def start_music(self):
+        """Start pattern mode music"""
+        if not self.music_playing:
+            music_manager = get_music_manager()
+            music_manager.play('pattern.mp3', loops=-1, fade_ms=1000)
+            self.music_playing = True
+    
+    def stop_music(self):
+        """Stop pattern mode music"""
+        if self.music_playing:
+            music_manager = get_music_manager()
+            music_manager.stop(fade_ms=1000)
+            self.music_playing = False
     
     def load_blueprint(self, level):
         """Load binary mask for the pattern"""
