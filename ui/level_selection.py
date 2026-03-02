@@ -27,7 +27,7 @@ class LevelSelection:
         # Calculate positions to center all 5 buttons
         total_width = (self.button_width * 5) + (self.button_spacing * 4)
         start_x = (width - total_width) // 2
-        button_y = height // 2 - 50
+        button_y = 210  # Positioned higher for better vertical centering
         
         # Create level buttons
         self.level_buttons = []

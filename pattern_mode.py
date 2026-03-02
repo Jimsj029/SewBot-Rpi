@@ -50,23 +50,6 @@ class PatternMode:
         except Exception as e:
             print(f"Warning: Could not load stitch model: {e}")
             self.stitch_model = None
-        
-        # Load cloth detection model
-        try:
-            cloth_model_path = os.path.join(models_dir, 'cloth.pt')
-            if os.path.exists(cloth_model_path):
-                self.cloth_model = YOLO(cloth_model_path)
-                print(f"✓ Cloth detection model loaded: {cloth_model_path}")
-            else:
-                print(f"⚠ Cloth model not found: {cloth_model_path}")
-                self.cloth_model = None
-        except Exception as e:
-            print(f"Warning: Could not load cloth model: {e}")
-            self.cloth_model = None
-        
-        # Angle smoothing variables
-        self.previous_angle = 0
-        self.angle_smoothing = 0.3  # Lower = more smoothing (0-1)
     
     def load_blueprint(self, level):
         """Load binary mask for the pattern"""
@@ -176,83 +159,6 @@ class PatternMode:
             # Load pattern mask for comparison
             pattern_overlay, pattern_alpha = self.load_blueprint(self.current_level)
             
-            # Detect cloth using cloth.pt model (mask method for accurate centering)
-            cloth_centroid = None
-            cloth_angle = 0  # Store cloth rotation angle
-            if self.cloth_model is not None:
-                try:
-                    cloth_results = self.cloth_model(cam_frame, verbose=False)
-                    
-                    for result in cloth_results:
-                        # Use masks for more accurate cloth detection
-                        if hasattr(result, 'masks') and result.masks is not None:
-                            masks = result.masks.data.cpu().numpy()
-                            boxes = result.boxes
-                            
-                            # Get the largest detected cloth mask (by area)
-                            best_mask = None
-                            best_area = 0
-                            
-                            for i, (mask, box) in enumerate(zip(masks, boxes)):
-                                # Resize mask to frame size
-                                mask_resized = cv2.resize(mask, (self.camera_width, self.camera_height))
-                                mask_binary = (mask_resized > 0.5).astype(np.uint8)
-                                
-                                # Calculate mask area
-                                mask_area = np.sum(mask_binary)
-                                
-                                if mask_area > best_area:
-                                    best_area = mask_area
-                                    best_mask = mask_binary
-                            
-                            if best_mask is not None:
-                                # Find contours to draw outline
-                                contours, _ = cv2.findContours(best_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                                if contours:
-                                    # Get the largest contour
-                                    largest_contour = max(contours, key=cv2.contourArea)
-                                    
-                                    # Draw cloth outline (green)
-                                    cv2.drawContours(cam_frame, [largest_contour], -1, (0, 255, 0), 2)
-                                    
-                                    # Calculate centroid using moments
-                                    M = cv2.moments(best_mask)
-                                    if M["m00"] != 0:
-                                        cloth_centroid = (int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"]))
-                                        # Draw centroid point
-                                        cv2.circle(cam_frame, cloth_centroid, 5, (0, 255, 0), -1)
-                                    
-                                    # Use PCA to find the orientation of the cloth
-                                    # Reshape contour for PCA
-                                    contour_points = largest_contour.reshape(-1, 2).astype(np.float32)
-                                    
-                                    # Perform PCA
-                                    mean, eigenvectors = cv2.PCACompute(contour_points, mean=None)
-                                    
-                                    # The first eigenvector (principal component) gives the orientation
-                                    # Calculate angle from the first eigenvector
-                                    raw_angle = np.arctan2(eigenvectors[0, 1], eigenvectors[0, 0]) * 180 / np.pi
-                                    
-                                    # Smooth the angle to prevent jittering
-                                    # Handle angle wrapping (e.g., -179 to 179 transition)
-                                    angle_diff = raw_angle - self.previous_angle
-                                    if angle_diff > 180:
-                                        angle_diff -= 360
-                                    elif angle_diff < -180:
-                                        angle_diff += 360
-                                    
-                                    # Exponential moving average for smooth transitions
-                                    cloth_angle = self.previous_angle + self.angle_smoothing * angle_diff
-                                    self.previous_angle = cloth_angle
-                                    
-                                    # Add 90 degrees to align pattern with vertical cloth orientation
-                                    cloth_angle += 90
-                                    
-                                break
-                
-                except Exception as e:
-                    print(f"Cloth detection error: {e}")
-            
             # Run stitch detection using stitch.pt model (mask only)
             detected_stitch_masks = []
             
@@ -300,18 +206,9 @@ class PatternMode:
             if pattern_overlay is not None and pattern_alpha is not None:
                 overlay_h, overlay_w = pattern_overlay.shape[:2]
                 
-                # Center pattern on detected cloth centroid (no rotation)
-                if cloth_centroid is not None:
-                    # Center on cloth centroid
-                    x_offset = cloth_centroid[0] - (overlay_w // 2)
-                    y_offset = cloth_centroid[1] - (overlay_h // 2)
-                    # Clamp to camera bounds to prevent overflow
-                    x_offset = max(0, min(x_offset, self.camera_width - overlay_w))
-                    y_offset = max(0, min(y_offset, self.camera_height - overlay_h))
-                else:
-                    # Fallback to camera center if no cloth detected
-                    x_offset = (self.camera_width - overlay_w) // 2
-                    y_offset = (self.camera_height - overlay_h) // 2
+                # Center pattern on camera frame
+                x_offset = (self.camera_width - overlay_w) // 2
+                y_offset = (self.camera_height - overlay_h) // 2
                 
                 # Ensure we don't go out of bounds
                 if x_offset >= 0 and y_offset >= 0:
