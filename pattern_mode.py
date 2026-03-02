@@ -364,7 +364,7 @@ class PatternMode:
                    0.5, self.COLORS['text_secondary'], 1)
         
         # Progress bar background
-        bar_y = progress_y + 10
+        bar_y = progress_y + 15
         bar_width = w - 40
         bar_height = 20
         cv2.rectangle(frame, (content_x, bar_y), (content_x + bar_width, bar_y + bar_height), 
@@ -395,10 +395,10 @@ class PatternMode:
         cv2.putText(frame, label, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 
                    0.5, self.COLORS['text_secondary'], 1)
         
-        # Draw value (right-aligned)
+        # Draw value (right-aligned on same line)
         (val_w, val_h), _ = cv2.getTextSize(value, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
         value_x = x + max_width - val_w
-        cv2.putText(frame, value, (value_x, y + 18), cv2.FONT_HERSHEY_SIMPLEX, 
+        cv2.putText(frame, value, (value_x, y), cv2.FONT_HERSHEY_SIMPLEX, 
                    0.7, value_color, 2)
 
     def handle_click(self, x, y):
