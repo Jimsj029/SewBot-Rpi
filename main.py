@@ -210,15 +210,21 @@ class SewBotApp:
                 action, value = self.level_selection.handle_click(x, y)
                 if action == 'back':
                     self.state = 'mode_selection'
+                    # Release camera when going back to mode selection
+                    self.release_camera()
                 elif action == 'level_selected':  # Level number selected
                     self.pattern_mode.current_level = value
                     self.state = 'pattern'
+                    # Initialize camera if not already opened
+                    if self.camera is None and not self.camera_initializing:
+                        threading.Thread(target=self.init_camera, daemon=True).start()
                     
             elif self.state == 'pattern':
                 # Handle pattern mode clicks
                 result = self.pattern_mode.handle_click(x, y)
                 if result == 'back':
-                    self.release_camera()
+                    # Don't release camera, just go back to level selection
+                    # This allows quick switching between levels
                     self.state = 'level_selection'
     
     def detect_camera_at_startup(self):
