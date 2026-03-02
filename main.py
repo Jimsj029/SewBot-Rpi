@@ -187,18 +187,28 @@ class SewBotApp:
                     self.tutorial_player.reset()
             
             elif self.state == 'wallet_tutorial':
-                # Check back button first
-                bb = self.back_button
-                if bb['x'] <= x <= bb['x'] + bb['w'] and bb['y'] <= y <= bb['y'] + bb['h']:
-                    self.state = 'mode_selection'
-                    return
-                    
                 # Handle wallet tutorial clicks
                 action = self.wallet_tutorial_player.handle_click(x, y)
-                if action == 'continue':
+                if action == 'back':
                     self.state = 'mode_selection'
+                    # Release camera when going back
+                    self.release_camera()
+                elif action == 'continue':
+                    self.state = 'mode_selection'
+                    # Release camera when done
+                    self.release_camera()
                 elif action == 'replay':
                     self.wallet_tutorial_player.reset()
+                    # Release camera when restarting
+                    self.release_camera()
+                elif action == 'enter_your_turn':
+                    # Initialize camera in background thread for your turn mode
+                    if self.camera is None and not self.camera_initializing:
+                        threading.Thread(target=self.init_camera, daemon=True).start()
+                elif action == 'your_turn_next':
+                    # Keep camera open for next your turn, but check if it needs initialization
+                    if self.camera is None and not self.camera_initializing:
+                        threading.Thread(target=self.init_camera, daemon=True).start()
                     
             elif self.state == 'mode_selection':
                 # Check quit button
@@ -516,11 +526,16 @@ class SewBotApp:
         # Use pre-rendered grid background
         frame[:] = self.grid_background
         
-        # Draw wallet tutorial player
-        self.wallet_tutorial_player.draw(frame)
+        # Get camera frame if in your_turn mode
+        camera_frame = None
+        if self.wallet_tutorial_player.your_turn_mode:
+            if self.camera is not None and self.camera.isOpened():
+                ret, camera_frame = self.camera.read()
+                if not ret:
+                    camera_frame = None
         
-        # Draw back button
-        self.draw_back_button(frame)
+        # Draw wallet tutorial player (pass camera frame)
+        self.wallet_tutorial_player.draw(frame, camera_frame)
     
     def draw_level_selection(self, frame):
         """Draw level selection screen"""
