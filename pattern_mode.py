@@ -35,14 +35,34 @@ class PatternMode:
         # Back button (top left)
         self.back_button = {'x': 20, 'y': 20, 'w': 120, 'h': 50}
         
-        # Load YOLO model
+        # Load YOLO models from models directory
+        models_dir = os.path.join(os.path.dirname(__file__), 'models')
+        
+        # Load stitch detection model
         try:
-            model_path = os.path.join(os.path.dirname(__file__), 'best.pt')
-            self.yolo_model = YOLO(model_path)
-            print(f"YOLOv8 model loaded: {model_path}")
+            stitch_model_path = os.path.join(models_dir, 'stitch.pt')
+            if os.path.exists(stitch_model_path):
+                self.stitch_model = YOLO(stitch_model_path)
+                print(f"✓ Stitch detection model loaded: {stitch_model_path}")
+            else:
+                print(f"⚠ Stitch model not found: {stitch_model_path}")
+                self.stitch_model = None
         except Exception as e:
-            print(f"Warning: Could not load YOLO model: {e}")
-            self.yolo_model = None
+            print(f"Warning: Could not load stitch model: {e}")
+            self.stitch_model = None
+        
+        # Load cloth detection model
+        try:
+            cloth_model_path = os.path.join(models_dir, 'cloth.pt')
+            if os.path.exists(cloth_model_path):
+                self.cloth_model = YOLO(cloth_model_path)
+                print(f"✓ Cloth detection model loaded: {cloth_model_path}")
+            else:
+                print(f"⚠ Cloth model not found: {cloth_model_path}")
+                self.cloth_model = None
+        except Exception as e:
+            print(f"Warning: Could not load cloth model: {e}")
+            self.cloth_model = None
     
     def load_blueprint(self, level):
         """Load binary mask for the pattern"""
@@ -152,16 +172,50 @@ class PatternMode:
             # Load pattern mask for comparison
             pattern_overlay, pattern_alpha = self.load_blueprint(self.current_level)
             
-            # Run YOLO stitch detection
+            # Detect cloth using cloth.pt model (bounding box method)
+            cloth_centroid = None
+            if self.cloth_model is not None:
+                try:
+                    cloth_results = self.cloth_model(cam_frame, verbose=False)
+                    
+                    for result in cloth_results:
+                        if hasattr(result, 'boxes') and result.boxes is not None and len(result.boxes) > 0:
+                            # Get the largest detected cloth (highest confidence or largest area)
+                            boxes = result.boxes
+                            best_box = None
+                            best_area = 0
+                            
+                            for box in boxes:
+                                x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                                area = (x2 - x1) * (y2 - y1)
+                                
+                                if area > best_area:
+                                    best_area = area
+                                    best_box = (x1, y1, x2, y2)
+                            
+                            if best_box is not None:
+                                x1, y1, x2, y2 = best_box
+                                # Calculate centroid of cloth bounding box
+                                cloth_centroid = (int((x1 + x2) / 2), int((y1 + y2) / 2))
+                                
+                                # Draw cloth bounding box for visualization
+                                cv2.rectangle(cam_frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
+                                cv2.circle(cam_frame, cloth_centroid, 5, (0, 255, 0), -1)
+                                break
+                
+                except Exception as e:
+                    print(f"Cloth detection error: {e}")
+            
+            # Run YOLO stitch detection (mask method only)
             detected_stitches = []
             stitch_positions = []
             
-            if self.yolo_model is not None:
+            if self.stitch_model is not None:
                 try:
-                    results = self.yolo_model(cam_frame, verbose=False)
+                    stitch_results = self.stitch_model(cam_frame, verbose=False)
                     
-                    for result in results:
-                        # Check if model has masks (segmentation)
+                    for result in stitch_results:
+                        # Only use masks (segmentation) for stitch detection
                         if hasattr(result, 'masks') and result.masks is not None:
                             masks = result.masks.data.cpu().numpy()
                             boxes = result.boxes
@@ -186,36 +240,25 @@ class PatternMode:
                                     'confidence': float(conf),
                                     'class': cls
                                 })
-                        
-                        # If no segmentation, use bounding boxes as stitch locations
-                        elif hasattr(result, 'boxes') and result.boxes is not None:
-                            boxes = result.boxes
-                            for box in boxes:
-                                x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-                                conf = box.conf[0].cpu().numpy()
-                                cls = int(box.cls[0].cpu().numpy())
-                                
-                                # Draw stitch point at center of box
-                                center_x = int((x1 + x2) / 2)
-                                center_y = int((y1 + y2) / 2)
-                                stitch_positions.append((center_x, center_y))
-                                
-                                detected_stitches.append({
-                                    'position': (center_x, center_y),
-                                    'confidence': float(conf),
-                                    'class': cls
-                                })
-                    
+                
                 except Exception as e:
-                    print(f"YOLO stitch detection error: {e}")
+                    print(f"Stitch detection error: {e}")
             
             # Overlay pattern mask and compare with detected stitches
             if pattern_overlay is not None and pattern_alpha is not None:
                 overlay_h, overlay_w = pattern_overlay.shape[:2]
                 
-                # Center pattern on camera
-                x_offset = (self.camera_width - overlay_w) // 2
-                y_offset = (self.camera_height - overlay_h) // 2
+                # Center pattern on cloth centroid if detected, otherwise center on camera
+                if cloth_centroid is not None:
+                    x_offset = cloth_centroid[0] - (overlay_w // 2)
+                    y_offset = cloth_centroid[1] - (overlay_h // 2)
+                    # Clamp to camera bounds
+                    x_offset = max(0, min(x_offset, self.camera_width - overlay_w))
+                    y_offset = max(0, min(y_offset, self.camera_height - overlay_h))
+                else:
+                    # Fallback to center of camera if no cloth detected
+                    x_offset = (self.camera_width - overlay_w) // 2
+                    y_offset = (self.camera_height - overlay_h) // 2
                 
                 if x_offset >= 0 and y_offset >= 0 and x_offset + overlay_w <= self.camera_width and y_offset + overlay_h <= self.camera_height:
                     # Create pattern mask for comparison

@@ -27,3 +27,7 @@ Thumbs.db
 
 # Project specific
 *.log
+
+# YOLO Model files (large files, not committed)
+models/*.pt
+best.pt
