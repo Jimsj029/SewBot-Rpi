@@ -27,18 +27,6 @@ class SewBotApp:
         self.glow_phase = 0
         self.running = True
         
-        # Tutorial player - initialize with tutorial videos from videos/sewing-set-up
-        self.tutorial_player = TutorialPlayer(self.width, self.height)
-        
-        # Wallet tutorial player - initialize with wallet videos
-        self.wallet_tutorial_player = WalletTutorialPlayer(self.width, self.height)
-        
-        # Camera variables
-        self.camera = None
-        self.camera_initializing = False
-        self.camera_detected = False
-        self.camera_status_message = "Checking camera..."
-        
         # Theme colors
         self.COLORS = {
             'dark_blue': (80, 40, 20),
@@ -55,6 +43,21 @@ class SewBotApp:
             'glow_cyan': (255, 255, 0),
             'glow_blue': (255, 150, 0),
         }
+        
+        # Tutorial player - initialize with tutorial videos from videos/sewing-set-up
+        self.tutorial_player = TutorialPlayer(self.width, self.height)
+        
+        # Wallet tutorial player - initialize with wallet videos
+        self.wallet_tutorial_player = WalletTutorialPlayer(self.width, self.height)
+        
+        # Level selection screen
+        self.level_selection = LevelSelection(self.width, self.height, self.COLORS)
+        
+        # Camera variables
+        self.camera = None
+        self.camera_initializing = False
+        self.camera_detected = False
+        self.camera_status_message = "Checking camera..."
         
         # Button positions
         self.start_button = {'x': (self.width - 300) // 2, 'y': self.height // 2 + 50, 'w': 300, 'h': 80}
@@ -93,9 +96,6 @@ class SewBotApp:
         
         self.back_button = {'x': 20, 'y': self.height - 60, 'w': 120, 'h': 40}
         self.quit_button = {'x': self.width - 140, 'y': self.height - 60, 'w': 120, 'h': 40}
-        
-        # Level selection screen
-        self.level_selection = LevelSelection(self.width, self.height, self.COLORS)
         
         # Pattern mode - separate module
         self.pattern_mode = PatternMode(self.width, self.height, self.COLORS, 'blueprint')
@@ -184,8 +184,10 @@ class SewBotApp:
                 
                 pb = self.pattern_button
                 if pb['x'] <= x <= pb['x'] + pb['w'] and pb['y'] <= y <= pb['y'] + pb['h']:
-                    # Go to level selection instead of pattern mode directly
                     self.state = 'level_selection'
+                    # Start camera initialization in background
+                    if self.camera is None and not self.camera_initializing:
+                        threading.Thread(target=self.init_camera, daemon=True).start()
                 
                 wb = self.wallet_button
                 if wb['x'] <= x <= wb['x'] + wb['w'] and wb['y'] <= y <= wb['y'] + wb['h']:
@@ -205,16 +207,12 @@ class SewBotApp:
             
             elif self.state == 'level_selection':
                 # Handle level selection clicks
-                action, level = self.level_selection.handle_click(x, y)
+                action, value = self.level_selection.handle_click(x, y)
                 if action == 'back':
                     self.state = 'mode_selection'
-                elif action == 'level_selected' and level is not None:
-                    # Set the level in pattern mode and transition to pattern state
-                    self.pattern_mode.current_level = level
+                elif action == 'level_selected':  # Level number selected
+                    self.pattern_mode.current_level = value
                     self.state = 'pattern'
-                    # Start camera initialization in background
-                    if self.camera is None and not self.camera_initializing:
-                        threading.Thread(target=self.init_camera, daemon=True).start()
                     
             elif self.state == 'pattern':
                 # Handle pattern mode clicks
@@ -435,6 +433,10 @@ class SewBotApp:
         # Draw back button
         self.draw_back_button(frame)
     
+    def draw_level_selection(self, frame):
+        """Draw level selection screen"""
+        self.level_selection.draw(frame, self.grid_background)
+    
     def draw_mode_selection(self, frame):
         # Use pre-rendered grid background
         frame[:] = self.grid_background
@@ -541,8 +543,7 @@ class SewBotApp:
                 elif self.state == 'mode_selection':
                     self.draw_mode_selection(frame)
                 elif self.state == 'level_selection':
-                    # Draw level selection screen
-                    self.level_selection.draw(frame, self.grid_background)
+                    self.draw_level_selection(frame)
                 elif self.state == 'pattern':
                     # Get camera frame
                     camera_frame = None

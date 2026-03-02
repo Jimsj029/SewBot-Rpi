@@ -1,5 +1,5 @@
 """
-Pattern Mode - Sewing Pattern Recognition with Fabric Color Detection
+Pattern Mode - Sewing Pattern Recognition
 """
 
 import cv2
@@ -32,52 +32,41 @@ class PatternMode:
         self.camera_x = 216  # Centered horizontally (1000 - 560) // 2
         self.camera_y = 80  # Moved up since no level buttons
         
-        # Fabric color panel (right side of camera)
-        self.color_panel_x = self.camera_x + self.camera_width + 37
-        self.color_panel_y = 90
-        self.color_panel_width = 180
-        self.color_panel_height = 400
-        
         # Back button (top left)
         self.back_button = {'x': 20, 'y': 20, 'w': 120, 'h': 50}
         
-        # Fabric color detection settings
-        self.fabric_colors = {
-            'White': {'bgr': (255, 255, 255), 'hsv_range': ([0, 0, 200], [180, 30, 255])},
-            'Black': {'bgr': (0, 0, 0), 'hsv_range': ([0, 0, 0], [180, 255, 50])},
-            'Blue': {'bgr': (255, 0, 0), 'hsv_range': ([100, 50, 50], [130, 255, 255])},
-            'Gray': {'bgr': (128, 128, 128), 'hsv_range': ([0, 0, 50], [180, 50, 200])},
-            'Red': {'bgr': (0, 0, 255), 'hsv_range': ([0, 50, 50], [10, 255, 255])},
-            'Yellow': {'bgr': (0, 255, 255), 'hsv_range': ([20, 50, 50], [35, 255, 255])},
-            'Green': {'bgr': (0, 255, 0), 'hsv_range': ([40, 50, 50], [80, 255, 255])}
-        }
+        # Load models from models directory
+        models_dir = os.path.join(os.path.dirname(__file__), 'models')
         
-        self.selected_fabric_color = None
-        self.cloth_mask = None  # Mask of detected cloth
-        
-        # Load YOLO model
+        # Load stitch detection model
         try:
-            model_path = os.path.join(os.path.dirname(__file__), 'best.pt')
-            self.yolo_model = YOLO(model_path)
-            print(f"YOLOv8 model loaded: {model_path}")
+            stitch_model_path = os.path.join(models_dir, 'stitch.pt')
+            if os.path.exists(stitch_model_path):
+                self.stitch_model = YOLO(stitch_model_path)
+                print(f"✓ Stitch detection model loaded: {stitch_model_path}")
+            else:
+                print(f"⚠ Stitch model not found: {stitch_model_path}")
+                self.stitch_model = None
         except Exception as e:
-            print(f"Warning: Could not load YOLO model: {e}")
-            self.yolo_model = None
+            print(f"Warning: Could not load stitch model: {e}")
+            self.stitch_model = None
         
-        # Create color buttons (adjusted to fit in panel)
-        self.color_buttons = []
-        btn_h = 38
-        btn_spacing = 7
-        start_y = self.color_panel_y + 70
+        # Load cloth detection model
+        try:
+            cloth_model_path = os.path.join(models_dir, 'cloth.pt')
+            if os.path.exists(cloth_model_path):
+                self.cloth_model = YOLO(cloth_model_path)
+                print(f"✓ Cloth detection model loaded: {cloth_model_path}")
+            else:
+                print(f"⚠ Cloth model not found: {cloth_model_path}")
+                self.cloth_model = None
+        except Exception as e:
+            print(f"Warning: Could not load cloth model: {e}")
+            self.cloth_model = None
         
-        for idx, color_name in enumerate(['White', 'Black', 'Blue', 'Gray', 'Red', 'Yellow', 'Green']):
-            self.color_buttons.append({
-                'name': color_name,
-                'x': self.color_panel_x + 10,
-                'y': start_y + idx * (btn_h + btn_spacing),
-                'w': self.color_panel_width - 20,
-                'h': btn_h
-            })
+        # Angle smoothing variables
+        self.previous_angle = 0
+        self.angle_smoothing = 0.3  # Lower = more smoothing (0-1)
     
     def load_blueprint(self, level):
         """Load binary mask for the pattern"""
@@ -97,35 +86,7 @@ class PatternMode:
         
         return overlay, alpha
     
-    def detect_cloth(self, camera_frame):
-        """Detect cloth of selected color in camera frame"""
-        if camera_frame is None or camera_frame.size == 0 or self.selected_fabric_color is None:
-            return None
-        
-        # Convert frame to HSV
-        hsv_frame = cv2.cvtColor(camera_frame, cv2.COLOR_BGR2HSV)
-        
-        # Get color range for selected fabric color
-        color_data = self.fabric_colors[self.selected_fabric_color]
-        lower = np.array(color_data['hsv_range'][0])
-        upper = np.array(color_data['hsv_range'][1])
-        
-        # Create mask for selected color
-        if self.selected_fabric_color == 'Red':
-            # Special handling for red (wraps around hue)
-            mask1 = cv2.inRange(hsv_frame, lower, upper)
-            mask2 = cv2.inRange(hsv_frame, np.array([170, 50, 50]), np.array([180, 255, 255]))
-            cloth_mask = cv2.bitwise_or(mask1, mask2)
-        else:
-            cloth_mask = cv2.inRange(hsv_frame, lower, upper)
-        
-        # Apply morphological operations to clean up mask
-        kernel = np.ones((5, 5), np.uint8)
-        cloth_mask = cv2.morphologyEx(cloth_mask, cv2.MORPH_CLOSE, kernel)
-        cloth_mask = cv2.morphologyEx(cloth_mask, cv2.MORPH_OPEN, kernel)
-        
-        return cloth_mask
-    
+
     def draw_glow_rect(self, img, x, y, w, h, color, glow_intensity):
         """Draw rectangle with glow effect"""
         cv2.rectangle(img, (x, y), (x + w, y + h), color, 3)
@@ -176,9 +137,6 @@ class PatternMode:
         
         # Draw camera feed
         self.draw_camera_feed(frame, camera_frame)
-        
-        # Draw fabric color panel
-        self.draw_fabric_color_panel(frame, camera_frame)
     
     def draw_back_button(self, frame):
         """Draw back button in top left"""
@@ -215,139 +173,164 @@ class PatternMode:
         else:
             cam_frame = cv2.resize(camera_frame, (self.camera_width, self.camera_height))
             
-            # Detect fabric to center pattern mask
-            fabric_centroid = None
-            if self.selected_fabric_color:
-                self.cloth_mask = self.detect_cloth(cam_frame)
-                if self.cloth_mask is not None:
-                    # Find largest contour (main fabric piece)
-                    contours, _ = cv2.findContours(self.cloth_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                    if contours:
-                        largest_contour = max(contours, key=cv2.contourArea)
-                        # Get centroid of fabric
-                        M = cv2.moments(largest_contour)
-                        if M["m00"] != 0:
-                            fabric_centroid = (int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"]))
-                            # Draw fabric outline
-                            cv2.drawContours(cam_frame, [largest_contour], -1, (0, 255, 0), 2)
-            
             # Load pattern mask for comparison
             pattern_overlay, pattern_alpha = self.load_blueprint(self.current_level)
             
-            # Run YOLO stitch detection
-            detected_stitches = []
-            stitch_positions = []
-            
-            if self.yolo_model is not None:
+            # Detect cloth using cloth.pt model (mask method for accurate centering)
+            cloth_centroid = None
+            cloth_angle = 0  # Store cloth rotation angle
+            if self.cloth_model is not None:
                 try:
-                    results = self.yolo_model(cam_frame, verbose=False)
+                    cloth_results = self.cloth_model(cam_frame, verbose=False)
+                    
+                    for result in cloth_results:
+                        # Use masks for more accurate cloth detection
+                        if hasattr(result, 'masks') and result.masks is not None:
+                            masks = result.masks.data.cpu().numpy()
+                            boxes = result.boxes
+                            
+                            # Get the largest detected cloth mask (by area)
+                            best_mask = None
+                            best_area = 0
+                            
+                            for i, (mask, box) in enumerate(zip(masks, boxes)):
+                                # Resize mask to frame size
+                                mask_resized = cv2.resize(mask, (self.camera_width, self.camera_height))
+                                mask_binary = (mask_resized > 0.5).astype(np.uint8)
+                                
+                                # Calculate mask area
+                                mask_area = np.sum(mask_binary)
+                                
+                                if mask_area > best_area:
+                                    best_area = mask_area
+                                    best_mask = mask_binary
+                            
+                            if best_mask is not None:
+                                # Find contours to draw outline
+                                contours, _ = cv2.findContours(best_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                                if contours:
+                                    # Get the largest contour
+                                    largest_contour = max(contours, key=cv2.contourArea)
+                                    
+                                    # Draw cloth outline (green)
+                                    cv2.drawContours(cam_frame, [largest_contour], -1, (0, 255, 0), 2)
+                                    
+                                    # Calculate centroid using moments
+                                    M = cv2.moments(best_mask)
+                                    if M["m00"] != 0:
+                                        cloth_centroid = (int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"]))
+                                        # Draw centroid point
+                                        cv2.circle(cam_frame, cloth_centroid, 5, (0, 255, 0), -1)
+                                    
+                                    # Use PCA to find the orientation of the cloth
+                                    # Reshape contour for PCA
+                                    contour_points = largest_contour.reshape(-1, 2).astype(np.float32)
+                                    
+                                    # Perform PCA
+                                    mean, eigenvectors = cv2.PCACompute(contour_points, mean=None)
+                                    
+                                    # The first eigenvector (principal component) gives the orientation
+                                    # Calculate angle from the first eigenvector
+                                    raw_angle = np.arctan2(eigenvectors[0, 1], eigenvectors[0, 0]) * 180 / np.pi
+                                    
+                                    # Smooth the angle to prevent jittering
+                                    # Handle angle wrapping (e.g., -179 to 179 transition)
+                                    angle_diff = raw_angle - self.previous_angle
+                                    if angle_diff > 180:
+                                        angle_diff -= 360
+                                    elif angle_diff < -180:
+                                        angle_diff += 360
+                                    
+                                    # Exponential moving average for smooth transitions
+                                    cloth_angle = self.previous_angle + self.angle_smoothing * angle_diff
+                                    self.previous_angle = cloth_angle
+                                    
+                                    # Add 90 degrees to align pattern with vertical cloth orientation
+                                    cloth_angle += 90
+                                    
+                                break
+                
+                except Exception as e:
+                    print(f"Cloth detection error: {e}")
+            
+            # Run stitch detection using stitch.pt model (mask only)
+            detected_stitch_masks = []
+            
+            if self.stitch_model is not None:
+                try:
+                    results = self.stitch_model(cam_frame, verbose=False)
                     
                     for result in results:
-                        # Check if model has masks (segmentation)
+                        # Only use masks (segmentation) for stitch detection
                         if hasattr(result, 'masks') and result.masks is not None:
                             masks = result.masks.data.cpu().numpy()
                             boxes = result.boxes
                             
                             for i, (mask, box) in enumerate(zip(masks, boxes)):
                                 conf = box.conf[0].cpu().numpy()
-                                cls = int(box.cls[0].cpu().numpy())
                                 
                                 # Resize mask to frame size
                                 mask_resized = cv2.resize(mask, (self.camera_width, self.camera_height))
                                 mask_binary = (mask_resized > 0.5).astype(np.uint8)
                                 
-                                # Get center of stitch for comparison
-                                M = cv2.moments(mask_binary)
-                                if M["m00"] != 0:
-                                    cx = int(M["m10"] / M["m00"])
-                                    cy = int(M["m01"] / M["m00"])
-                                    stitch_positions.append((cx, cy))
-                                
-                                detected_stitches.append({
+                                # Store the mask for visualization
+                                detected_stitch_masks.append({
                                     'mask': mask_binary,
-                                    'confidence': float(conf),
-                                    'class': cls
-                                })
-                        
-                        # If no segmentation, use bounding boxes as stitch locations
-                        elif hasattr(result, 'boxes') and result.boxes is not None:
-                            boxes = result.boxes
-                            for box in boxes:
-                                x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-                                conf = box.conf[0].cpu().numpy()
-                                cls = int(box.cls[0].cpu().numpy())
-                                
-                                # Draw stitch point at center of box
-                                center_x = int((x1 + x2) / 2)
-                                center_y = int((y1 + y2) / 2)
-                                stitch_positions.append((center_x, center_y))
-                                
-                                detected_stitches.append({
-                                    'position': (center_x, center_y),
-                                    'confidence': float(conf),
-                                    'class': cls
+                                    'confidence': float(conf)
                                 })
                     
                 except Exception as e:
-                    print(f"YOLO stitch detection error: {e}")
+                    print(f"Stitch detection error: {e}")
+            
+            # Display detected stitch masks as semi-transparent overlay
+            if len(detected_stitch_masks) > 0:
+                # Create a combined mask overlay
+                stitch_overlay = np.zeros_like(cam_frame)
+                
+                for stitch_data in detected_stitch_masks:
+                    mask = stitch_data['mask']
+                    # Color the detected stitches in purple for better visibility
+                    stitch_overlay[mask > 0] = [180, 0, 255]  # Purple color in BGR
+                
+                # Blend the stitch overlay with the camera frame
+                alpha = 0.6  # Transparency level
+                cam_frame = cv2.addWeighted(cam_frame, 1, stitch_overlay, alpha, 0)
             
             # Overlay pattern mask and compare with detected stitches
             if pattern_overlay is not None and pattern_alpha is not None:
                 overlay_h, overlay_w = pattern_overlay.shape[:2]
                 
-                # Center pattern on fabric centroid if detected, otherwise center on camera
-                if fabric_centroid is not None:
-                    x_offset = fabric_centroid[0] - (overlay_w // 2)
-                    y_offset = fabric_centroid[1] - (overlay_h // 2)
-                    # Clamp to camera bounds
+                # Center pattern on detected cloth centroid (no rotation)
+                if cloth_centroid is not None:
+                    # Center on cloth centroid
+                    x_offset = cloth_centroid[0] - (overlay_w // 2)
+                    y_offset = cloth_centroid[1] - (overlay_h // 2)
+                    # Clamp to camera bounds to prevent overflow
                     x_offset = max(0, min(x_offset, self.camera_width - overlay_w))
                     y_offset = max(0, min(y_offset, self.camera_height - overlay_h))
                 else:
-                    # Fallback to center of camera
+                    # Fallback to camera center if no cloth detected
                     x_offset = (self.camera_width - overlay_w) // 2
                     y_offset = (self.camera_height - overlay_h) // 2
                 
-                if x_offset >= 0 and y_offset >= 0 and x_offset + overlay_w <= self.camera_width and y_offset + overlay_h <= self.camera_height:
-                    # Create pattern mask for comparison
-                    pattern_mask_full = np.zeros((self.camera_height, self.camera_width), dtype=np.uint8)
-                    pattern_mask_region = (pattern_alpha * 255).astype(np.uint8)
-                    pattern_mask_full[y_offset:y_offset+overlay_h, x_offset:x_offset+overlay_w] = pattern_mask_region
+                # Ensure we don't go out of bounds
+                if x_offset >= 0 and y_offset >= 0:
+                    # Calculate actual overlay dimensions considering bounds
+                    overlay_end_x = min(x_offset + overlay_w, self.camera_width)
+                    overlay_end_y = min(y_offset + overlay_h, self.camera_height)
+                    actual_w = overlay_end_x - x_offset
+                    actual_h = overlay_end_y - y_offset
                     
-                    # Compare detected stitches with pattern (pixel-perfect accuracy)
-                    correct_stitches = 0
-                    total_stitches = len(stitch_positions)
-                    
-                    for sx, sy in stitch_positions:
-                        # Pixel-perfect check (tolerance = 1 pixel)
-                        tolerance = 1
-                        y_min = max(0, sy - tolerance)
-                        y_max = min(self.camera_height, sy + tolerance + 1)
-                        x_min = max(0, sx - tolerance)
-                        x_max = min(self.camera_width, sx + tolerance + 1)
+                    if actual_w > 0 and actual_h > 0:
+                        # Apply pattern overlay (semi-transparent white lines)
+                        roi = cam_frame[y_offset:overlay_end_y, x_offset:overlay_end_x]
+                        pattern_crop = pattern_overlay[0:actual_h, 0:actual_w]
+                        alpha_crop = pattern_alpha[0:actual_h, 0:actual_w]
                         
-                        region = pattern_mask_full[y_min:y_max, x_min:x_max]
-                        if np.any(region > 0):
-                            correct_stitches += 1
-                            # Mark correct stitch with green
-                            cv2.circle(cam_frame, (sx, sy), 4, (0, 255, 0), -1)
-                        else:
-                            # Mark incorrect stitch with red
-                            cv2.circle(cam_frame, (sx, sy), 4, (0, 0, 255), -1)
-                    
-                    # Apply pattern overlay (semi-transparent white lines)
-                    roi = cam_frame[y_offset:y_offset+overlay_h, x_offset:x_offset+overlay_w]
-                    for c in range(3):
-                        roi[:, :, c] = (pattern_alpha * pattern_overlay[:, :, c] * 0.5 + 
-                                      (1 - pattern_alpha * 0.5) * roi[:, :, c])
-                    cam_frame[y_offset:y_offset+overlay_h, x_offset:x_offset+overlay_w] = roi
-                    
-                    # Display accuracy feedback
-                    if total_stitches > 0:
-                        accuracy = (correct_stitches / total_stitches) * 100
-                        accuracy_text = f"Accuracy: {accuracy:.1f}% ({correct_stitches}/{total_stitches})"
-                        accuracy_color = (0, 255, 0) if accuracy >= 80 else (0, 165, 255) if accuracy >= 60 else (0, 0, 255)
-                        cv2.putText(cam_frame, accuracy_text, (10, self.camera_height - 20),
-                                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, accuracy_color, 2)
+                        for c in range(3):
+                            roi[:, :, c] = (alpha_crop * pattern_crop[:, :, c] * 0.5 + 
+                                          (1 - alpha_crop * 0.5) * roi[:, :, c])
+                        cam_frame[y_offset:overlay_end_y, x_offset:overlay_end_x] = roi
             
             frame[self.camera_y:self.camera_y+self.camera_height, 
                   self.camera_x:self.camera_x+self.camera_width] = cam_frame
@@ -372,73 +355,12 @@ class PatternMode:
         cv2.line(frame, (self.camera_x + self.camera_width + 15, self.camera_y + self.camera_height + 15), 
                 (self.camera_x + self.camera_width + 15, self.camera_y + self.camera_height + 15 - corner_size), self.COLORS['cyan'], corner_thickness)
     
-    def draw_fabric_color_panel(self, frame, camera_frame):
-        """Draw fabric color selection and detection panel"""
-        # Panel background
-        panel_color = self.COLORS['dark_blue']
-        cv2.rectangle(frame, 
-                     (self.color_panel_x, self.color_panel_y),
-                     (self.color_panel_x + self.color_panel_width, self.color_panel_y + self.color_panel_height),
-                     self.COLORS['bright_blue'], 2)
-        
-        overlay = frame.copy()
-        cv2.rectangle(overlay, 
-                     (self.color_panel_x + 2, self.color_panel_y + 2),
-                     (self.color_panel_x + self.color_panel_width - 2, self.color_panel_y + self.color_panel_height - 2),
-                     panel_color, -1)
-        cv2.addWeighted(overlay, 0.7, frame, 0.3, 0, frame)
-        
-        # Title
-        title = "Fabric Color"
-        font_scale = 0.7
-        thickness = 2
-        (title_w, title_h), _ = cv2.getTextSize(title, cv2.FONT_HERSHEY_DUPLEX, font_scale, thickness)
-        title_x = self.color_panel_x + (self.color_panel_width - title_w) // 2
-        title_y = self.color_panel_y + 35
-        cv2.putText(frame, title, (title_x, title_y), cv2.FONT_HERSHEY_DUPLEX, 
-                   font_scale, self.COLORS['bright_blue'], thickness)
-        
-        # Draw color buttons
-        for btn in self.color_buttons:
-            is_selected = (btn['name'] == self.selected_fabric_color)
-            
-            # Get color
-            color_bgr = self.fabric_colors[btn['name']]['bgr']
-            
-            # Button border
-            border_color = self.COLORS['neon_blue'] if is_selected else self.COLORS['medium_blue']
-            
-            cv2.rectangle(frame, (btn['x'], btn['y']), 
-                         (btn['x'] + btn['w'], btn['y'] + btn['h']),
-                         border_color, 2 if is_selected else 1)
-            
-            # Color swatch (left side)
-            swatch_size = btn['h'] - 8
-            cv2.rectangle(frame, (btn['x'] + 4, btn['y'] + 4),
-                         (btn['x'] + 4 + swatch_size, btn['y'] + 4 + swatch_size),
-                         color_bgr, -1)
-            cv2.rectangle(frame, (btn['x'] + 4, btn['y'] + 4),
-                         (btn['x'] + 4 + swatch_size, btn['y'] + 4 + swatch_size),
-                         (255, 255, 255), 1)
-            
-            # Text
-            text_x = btn['x'] + swatch_size + 12
-            text_y = btn['y'] + (btn['h'] + 10) // 2
-            text_color = self.COLORS['text_primary'] if is_selected else self.COLORS['text_secondary']
-            cv2.putText(frame, btn['name'], (text_x, text_y),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, text_color, 1)
-    
+
     def handle_click(self, x, y):
         """Handle mouse clicks in pattern mode"""
         # Check back button
         bb = self.back_button
         if bb['x'] <= x <= bb['x'] + bb['w'] and bb['y'] <= y <= bb['y'] + bb['h']:
             return 'back'
-        
-        # Check color buttons
-        for btn in self.color_buttons:
-            if btn['x'] <= x <= btn['x'] + btn['w'] and btn['y'] <= y <= btn['y'] + btn['h']:
-                self.selected_fabric_color = btn['name']
-                return 'color_selected'
         
         return None
