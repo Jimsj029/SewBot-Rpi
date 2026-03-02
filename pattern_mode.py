@@ -1,5 +1,5 @@
 """
-Pattern Mode - Sewing Pattern Recognition with Fabric Color Detection
+Pattern Mode - Sewing Pattern Recognition
 """
 
 import cv2
@@ -32,28 +32,8 @@ class PatternMode:
         self.camera_x = 216  # Centered horizontally (1000 - 560) // 2
         self.camera_y = 80  # Moved up since no level buttons
         
-        # Fabric color panel (right side of camera)
-        self.color_panel_x = self.camera_x + self.camera_width + 37
-        self.color_panel_y = 90
-        self.color_panel_width = 180
-        self.color_panel_height = 400
-        
         # Back button (top left)
         self.back_button = {'x': 20, 'y': 20, 'w': 120, 'h': 50}
-        
-        # Fabric color detection settings
-        self.fabric_colors = {
-            'White': {'bgr': (255, 255, 255), 'hsv_range': ([0, 0, 200], [180, 30, 255])},
-            'Black': {'bgr': (0, 0, 0), 'hsv_range': ([0, 0, 0], [180, 255, 50])},
-            'Blue': {'bgr': (255, 0, 0), 'hsv_range': ([100, 50, 50], [130, 255, 255])},
-            'Gray': {'bgr': (128, 128, 128), 'hsv_range': ([0, 0, 50], [180, 50, 200])},
-            'Red': {'bgr': (0, 0, 255), 'hsv_range': ([0, 50, 50], [10, 255, 255])},
-            'Yellow': {'bgr': (0, 255, 255), 'hsv_range': ([20, 50, 50], [35, 255, 255])},
-            'Green': {'bgr': (0, 255, 0), 'hsv_range': ([40, 50, 50], [80, 255, 255])}
-        }
-        
-        self.selected_fabric_color = None
-        self.cloth_mask = None  # Mask of detected cloth
         
         # Load YOLO model
         try:
@@ -63,21 +43,6 @@ class PatternMode:
         except Exception as e:
             print(f"Warning: Could not load YOLO model: {e}")
             self.yolo_model = None
-        
-        # Create color buttons (adjusted to fit in panel)
-        self.color_buttons = []
-        btn_h = 38
-        btn_spacing = 7
-        start_y = self.color_panel_y + 70
-        
-        for idx, color_name in enumerate(['White', 'Black', 'Blue', 'Gray', 'Red', 'Yellow', 'Green']):
-            self.color_buttons.append({
-                'name': color_name,
-                'x': self.color_panel_x + 10,
-                'y': start_y + idx * (btn_h + btn_spacing),
-                'w': self.color_panel_width - 20,
-                'h': btn_h
-            })
     
     def load_blueprint(self, level):
         """Load binary mask for the pattern"""
@@ -97,35 +62,7 @@ class PatternMode:
         
         return overlay, alpha
     
-    def detect_cloth(self, camera_frame):
-        """Detect cloth of selected color in camera frame"""
-        if camera_frame is None or camera_frame.size == 0 or self.selected_fabric_color is None:
-            return None
-        
-        # Convert frame to HSV
-        hsv_frame = cv2.cvtColor(camera_frame, cv2.COLOR_BGR2HSV)
-        
-        # Get color range for selected fabric color
-        color_data = self.fabric_colors[self.selected_fabric_color]
-        lower = np.array(color_data['hsv_range'][0])
-        upper = np.array(color_data['hsv_range'][1])
-        
-        # Create mask for selected color
-        if self.selected_fabric_color == 'Red':
-            # Special handling for red (wraps around hue)
-            mask1 = cv2.inRange(hsv_frame, lower, upper)
-            mask2 = cv2.inRange(hsv_frame, np.array([170, 50, 50]), np.array([180, 255, 255]))
-            cloth_mask = cv2.bitwise_or(mask1, mask2)
-        else:
-            cloth_mask = cv2.inRange(hsv_frame, lower, upper)
-        
-        # Apply morphological operations to clean up mask
-        kernel = np.ones((5, 5), np.uint8)
-        cloth_mask = cv2.morphologyEx(cloth_mask, cv2.MORPH_CLOSE, kernel)
-        cloth_mask = cv2.morphologyEx(cloth_mask, cv2.MORPH_OPEN, kernel)
-        
-        return cloth_mask
-    
+
     def draw_glow_rect(self, img, x, y, w, h, color, glow_intensity):
         """Draw rectangle with glow effect"""
         cv2.rectangle(img, (x, y), (x + w, y + h), color, 3)
@@ -176,9 +113,6 @@ class PatternMode:
         
         # Draw camera feed
         self.draw_camera_feed(frame, camera_frame)
-        
-        # Draw fabric color panel
-        self.draw_fabric_color_panel(frame, camera_frame)
     
     def draw_back_button(self, frame):
         """Draw back button in top left"""
@@ -214,22 +148,6 @@ class PatternMode:
                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, self.COLORS['text_primary'], 2)
         else:
             cam_frame = cv2.resize(camera_frame, (self.camera_width, self.camera_height))
-            
-            # Detect fabric to center pattern mask
-            fabric_centroid = None
-            if self.selected_fabric_color:
-                self.cloth_mask = self.detect_cloth(cam_frame)
-                if self.cloth_mask is not None:
-                    # Find largest contour (main fabric piece)
-                    contours, _ = cv2.findContours(self.cloth_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                    if contours:
-                        largest_contour = max(contours, key=cv2.contourArea)
-                        # Get centroid of fabric
-                        M = cv2.moments(largest_contour)
-                        if M["m00"] != 0:
-                            fabric_centroid = (int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"]))
-                            # Draw fabric outline
-                            cv2.drawContours(cam_frame, [largest_contour], -1, (0, 255, 0), 2)
             
             # Load pattern mask for comparison
             pattern_overlay, pattern_alpha = self.load_blueprint(self.current_level)
@@ -295,17 +213,9 @@ class PatternMode:
             if pattern_overlay is not None and pattern_alpha is not None:
                 overlay_h, overlay_w = pattern_overlay.shape[:2]
                 
-                # Center pattern on fabric centroid if detected, otherwise center on camera
-                if fabric_centroid is not None:
-                    x_offset = fabric_centroid[0] - (overlay_w // 2)
-                    y_offset = fabric_centroid[1] - (overlay_h // 2)
-                    # Clamp to camera bounds
-                    x_offset = max(0, min(x_offset, self.camera_width - overlay_w))
-                    y_offset = max(0, min(y_offset, self.camera_height - overlay_h))
-                else:
-                    # Fallback to center of camera
-                    x_offset = (self.camera_width - overlay_w) // 2
-                    y_offset = (self.camera_height - overlay_h) // 2
+                # Center pattern on camera
+                x_offset = (self.camera_width - overlay_w) // 2
+                y_offset = (self.camera_height - overlay_h) // 2
                 
                 if x_offset >= 0 and y_offset >= 0 and x_offset + overlay_w <= self.camera_width and y_offset + overlay_h <= self.camera_height:
                     # Create pattern mask for comparison
@@ -372,73 +282,12 @@ class PatternMode:
         cv2.line(frame, (self.camera_x + self.camera_width + 15, self.camera_y + self.camera_height + 15), 
                 (self.camera_x + self.camera_width + 15, self.camera_y + self.camera_height + 15 - corner_size), self.COLORS['cyan'], corner_thickness)
     
-    def draw_fabric_color_panel(self, frame, camera_frame):
-        """Draw fabric color selection and detection panel"""
-        # Panel background
-        panel_color = self.COLORS['dark_blue']
-        cv2.rectangle(frame, 
-                     (self.color_panel_x, self.color_panel_y),
-                     (self.color_panel_x + self.color_panel_width, self.color_panel_y + self.color_panel_height),
-                     self.COLORS['bright_blue'], 2)
-        
-        overlay = frame.copy()
-        cv2.rectangle(overlay, 
-                     (self.color_panel_x + 2, self.color_panel_y + 2),
-                     (self.color_panel_x + self.color_panel_width - 2, self.color_panel_y + self.color_panel_height - 2),
-                     panel_color, -1)
-        cv2.addWeighted(overlay, 0.7, frame, 0.3, 0, frame)
-        
-        # Title
-        title = "Fabric Color"
-        font_scale = 0.7
-        thickness = 2
-        (title_w, title_h), _ = cv2.getTextSize(title, cv2.FONT_HERSHEY_DUPLEX, font_scale, thickness)
-        title_x = self.color_panel_x + (self.color_panel_width - title_w) // 2
-        title_y = self.color_panel_y + 35
-        cv2.putText(frame, title, (title_x, title_y), cv2.FONT_HERSHEY_DUPLEX, 
-                   font_scale, self.COLORS['bright_blue'], thickness)
-        
-        # Draw color buttons
-        for btn in self.color_buttons:
-            is_selected = (btn['name'] == self.selected_fabric_color)
-            
-            # Get color
-            color_bgr = self.fabric_colors[btn['name']]['bgr']
-            
-            # Button border
-            border_color = self.COLORS['neon_blue'] if is_selected else self.COLORS['medium_blue']
-            
-            cv2.rectangle(frame, (btn['x'], btn['y']), 
-                         (btn['x'] + btn['w'], btn['y'] + btn['h']),
-                         border_color, 2 if is_selected else 1)
-            
-            # Color swatch (left side)
-            swatch_size = btn['h'] - 8
-            cv2.rectangle(frame, (btn['x'] + 4, btn['y'] + 4),
-                         (btn['x'] + 4 + swatch_size, btn['y'] + 4 + swatch_size),
-                         color_bgr, -1)
-            cv2.rectangle(frame, (btn['x'] + 4, btn['y'] + 4),
-                         (btn['x'] + 4 + swatch_size, btn['y'] + 4 + swatch_size),
-                         (255, 255, 255), 1)
-            
-            # Text
-            text_x = btn['x'] + swatch_size + 12
-            text_y = btn['y'] + (btn['h'] + 10) // 2
-            text_color = self.COLORS['text_primary'] if is_selected else self.COLORS['text_secondary']
-            cv2.putText(frame, btn['name'], (text_x, text_y),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, text_color, 1)
-    
+
     def handle_click(self, x, y):
         """Handle mouse clicks in pattern mode"""
         # Check back button
         bb = self.back_button
         if bb['x'] <= x <= bb['x'] + bb['w'] and bb['y'] <= y <= bb['y'] + bb['h']:
             return 'back'
-        
-        # Check color buttons
-        for btn in self.color_buttons:
-            if btn['x'] <= x <= btn['x'] + btn['w'] and btn['y'] <= y <= btn['y'] + btn['h']:
-                self.selected_fabric_color = btn['name']
-                return 'color_selected'
         
         return None
