@@ -23,14 +23,14 @@ class PatternMode:
         self.alpha_blend = 0.9
         self.glow_phase = 0
         
-        # Level info display at top center
-        self.level_display_y = 30
+        # Level info display at top center (aligned with back button)
+        self.level_display_y = 60
         
         # Camera display area (centered, moved higher)
         self.camera_width = 560
         self.camera_height = 420
         self.camera_x = 216  # Centered horizontally (1000 - 560) // 2
-        self.camera_y = 80  # Moved up since no level buttons
+        self.camera_y = 120  # Moved up since no level buttons
         
         # Back button (top left)
         self.back_button = {'x': 20, 'y': 20, 'w': 120, 'h': 50}
