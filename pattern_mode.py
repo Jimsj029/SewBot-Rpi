@@ -32,8 +32,20 @@ class PatternMode:
         self.camera_x = 216  # Centered horizontally (1000 - 560) // 2
         self.camera_y = 120  # Moved up since no level buttons
         
+        # Score/Stats panel (right side of camera)
+        self.score_panel_x = 800
+        self.score_panel_y = 200
+        self.score_panel_width = 200
+        self.score_panel_height = 250
+        
         # Back button (top left)
         self.back_button = {'x': 20, 'y': 20, 'w': 120, 'h': 50}
+        
+        # Game tracking variables
+        self.current_accuracy = 0.0
+        self.total_score = 0
+        self.pattern_progress = 0.0  # 0-100%
+        self.session_start_time = None
         
         # Load models from models directory
         models_dir = os.path.join(os.path.dirname(__file__), 'models')
@@ -120,6 +132,9 @@ class PatternMode:
         
         # Draw camera feed
         self.draw_camera_feed(frame, camera_frame)
+        
+        # Draw score/stats panel
+        self.draw_score_panel(frame)
     
     def draw_back_button(self, frame):
         """Draw back button in top left"""
@@ -228,6 +243,10 @@ class PatternMode:
                             roi[:, :, c] = (alpha_crop * pattern_crop[:, :, c] * 0.5 + 
                                           (1 - alpha_crop * 0.5) * roi[:, :, c])
                         cam_frame[y_offset:overlay_end_y, x_offset:overlay_end_x] = roi
+                        
+                        # Calculate accuracy by comparing detected stitches with pattern
+                        self.update_game_stats(detected_stitch_masks, pattern_alpha, 
+                                             x_offset, y_offset, actual_w, actual_h)
             
             frame[self.camera_y:self.camera_y+self.camera_height, 
                   self.camera_x:self.camera_x+self.camera_width] = cam_frame
@@ -252,6 +271,135 @@ class PatternMode:
         cv2.line(frame, (self.camera_x + self.camera_width + 15, self.camera_y + self.camera_height + 15), 
                 (self.camera_x + self.camera_width + 15, self.camera_y + self.camera_height + 15 - corner_size), self.COLORS['cyan'], corner_thickness)
     
+    def update_game_stats(self, detected_stitch_masks, pattern_alpha, x_offset, y_offset, actual_w, actual_h):
+        """Update game statistics based on detected stitches vs pattern"""
+        if len(detected_stitch_masks) == 0:
+            return
+        
+        # Create combined stitch mask
+        combined_stitch_mask = np.zeros((self.camera_height, self.camera_width), dtype=np.uint8)
+        for stitch_data in detected_stitch_masks:
+            combined_stitch_mask = np.maximum(combined_stitch_mask, stitch_data['mask'])
+        
+        # Get pattern mask in the ROI area
+        pattern_mask_roi = np.zeros((self.camera_height, self.camera_width), dtype=np.uint8)
+        pattern_crop = (pattern_alpha[0:actual_h, 0:actual_w] * 255).astype(np.uint8)
+        pattern_mask_roi[y_offset:y_offset+actual_h, x_offset:x_offset+actual_w] = (pattern_crop > 128).astype(np.uint8)
+        
+        # Calculate overlap (intersection) and union
+        intersection = np.logical_and(combined_stitch_mask > 0, pattern_mask_roi > 0)
+        union = np.logical_or(combined_stitch_mask > 0, pattern_mask_roi > 0)
+        
+        # Calculate IoU (Intersection over Union) as accuracy metric
+        intersection_pixels = np.sum(intersection)
+        union_pixels = np.sum(union)
+        
+        if union_pixels > 0:
+            accuracy = (intersection_pixels / union_pixels) * 100.0
+            self.current_accuracy = accuracy
+            
+            # Update score (1 point per % accuracy)
+            self.total_score = int(self.current_accuracy)
+            
+            # Calculate progress (how much of pattern is covered by stitches)
+            pattern_pixels = np.sum(pattern_mask_roi > 0)
+            if pattern_pixels > 0:
+                covered_pixels = np.sum(np.logical_and(combined_stitch_mask > 0, pattern_mask_roi > 0))
+                self.pattern_progress = min(100.0, (covered_pixels / pattern_pixels) * 100.0)
+            
+            # Update combo system
+            if accuracy > 70:  # Good accuracy threshold
+                self.current_combo += 1
+                self.max_combo = max(self.max_combo, self.current_combo)
+            else:
+                self.current_combo = 0
+        
+        # Update stitch count
+        self.stitches_detected = len(detected_stitch_masks)
+    
+    def draw_score_panel(self, frame):
+        """Draw the score/stats panel on the right side"""
+        x, y, w, h = self.score_panel_x, self.score_panel_y, self.score_panel_width, self.score_panel_height
+        
+        # Panel border with glow
+        pulse = 0.4 + 0.3 * abs(math.sin(self.glow_phase * 0.7))
+        self.draw_glow_rect(frame, x, y, w, h, self.COLORS['bright_blue'], pulse)
+        
+        # Panel background (semi-transparent)
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (x + 3, y + 3), (x + w - 3, y + h - 3), self.COLORS['dark_blue'], -1)
+        cv2.addWeighted(overlay, 0.8, frame, 0.2, 0, frame)
+        
+        # Title "STATS"
+        title_font_scale = 0.9
+        title_thickness = 2
+        title_text = "STATS"
+        (title_w, title_h), _ = cv2.getTextSize(title_text, cv2.FONT_HERSHEY_DUPLEX, title_font_scale, title_thickness)
+        title_x = x + (w - title_w) // 2
+        title_y = y + 40
+        cv2.putText(frame, title_text, (title_x, title_y), cv2.FONT_HERSHEY_DUPLEX, 
+                   title_font_scale, self.COLORS['glow_cyan'], title_thickness + 1)
+        cv2.putText(frame, title_text, (title_x, title_y), cv2.FONT_HERSHEY_DUPLEX, 
+                   title_font_scale, self.COLORS['bright_blue'], title_thickness)
+        
+        # Draw horizontal divider
+        cv2.line(frame, (x + 15, title_y + 15), (x + w - 15, title_y + 15), self.COLORS['medium_blue'], 2)
+        
+        # Stats content
+        content_x = x + 20
+        start_y = title_y + 45
+        line_height = 35
+        
+        # Accuracy
+        self.draw_stat_item(frame, "ACCURACY", f"{self.current_accuracy:.1f}%", 
+                           content_x, start_y, w - 40)
+        
+        # Score
+        self.draw_stat_item(frame, "SCORE", str(self.total_score), 
+                           content_x, start_y + line_height, w - 40)
+        
+        # Progress bar
+        progress_y = start_y + line_height * 2 + 30
+        cv2.putText(frame, "PROGRESS", (content_x, progress_y), cv2.FONT_HERSHEY_SIMPLEX, 
+                   0.5, self.COLORS['text_secondary'], 1)
+        
+        # Progress bar background
+        bar_y = progress_y + 10
+        bar_width = w - 40
+        bar_height = 20
+        cv2.rectangle(frame, (content_x, bar_y), (content_x + bar_width, bar_y + bar_height), 
+                     self.COLORS['medium_blue'], 2)
+        
+        # Progress bar fill
+        if self.pattern_progress > 0:
+            fill_width = int((bar_width - 4) * (self.pattern_progress / 100.0))
+            if fill_width > 0:
+                overlay_bar = frame.copy()
+                cv2.rectangle(overlay_bar, (content_x + 2, bar_y + 2), 
+                            (content_x + 2 + fill_width, bar_y + bar_height - 2), 
+                            self.COLORS['neon_blue'], -1)
+                cv2.addWeighted(overlay_bar, 0.7, frame, 0.3, 0, frame)
+        
+        # Progress percentage text
+        progress_text = f"{self.pattern_progress:.0f}%"
+        (prog_w, prog_h), _ = cv2.getTextSize(progress_text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+        cv2.putText(frame, progress_text, (content_x + (bar_width - prog_w) // 2, bar_y + 15), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, self.COLORS['text_primary'], 1)
+    
+    def draw_stat_item(self, frame, label, value, x, y, max_width, value_color=None):
+        """Helper method to draw a stat item (label and value)"""
+        if value_color is None:
+            value_color = self.COLORS['text_primary']
+        
+        # Draw label
+        cv2.putText(frame, label, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 
+                   0.5, self.COLORS['text_secondary'], 1)
+        
+        # Draw value (right-aligned)
+        (val_w, val_h), _ = cv2.getTextSize(value, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
+        value_x = x + max_width - val_w
+        cv2.putText(frame, value, (value_x, y + 18), cv2.FONT_HERSHEY_SIMPLEX, 
+                   0.7, value_color, 2)
 
     def handle_click(self, x, y):
         """Handle mouse clicks in pattern mode"""
