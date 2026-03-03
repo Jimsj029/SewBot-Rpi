@@ -180,16 +180,11 @@ class SewBotApp:
                     self.tutorial_player.reset()
                     
             elif self.state == 'tutorial':
-                # Check back button first
-                bb = self.back_button
-                if bb['x'] <= x <= bb['x'] + bb['w'] and bb['y'] <= y <= bb['y'] + bb['h']:
-                    self.play_button_click_sound()
-                    self.state = 'main_menu'
-                    return
-                    
-                # Handle tutorial clicks
+                # Handle tutorial clicks (tutorial now manages back button internally)
                 action = self.tutorial_player.handle_click(x, y)
-                if action == 'continue':
+                if action == 'back':
+                    self.state = 'main_menu'
+                elif action == 'continue':
                     self.state = 'mode_selection'
                 elif action == 'replay':
                     self.tutorial_player.reset()
@@ -535,9 +530,6 @@ class SewBotApp:
         
         # Draw tutorial player
         self.tutorial_player.draw(frame)
-        
-        # Draw back button
-        self.draw_back_button(frame)
         
         # Draw mute button (positioned to left of skip all button)
         # Skip all button is at x=(width-160), so position mute button to its left

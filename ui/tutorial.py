@@ -105,11 +105,27 @@ class TutorialPlayer:
         }
         
         self.replay_current_button = {
-            'x': 160,
-            'y': self.height - 60,
+            'x': 170,
+            'y': self.height - 80,
             'w': 140,
-            'h': 40,
+            'h': 50,
             'text': 'REPLAY'
+        }
+        
+        self.previous_button = {
+            'x': 20,
+            'y': self.height - 80,
+            'w': 140,
+            'h': 50,
+            'text': 'PREVIOUS'
+        }
+        
+        self.back_button = {
+            'x': 20,
+            'y': 20,
+            'w': 140,
+            'h': 50,
+            'text': '< BACK'
         }
         
         self.skip_all_button = {
@@ -212,6 +228,16 @@ class TutorialPlayer:
             # Last step completed
             return False
     
+    def previous_step(self):
+        """Move to the previous tutorial step"""
+        if self.current_step > 0:
+            self.current_step -= 1
+            self.load_current_video()
+            return True
+        else:
+            # Already on first step
+            return False
+    
     def replay_current_video(self):
         """Replay the current video from the beginning"""
         self.video_frame = 0
@@ -277,7 +303,14 @@ class TutorialPlayer:
             pass  # Silently fail if sound effect doesn't exist
     
     def handle_click(self, x, y):
-        """Handle mouse clicks, returns action: 'next', 'done', 'replay_current', 'replay', 'continue', or None"""
+        """Handle mouse clicks, returns action: 'next', 'done', 'replay_current', 'replay', 'continue', 'back', 'previous', or None"""
+        # Check back button (top left)
+        if not self.skipped and not self.completed:
+            btn = self.back_button
+            if btn['x'] <= x <= btn['x'] + btn['w'] and btn['y'] <= y <= btn['y'] + btn['h']:
+                self.play_button_click_sound()
+                return 'back'
+        
         # Check skip all button (top right - skips entire tutorial)
         if not self.skipped and not self.completed:
             btn = self.skip_all_button
@@ -300,6 +333,15 @@ class TutorialPlayer:
                 click_percentage = (x - bar['x']) / bar['w']
                 self.seek_to_position(click_percentage)
                 return 'seek'
+        
+        # Check previous button (only when video is playing or paused and not on first step)
+        if not self.skipped and not self.completed and self.current_step > 0:
+            btn = self.previous_button
+            if btn['x'] <= x <= btn['x'] + btn['w'] and btn['y'] <= y <= btn['y'] + btn['h']:
+                self.play_button_click_sound()
+                # Go to previous step
+                if self.previous_step():
+                    return 'previous'
         
         # Check replay current video button (only when video is playing or paused)
         if not self.skipped and not self.completed:
@@ -523,10 +565,17 @@ class TutorialPlayer:
             # Draw step indicator
             self.draw_step_indicator(img)
             
+            # Draw back button (top left)
+            self.draw_button(img, self.back_button, COLORS['button_hover'])
+            
             # Draw skip all button (top right)
             self.draw_button(img, self.skip_all_button, COLORS['button_normal'])
             
-            # Draw replay current button (left side)
+            # Draw previous button (bottom left) - only show if not on first step
+            if self.current_step > 0:
+                self.draw_button(img, self.previous_button, COLORS['button_normal'])
+            
+            # Draw replay current button (bottom left, next to previous)
             self.draw_button(img, self.replay_current_button, COLORS['button_normal'])
             
             # Draw next/done button (right side)
