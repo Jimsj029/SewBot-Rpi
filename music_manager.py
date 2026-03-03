@@ -12,7 +12,9 @@ class MusicManager:
         self.music_folder = music_folder
         self.initialized = False
         self.current_track = None
-        self.volume = 0.5  # Default volume (0.0 to 1.0)
+        self.volume = 0.3  # Default volume (0.0 to 1.0)
+        self.sound_effects = {}  # Store loaded sound effects
+        self.sfx_volume = 0.7  # Sound effects volume (0.0 to 1.0)
         
         # Initialize pygame mixer
         try:
@@ -139,6 +141,77 @@ class MusicManager:
             return pygame.mixer.music.get_busy()
         except:
             return False
+    
+    def load_sound_effect(self, sfx_name):
+        """
+        Load a sound effect
+        Args:
+            sfx_name: Name of the sound effect file
+        Returns:
+            True if loaded successfully, False otherwise
+        """
+        if not self.initialized:
+            return False
+        
+        try:
+            # Check if already loaded
+            if sfx_name in self.sound_effects:
+                return True
+            
+            # Build the full path to the sound effect file
+            sfx_path = os.path.join(self.music_folder, sfx_name)
+            
+            if not os.path.exists(sfx_path):
+                print(f"⚠ Sound effect file not found: {sfx_path}")
+                return False
+            
+            # Load the sound effect
+            sound = pygame.mixer.Sound(sfx_path)
+            sound.set_volume(self.sfx_volume)
+            self.sound_effects[sfx_name] = sound
+            print(f"✓ Sound effect loaded: {sfx_name}")
+            return True
+        except Exception as e:
+            print(f"⚠ Could not load sound effect: {e}")
+            return False
+    
+    def play_sound_effect(self, sfx_name):
+        """
+        Play a sound effect
+        Args:
+            sfx_name: Name of the sound effect file
+        """
+        if not self.initialized:
+            return
+        
+        try:
+            # Load if not already loaded
+            if sfx_name not in self.sound_effects:
+                if not self.load_sound_effect(sfx_name):
+                    return
+            
+            # Play the sound effect
+            self.sound_effects[sfx_name].play()
+        except Exception as e:
+            print(f"⚠ Could not play sound effect: {e}")
+    
+    def set_sfx_volume(self, volume):
+        """
+        Set sound effects volume
+        Args:
+            volume: Volume level (0.0 to 1.0)
+        """
+        if not self.initialized:
+            return
+        
+        try:
+            self.sfx_volume = max(0.0, min(1.0, volume))  # Clamp between 0 and 1
+            # Update volume for all loaded sound effects
+            for sound in self.sound_effects.values():
+                sound.set_volume(self.sfx_volume)
+            print(f"🔊 SFX Volume: {int(self.sfx_volume * 100)}%")
+        except Exception as e:
+            print(f"⚠ Could not set SFX volume: {e}")
     
     def cleanup(self):
         """Clean up resources"""

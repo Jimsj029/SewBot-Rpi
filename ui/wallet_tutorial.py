@@ -4,7 +4,12 @@ import cv2
 import numpy as np
 import math
 import os
+import sys
 import time
+
+# Add parent directory to path for imports
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+from music_manager import get_music_manager
 
 # Try to import pygame for audio playback
 try:
@@ -46,6 +51,7 @@ class WalletTutorialPlayer:
         self.skipped = False
         self.completed = False
         self.video_paused = False  # Track if video is paused at end
+        self.your_turn_mode = False  # Track if in "your turn" practice mode
         
         # Progress bar position (updated during draw)
         self.progress_bar = {'x': 0, 'y': 0, 'w': 0, 'h': 0}
@@ -84,6 +90,9 @@ class WalletTutorialPlayer:
             except Exception as e:
                 print(f"Failed to load audio: {e}")
         
+        # Music manager for sound effects
+        self.music_manager = get_music_manager()
+        
         # Load the first video
         self.load_current_video()
         
@@ -97,10 +106,10 @@ class WalletTutorialPlayer:
         }
         
         self.replay_current_button = {
-            'x': 160,
-            'y': self.height - 60,
+            'x': 170,
+            'y': self.height - 80,
             'w': 140,
-            'h': 40,
+            'h': 50,
             'text': 'REPLAY'
         }
         
@@ -126,6 +135,38 @@ class WalletTutorialPlayer:
             'w': 200,
             'h': 60,
             'text': 'CONTINUE'
+        }
+        
+        self.your_turn_next_button = {
+            'x': self.width - 160,
+            'y': self.height - 80,
+            'w': 140,
+            'h': 50,
+            'text': 'NEXT'
+        }
+        
+        self.previous_button = {
+            'x': 20,
+            'y': self.height - 80,
+            'w': 140,
+            'h': 50,
+            'text': 'PREVIOUS'
+        }
+        
+        self.your_turn_previous_button = {
+            'x': 20,
+            'y': self.height - 80,
+            'w': 140,
+            'h': 50,
+            'text': 'PREVIOUS'
+        }
+        
+        self.back_button = {
+            'x': 20,
+            'y': 20,
+            'w': 140,
+            'h': 50,
+            'text': '< BACK'
         }
     
     def load_video_list(self):
@@ -300,6 +341,7 @@ class WalletTutorialPlayer:
         self.skipped = False
         self.completed = False
         self.video_paused = False
+        self.your_turn_mode = False  # Reset your turn mode
         self.current_frame_img = None
         self.last_frame_time = time.time()
         self.frame_accumulator = 0.0
@@ -315,20 +357,43 @@ class WalletTutorialPlayer:
         # Load the first video
         self.load_current_video()
     
+    def play_button_click_sound(self):
+        """Play button click sound effect"""
+        try:
+            self.music_manager.play_sound_effect('button_click.mp3')
+        except Exception as e:
+            pass  # Silently fail if sound effect doesn't exist
+    
     def handle_click(self, x, y):
-        """Handle mouse clicks, returns action: 'next', 'done', 'replay_current', 'replay', 'continue', or None"""
-        # Check skip all button (top right - skips entire tutorial)
-        if not self.skipped and not self.completed:
-            btn = self.skip_all_button
+        """Handle mouse clicks, returns action: 'next', 'done', 'replay_current', 'replay', 'continue', 'your_turn_next', 'previous', or None"""
+        # Check your_turn_previous button when in your turn mode
+        if self.your_turn_mode:
+            btn = self.your_turn_previous_button
             if btn['x'] <= x <= btn['x'] + btn['w'] and btn['y'] <= y <= btn['y'] + btn['h']:
-                self.skipped = True
-                # Stop audio when skipping
-                if AUDIO_AVAILABLE and pygame.mixer.get_init():
-                    try:
-                        pygame.mixer.music.stop()
-                    except:
-                        pass
-                return 'continue'  # Skip all tutorials and go to mode selection
+                self.play_button_click_sound()
+                # Exit your turn mode and go back to current step's video
+                self.your_turn_mode = False
+                self.replay_current_video()
+                return 'previous_from_your_turn'
+        
+        # Check your_turn_next button when in your turn mode
+        if self.your_turn_mode:
+            btn = self.your_turn_next_button
+            if btn['x'] <= x <= btn['x'] + btn['w'] and btn['y'] <= y <= btn['y'] + btn['h']:
+                self.play_button_click_sound()
+                # Exit your turn mode and go to next step
+                self.your_turn_mode = False
+                if self.next_step():
+                    return 'your_turn_next'
+                else:
+                    return 'continue'  # Done with all tutorials
+        
+        # Check back button (top left - always visible)
+        if not self.skipped and not self.completed:
+            btn = self.back_button
+            if btn['x'] <= x <= btn['x'] + btn['w'] and btn['y'] <= y <= btn['y'] + btn['h']:
+                self.play_button_click_sound()
+                return 'back'
         
         # Check progress bar click for seeking (only when video is playing or paused)
         if not self.skipped and not self.completed:
@@ -340,22 +405,40 @@ class WalletTutorialPlayer:
                 return 'seek'
         
         # Check replay current video button (only when video is playing or paused)
-        if not self.skipped and not self.completed:
+        if not self.skipped and not self.completed and not self.your_turn_mode:
             btn = self.replay_current_button
             if btn['x'] <= x <= btn['x'] + btn['w'] and btn['y'] <= y <= btn['y'] + btn['h']:
+                self.play_button_click_sound()
                 # Replay current video from beginning
                 self.replay_current_video()
                 return 'replay_current'
         
+        # Check previous button (only when video is playing/paused and on steps 1-9)
+        if not self.skipped and not self.completed and not self.your_turn_mode:
+            if self.current_step >= 1 and self.current_step <= 9:
+                btn = self.previous_button
+                if btn['x'] <= x <= btn['x'] + btn['w'] and btn['y'] <= y <= btn['y'] + btn['h']:
+                    self.play_button_click_sound()
+                    # Go to previous step
+                    self.current_step -= 1
+                    self.load_current_video()
+                    return 'previous'
+        
         # Check next/done button (only when video is playing or paused)
-        if not self.skipped and not self.completed:
+        if not self.skipped and not self.completed and not self.your_turn_mode:
             btn = self.next_button
             if btn['x'] <= x <= btn['x'] + btn['w'] and btn['y'] <= y <= btn['y'] + btn['h']:
+                self.play_button_click_sound()
                 # If on last step, this is the Done button
                 if self.current_step >= self.total_steps - 1:
                     return 'continue'  # Done with all tutorials
+                # Check if current step needs \"your turn\" practice (steps 1-9, not materials or showcase)
+                elif self.current_step >= 1 and self.current_step <= 9:
+                    # Transition to your_turn mode
+                    self.your_turn_mode = True
+                    return 'enter_your_turn'
                 else:
-                    # Move to next step
+                    # Move to next step directly (for materials and showcase)
                     if self.next_step():
                         return 'next'
                     else:
@@ -365,12 +448,14 @@ class WalletTutorialPlayer:
         if self.skipped or self.completed:
             btn = self.continue_button
             if btn['x'] <= x <= btn['x'] + btn['w'] and btn['y'] <= y <= btn['y'] + btn['h']:
+                self.play_button_click_sound()
                 return 'continue'
         
         # Check replay button (after skip or completion)
         if self.skipped or self.completed:
             btn = self.replay_button
             if btn['x'] <= x <= btn['x'] + btn['w'] and btn['y'] <= y <= btn['y'] + btn['h']:
+                self.play_button_click_sound()
                 return 'replay'
         
         return None
@@ -378,6 +463,10 @@ class WalletTutorialPlayer:
     def update(self):
         """Update animation and video progress"""
         self.glow_phase += 0.05
+        
+        # Don't update video if in your_turn_mode
+        if self.your_turn_mode:
+            return
         
         # Update video frame with proper timing (only if not paused)
         if not self.skipped and not self.completed and not self.video_paused:
@@ -536,9 +625,14 @@ class WalletTutorialPlayer:
         # Store progress bar position for click detection
         self.progress_bar = {'x': bar_x, 'y': bar_y, 'w': bar_width, 'h': bar_height}
     
-    def draw(self, img):
+    def draw(self, img, camera_frame=None):
         """Main draw function"""
         self.update()
+        
+        # Draw \"your turn\" practice screen if in that mode
+        if self.your_turn_mode:
+            self.draw_your_turn(img, camera_frame)
+            return
         
         # Draw video or completion screen
         if not self.skipped and not self.completed:
@@ -557,11 +651,15 @@ class WalletTutorialPlayer:
             # Draw step indicator
             self.draw_step_indicator(img)
             
-            # Draw skip all button (top right)
-            self.draw_button(img, self.skip_all_button, COLORS['button_normal'])
+            # Draw back button (top left)
+            self.draw_button(img, self.back_button, COLORS['button_hover'])
             
             # Draw replay current button (left side)
             self.draw_button(img, self.replay_current_button, COLORS['button_normal'])
+            
+            # Draw previous button (bottom left) - only show on steps 1-9
+            if self.current_step >= 1 and self.current_step <= 9:
+                self.draw_button(img, self.previous_button, COLORS['button_hover'])
             
             # Draw next/done button (right side)
             # Change text to "DONE" on last step
@@ -605,9 +703,9 @@ class WalletTutorialPlayer:
         thickness = 2
         
         (text_w, text_h), baseline = cv2.getTextSize(text, font, font_scale, thickness)
-        # Keep centered horizontally, align vertically with skip all button
+        # Keep centered horizontally at the top
         text_x = (self.width - text_w) // 2
-        text_y = 20 + (50 + text_h) // 2  # Same Y position as skip all button
+        text_y = 20 + (50 + text_h) // 2  # Same Y position as back button
         
         # Background for better visibility
         padding = 10
@@ -625,6 +723,102 @@ class WalletTutorialPlayer:
         # Text
         cv2.putText(img, text, (text_x, text_y), font, font_scale, 
                    COLORS['text_accent'], thickness)
+    
+    def draw_your_turn(self, img, camera_frame):
+        """Draw the 'Your Turn' practice screen with webcam feed"""
+        font = cv2.FONT_HERSHEY_DUPLEX
+        
+        # Title at top
+        title = f"Your Turn - Practice Step {self.current_step}"
+        font_scale = 1.2
+        thickness = 3
+        
+        (text_w, text_h), baseline = cv2.getTextSize(title, font, font_scale, thickness)
+        text_x = (self.width - text_w) // 2
+        text_y = 50
+        
+        # Background for title
+        padding = 15
+        cv2.rectangle(img, 
+                     (text_x - padding, text_y - text_h - padding),
+                     (text_x + text_w + padding, text_y + padding),
+                     (40, 40, 40), -1)
+        
+        # Border with glow
+        glow_intensity = 0.5 + 0.5 * abs(math.sin(self.glow_phase))
+        border_color = tuple(int(c * glow_intensity) for c in COLORS['cyan'])
+        cv2.rectangle(img, 
+                     (text_x - padding, text_y - text_h - padding),
+                     (text_x + text_w + padding, text_y + padding),
+                     border_color, 3)
+        
+        # Title text
+        cv2.putText(img, title, (text_x, text_y), font, font_scale, 
+                   COLORS['text_accent'], thickness)
+        
+        # Instruction text
+        instruction = "Now it's your turn! Practice what you learned in the video."
+        font_scale_small = 0.7
+        thickness_small = 1
+        (inst_w, inst_h), _ = cv2.getTextSize(instruction, font, font_scale_small, thickness_small)
+        inst_x = (self.width - inst_w) // 2
+        inst_y = text_y + text_h + 40
+        cv2.putText(img, instruction, (inst_x, inst_y), font, font_scale_small, 
+                   COLORS['text_secondary'], thickness_small)
+        
+        # Second instruction line
+        instruction2 = "When you're ready, click NEXT to continue to the next step."
+        (inst2_w, inst2_h), _ = cv2.getTextSize(instruction2, font, font_scale_small, thickness_small)
+        inst2_x = (self.width - inst2_w) // 2
+        inst2_y = inst_y + 25
+        cv2.putText(img, instruction2, (inst2_x, inst2_y), font, font_scale_small, 
+                   COLORS['text_secondary'], thickness_small)
+        
+        # Camera feed area (same dimensions as pattern mode)
+        camera_w = 544
+        camera_h = 400
+        camera_x = (self.width - camera_w) // 2  # Center horizontally
+        camera_y = inst2_y + 30
+        
+        # Draw camera frame border with glow effect (similar to pattern mode)
+        border_color_intensity = 0.4 + 0.3 * abs(math.sin(self.glow_phase * 0.7))
+        border_color_glow = tuple(int(c * border_color_intensity) for c in COLORS['bright_blue'])
+        
+        # Draw outer glow
+        cv2.rectangle(img, (camera_x - 5, camera_y - 5), 
+                     (camera_x + camera_w + 5, camera_y + camera_h + 5), 
+                     border_color_glow, 3)
+        
+        # Display camera feed or placeholder
+        if camera_frame is not None:
+            # Resize camera to fill the entire area (like pattern mode)
+            cam_frame_resized = cv2.resize(camera_frame, (camera_w, camera_h))
+            
+            # Copy frame to main image
+            img[camera_y:camera_y + camera_h, camera_x:camera_x + camera_w] = cam_frame_resized
+        else:
+            # Dark background for camera
+            cv2.rectangle(img, (camera_x, camera_y), (camera_x + camera_w, camera_y + camera_h), 
+                         COLORS['dark_blue'], -1)
+            
+            # Show "Opening camera..." message
+            msg = "Opening camera..."
+            font_scale_msg = 0.8
+            thickness_msg = 2
+            (msg_w, msg_h), _ = cv2.getTextSize(msg, font, font_scale_msg, thickness_msg)
+            msg_x = camera_x + (camera_w - msg_w) // 2
+            msg_y = camera_y + (camera_h + msg_h) // 2
+            cv2.putText(img, msg, (msg_x, msg_y), font, font_scale_msg, 
+                       COLORS['text_primary'], thickness_msg)
+        
+        # Draw back button (top left)
+        self.draw_button(img, self.back_button, COLORS['button_hover'])
+        
+        # Draw PREVIOUS button to go back to video (bottom left)
+        self.draw_button(img, self.your_turn_previous_button, COLORS['button_hover'])
+        
+        # Draw NEXT button to continue to next step (bottom right)
+        self.draw_button(img, self.your_turn_next_button, COLORS['button_hover'])
     
     def cleanup(self):
         """Release video capture and audio resources"""

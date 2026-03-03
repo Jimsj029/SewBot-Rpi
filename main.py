@@ -154,8 +154,13 @@ class SewBotApp:
     def mouse_callback(self, event, x, y, flags, param):
         if event == cv2.EVENT_LBUTTONDOWN:
             # Check mute button (available on all screens)
-            mb = self.mute_button
+            # Adjust position for tutorial state where it's moved left of skip all button
+            mb = self.mute_button.copy()
+            if self.state == 'tutorial':
+                mb['x'] = self.width - 160 - 50 - 20  # Same adjustment as in draw_tutorial
+            
             if mb['x'] <= x <= mb['x'] + mb['w'] and mb['y'] <= y <= mb['y'] + mb['h']:
+                self.play_button_click_sound()
                 self.toggle_mute()
                 return
             
@@ -163,12 +168,14 @@ class SewBotApp:
                 # Check quit button only on main menu
                 qb = self.quit_button
                 if qb['x'] <= x <= qb['x'] + qb['w'] and qb['y'] <= y <= qb['y'] + qb['h']:
+                    self.play_button_click_sound()
                     print("Quit button clicked - Exiting...")
                     self.running = False
                     return
                 
                 btn = self.start_button
                 if btn['x'] <= x <= btn['x'] + btn['w'] and btn['y'] <= y <= btn['y'] + btn['h']:
+                    self.play_button_click_sound()
                     self.state = 'tutorial'
                     self.tutorial_player.reset()
                     
@@ -176,6 +183,7 @@ class SewBotApp:
                 # Check back button first
                 bb = self.back_button
                 if bb['x'] <= x <= bb['x'] + bb['w'] and bb['y'] <= y <= bb['y'] + bb['h']:
+                    self.play_button_click_sound()
                     self.state = 'main_menu'
                     return
                     
@@ -187,29 +195,41 @@ class SewBotApp:
                     self.tutorial_player.reset()
             
             elif self.state == 'wallet_tutorial':
-                # Check back button first
-                bb = self.back_button
-                if bb['x'] <= x <= bb['x'] + bb['w'] and bb['y'] <= y <= bb['y'] + bb['h']:
-                    self.state = 'mode_selection'
-                    return
-                    
                 # Handle wallet tutorial clicks
                 action = self.wallet_tutorial_player.handle_click(x, y)
-                if action == 'continue':
+                if action == 'back':
                     self.state = 'mode_selection'
+                    # Release camera when going back
+                    self.release_camera()
+                elif action == 'continue':
+                    self.state = 'mode_selection'
+                    # Release camera when done
+                    self.release_camera()
                 elif action == 'replay':
                     self.wallet_tutorial_player.reset()
+                    # Release camera when restarting
+                    self.release_camera()
+                elif action == 'enter_your_turn':
+                    # Initialize camera in background thread for your turn mode
+                    if self.camera is None and not self.camera_initializing:
+                        threading.Thread(target=self.init_camera, daemon=True).start()
+                elif action == 'your_turn_next':
+                    # Keep camera open for next your turn, but check if it needs initialization
+                    if self.camera is None and not self.camera_initializing:
+                        threading.Thread(target=self.init_camera, daemon=True).start()
                     
             elif self.state == 'mode_selection':
                 # Check quit button
                 qb = self.quit_button
                 if qb['x'] <= x <= qb['x'] + qb['w'] and qb['y'] <= y <= qb['y'] + qb['h']:
+                    self.play_button_click_sound()
                     print("Quit button clicked - Exiting...")
                     self.running = False
                     return
                 
                 pb = self.pattern_button
                 if pb['x'] <= x <= pb['x'] + pb['w'] and pb['y'] <= y <= pb['y'] + pb['h']:
+                    self.play_button_click_sound()
                     self.state = 'level_selection'
                     # Start camera initialization in background
                     if self.camera is None and not self.camera_initializing:
@@ -217,18 +237,21 @@ class SewBotApp:
                 
                 wb = self.wallet_button
                 if wb['x'] <= x <= wb['x'] + wb['w'] and wb['y'] <= y <= wb['y'] + wb['h']:
+                    self.play_button_click_sound()
                     # Go to wallet tutorial
                     self.state = 'wallet_tutorial'
                     self.wallet_tutorial_player.reset()
                 
                 tb = self.tutorial_button
                 if tb['x'] <= x <= tb['x'] + tb['w'] and tb['y'] <= y <= tb['y'] + tb['h']:
+                    self.play_button_click_sound()
                     # Go back to tutorial state to replay it
                     self.state = 'tutorial'
                     self.tutorial_player.reset()
                 
                 bb = self.back_button
                 if bb['x'] <= x <= bb['x'] + bb['w'] and bb['y'] <= y <= bb['y'] + bb['h']:
+                    self.play_button_click_sound()
                     self.state = 'main_menu'
             
             elif self.state == 'level_selection':
@@ -457,6 +480,10 @@ class SewBotApp:
             self.music_manager.set_volume(0.5)
             print("🔊 Music unmuted")
     
+    def play_button_click_sound(self):
+        """Play button click sound effect"""
+        self.music_manager.play_sound_effect('button_click.mp3')
+    
     def draw_main_menu(self, frame):
         # Use pre-rendered grid background
         frame[:] = self.grid_background
@@ -511,16 +538,28 @@ class SewBotApp:
         
         # Draw back button
         self.draw_back_button(frame)
+        
+        # Draw mute button (positioned to left of skip all button)
+        # Skip all button is at x=(width-160), so position mute button to its left
+        original_mute_x = self.mute_button['x']
+        self.mute_button['x'] = self.width - 160 - 50 - 20  # 20px spacing from skip all
+        self.draw_mute_button(frame)
+        self.mute_button['x'] = original_mute_x  # Restore original position
     
     def draw_wallet_tutorial(self, frame):
         # Use pre-rendered grid background
         frame[:] = self.grid_background
         
-        # Draw wallet tutorial player
-        self.wallet_tutorial_player.draw(frame)
+        # Get camera frame if in your_turn mode
+        camera_frame = None
+        if self.wallet_tutorial_player.your_turn_mode:
+            if self.camera is not None and self.camera.isOpened():
+                ret, camera_frame = self.camera.read()
+                if not ret:
+                    camera_frame = None
         
-        # Draw back button
-        self.draw_back_button(frame)
+        # Draw wallet tutorial player (pass camera frame)
+        self.wallet_tutorial_player.draw(frame, camera_frame)
     
     def draw_level_selection(self, frame):
         """Draw level selection screen"""
@@ -615,16 +654,6 @@ class SewBotApp:
             cv2.putText(img, line, (line_x, line_y), cv2.FONT_HERSHEY_SIMPLEX, desc_font_scale, self.COLORS['text_secondary'], desc_thickness)
     
     def run(self):
-        print("=" * 60)
-        print("SEWBOT - PATTERN RECOGNITION SYSTEM")
-        print("=" * 60)
-        print("Optimized for Raspberry Pi")
-        print(f"Camera Status: {self.camera_status_message}")
-        print("Controls:")
-        print("  - Press F to toggle fullscreen")
-        print("  - Press ESC to exit fullscreen or quit")
-        print("  - Click the X button to quit")
-        print()
         
         while self.running:
             try:
