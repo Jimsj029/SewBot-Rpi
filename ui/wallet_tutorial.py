@@ -4,7 +4,12 @@ import cv2
 import numpy as np
 import math
 import os
+import sys
 import time
+
+# Add parent directory to path for imports
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+from music_manager import get_music_manager
 
 # Try to import pygame for audio playback
 try:
@@ -85,6 +90,9 @@ class WalletTutorialPlayer:
             except Exception as e:
                 print(f"Failed to load audio: {e}")
         
+        # Music manager for sound effects
+        self.music_manager = get_music_manager()
+        
         # Load the first video
         self.load_current_video()
         
@@ -155,7 +163,7 @@ class WalletTutorialPlayer:
         
         self.back_button = {
             'x': 20,
-            'y': self.height - 80,
+            'y': 20,
             'w': 140,
             'h': 50,
             'text': '< BACK'
@@ -349,12 +357,20 @@ class WalletTutorialPlayer:
         # Load the first video
         self.load_current_video()
     
+    def play_button_click_sound(self):
+        """Play button click sound effect"""
+        try:
+            self.music_manager.play_sound_effect('button_click.mp3')
+        except Exception as e:
+            pass  # Silently fail if sound effect doesn't exist
+    
     def handle_click(self, x, y):
         """Handle mouse clicks, returns action: 'next', 'done', 'replay_current', 'replay', 'continue', 'your_turn_next', 'previous', or None"""
         # Check your_turn_previous button when in your turn mode
         if self.your_turn_mode:
             btn = self.your_turn_previous_button
             if btn['x'] <= x <= btn['x'] + btn['w'] and btn['y'] <= y <= btn['y'] + btn['h']:
+                self.play_button_click_sound()
                 # Exit your turn mode and go back to current step's video
                 self.your_turn_mode = False
                 self.replay_current_video()
@@ -364,6 +380,7 @@ class WalletTutorialPlayer:
         if self.your_turn_mode:
             btn = self.your_turn_next_button
             if btn['x'] <= x <= btn['x'] + btn['w'] and btn['y'] <= y <= btn['y'] + btn['h']:
+                self.play_button_click_sound()
                 # Exit your turn mode and go to next step
                 self.your_turn_mode = False
                 if self.next_step():
@@ -371,18 +388,12 @@ class WalletTutorialPlayer:
                 else:
                     return 'continue'  # Done with all tutorials
         
-        # Check skip all button (top right - skips entire tutorial)
-        if not self.skipped and not self.completed and not self.your_turn_mode:
-            btn = self.skip_all_button
+        # Check back button (top left - always visible)
+        if not self.skipped and not self.completed:
+            btn = self.back_button
             if btn['x'] <= x <= btn['x'] + btn['w'] and btn['y'] <= y <= btn['y'] + btn['h']:
-                self.skipped = True
-                # Stop audio when skipping
-                if AUDIO_AVAILABLE and pygame.mixer.get_init():
-                    try:
-                        pygame.mixer.music.stop()
-                    except:
-                        pass
-                return 'continue'  # Skip all tutorials and go to mode selection
+                self.play_button_click_sound()
+                return 'back'
         
         # Check progress bar click for seeking (only when video is playing or paused)
         if not self.skipped and not self.completed:
@@ -397,22 +408,17 @@ class WalletTutorialPlayer:
         if not self.skipped and not self.completed and not self.your_turn_mode:
             btn = self.replay_current_button
             if btn['x'] <= x <= btn['x'] + btn['w'] and btn['y'] <= y <= btn['y'] + btn['h']:
+                self.play_button_click_sound()
                 # Replay current video from beginning
                 self.replay_current_video()
                 return 'replay_current'
-        
-        # Check back button (only on materials or showcase)
-        if not self.skipped and not self.completed and not self.your_turn_mode:
-            if self.current_step == 0 or self.current_step == self.total_steps - 1:
-                btn = self.back_button
-                if btn['x'] <= x <= btn['x'] + btn['w'] and btn['y'] <= y <= btn['y'] + btn['h']:
-                    return 'back'
         
         # Check previous button (only when video is playing/paused and on steps 1-9)
         if not self.skipped and not self.completed and not self.your_turn_mode:
             if self.current_step >= 1 and self.current_step <= 9:
                 btn = self.previous_button
                 if btn['x'] <= x <= btn['x'] + btn['w'] and btn['y'] <= y <= btn['y'] + btn['h']:
+                    self.play_button_click_sound()
                     # Go to previous step
                     self.current_step -= 1
                     self.load_current_video()
@@ -422,6 +428,7 @@ class WalletTutorialPlayer:
         if not self.skipped and not self.completed and not self.your_turn_mode:
             btn = self.next_button
             if btn['x'] <= x <= btn['x'] + btn['w'] and btn['y'] <= y <= btn['y'] + btn['h']:
+                self.play_button_click_sound()
                 # If on last step, this is the Done button
                 if self.current_step >= self.total_steps - 1:
                     return 'continue'  # Done with all tutorials
@@ -441,12 +448,14 @@ class WalletTutorialPlayer:
         if self.skipped or self.completed:
             btn = self.continue_button
             if btn['x'] <= x <= btn['x'] + btn['w'] and btn['y'] <= y <= btn['y'] + btn['h']:
+                self.play_button_click_sound()
                 return 'continue'
         
         # Check replay button (after skip or completion)
         if self.skipped or self.completed:
             btn = self.replay_button
             if btn['x'] <= x <= btn['x'] + btn['w'] and btn['y'] <= y <= btn['y'] + btn['h']:
+                self.play_button_click_sound()
                 return 'replay'
         
         return None
@@ -642,17 +651,14 @@ class WalletTutorialPlayer:
             # Draw step indicator
             self.draw_step_indicator(img)
             
-            # Draw skip all button (top right)
-            self.draw_button(img, self.skip_all_button, COLORS['button_normal'])
+            # Draw back button (top left)
+            self.draw_button(img, self.back_button, COLORS['button_hover'])
             
             # Draw replay current button (left side)
             self.draw_button(img, self.replay_current_button, COLORS['button_normal'])
             
-            # Draw back button (bottom left) - only show on materials (step 0) or showcase (step 10)
-            if self.current_step == 0 or self.current_step == self.total_steps - 1:
-                self.draw_button(img, self.back_button, COLORS['button_hover'])
             # Draw previous button (bottom left) - only show on steps 1-9
-            elif self.current_step >= 1 and self.current_step <= 9:
+            if self.current_step >= 1 and self.current_step <= 9:
                 self.draw_button(img, self.previous_button, COLORS['button_hover'])
             
             # Draw next/done button (right side)
@@ -697,9 +703,9 @@ class WalletTutorialPlayer:
         thickness = 2
         
         (text_w, text_h), baseline = cv2.getTextSize(text, font, font_scale, thickness)
-        # Keep centered horizontally, align vertically with skip all button
+        # Keep centered horizontally at the top
         text_x = (self.width - text_w) // 2
-        text_y = 20 + (50 + text_h) // 2  # Same Y position as skip all button
+        text_y = 20 + (50 + text_h) // 2  # Same Y position as back button
         
         # Background for better visibility
         padding = 10
@@ -805,10 +811,13 @@ class WalletTutorialPlayer:
             cv2.putText(img, msg, (msg_x, msg_y), font, font_scale_msg, 
                        COLORS['text_primary'], thickness_msg)
         
-        # Draw PREVIOUS button to go back to video (left side)
+        # Draw back button (top left)
+        self.draw_button(img, self.back_button, COLORS['button_hover'])
+        
+        # Draw PREVIOUS button to go back to video (bottom left)
         self.draw_button(img, self.your_turn_previous_button, COLORS['button_hover'])
         
-        # Draw NEXT button to continue to next step (right side)
+        # Draw NEXT button to continue to next step (bottom right)
         self.draw_button(img, self.your_turn_next_button, COLORS['button_hover'])
     
     def cleanup(self):

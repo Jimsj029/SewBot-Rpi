@@ -4,7 +4,12 @@ import cv2
 import numpy as np
 import math
 import os
+import sys
 import time
+
+# Add parent directory to path for imports
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+from music_manager import get_music_manager
 
 # Try to import pygame for audio playback
 try:
@@ -83,6 +88,9 @@ class TutorialPlayer:
                 print(f"Audio loaded successfully: {audio_path}")
             except Exception as e:
                 print(f"Failed to load audio: {e}")
+        
+        # Music manager for sound effects
+        self.music_manager = get_music_manager()
         
         # Load the first video
         self.load_current_video()
@@ -261,12 +269,20 @@ class TutorialPlayer:
         # Load the first video
         self.load_current_video()
     
+    def play_button_click_sound(self):
+        """Play button click sound effect"""
+        try:
+            self.music_manager.play_sound_effect('button_click.mp3')
+        except Exception as e:
+            pass  # Silently fail if sound effect doesn't exist
+    
     def handle_click(self, x, y):
         """Handle mouse clicks, returns action: 'next', 'done', 'replay_current', 'replay', 'continue', or None"""
         # Check skip all button (top right - skips entire tutorial)
         if not self.skipped and not self.completed:
             btn = self.skip_all_button
             if btn['x'] <= x <= btn['x'] + btn['w'] and btn['y'] <= y <= btn['y'] + btn['h']:
+                self.play_button_click_sound()
                 self.skipped = True
                 # Stop audio when skipping
                 if AUDIO_AVAILABLE and pygame.mixer.get_init():
@@ -289,6 +305,7 @@ class TutorialPlayer:
         if not self.skipped and not self.completed:
             btn = self.replay_current_button
             if btn['x'] <= x <= btn['x'] + btn['w'] and btn['y'] <= y <= btn['y'] + btn['h']:
+                self.play_button_click_sound()
                 # Replay current video from beginning
                 self.replay_current_video()
                 return 'replay_current'
@@ -297,6 +314,7 @@ class TutorialPlayer:
         if not self.skipped and not self.completed:
             btn = self.next_button
             if btn['x'] <= x <= btn['x'] + btn['w'] and btn['y'] <= y <= btn['y'] + btn['h']:
+                self.play_button_click_sound()
                 # If on last step, this is the Done button
                 if self.current_step >= self.total_steps - 1:
                     return 'continue'  # Done with all tutorials
@@ -311,12 +329,14 @@ class TutorialPlayer:
         if self.skipped or self.completed:
             btn = self.continue_button
             if btn['x'] <= x <= btn['x'] + btn['w'] and btn['y'] <= y <= btn['y'] + btn['h']:
+                self.play_button_click_sound()
                 return 'continue'
         
         # Check replay button (after skip or completion)
         if self.skipped or self.completed:
             btn = self.replay_button
             if btn['x'] <= x <= btn['x'] + btn['w'] and btn['y'] <= y <= btn['y'] + btn['h']:
+                self.play_button_click_sound()
                 return 'replay'
         
         return None

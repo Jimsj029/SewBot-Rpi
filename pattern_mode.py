@@ -81,6 +81,11 @@ class PatternMode:
             music_manager.stop(fade_ms=1000)
             self.music_playing = False
     
+    def play_button_click_sound(self):
+        """Play button click sound effect"""
+        music_manager = get_music_manager()
+        music_manager.play_sound_effect('button_click.mp3')
+    
     def load_blueprint(self, level):
         """Load binary mask for the pattern"""
         mask_path = os.path.join(self.blueprint_folder, f'level{level}_mask.png')
@@ -424,6 +429,7 @@ class PatternMode:
         # Check back button
         bb = self.back_button
         if bb['x'] <= x <= bb['x'] + bb['w'] and bb['y'] <= y <= bb['y'] + bb['h']:
+            self.play_button_click_sound()
             return 'back'
         
         return None
