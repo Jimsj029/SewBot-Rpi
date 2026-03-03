@@ -110,6 +110,10 @@ class SewBotApp:
         # Pattern mode - separate module
         self.pattern_mode = PatternMode(self.width, self.height, self.COLORS, 'blueprint')
         
+        # Load logo image for main menu
+        self.logo_img = None
+        self.load_logo()
+        
         # Pre-render grid background (performance optimization)
         self.grid_background = self.create_grid_background()
         
@@ -122,6 +126,28 @@ class SewBotApp:
         
         # Detect camera at startup
         self.detect_camera_at_startup()
+    
+    def load_logo(self):
+        """Load the logo image for main menu"""
+        logo_path = os.path.join(os.path.dirname(__file__), 'images', 'logo.png')
+        if os.path.exists(logo_path):
+            try:
+                self.logo_img = cv2.imread(logo_path, cv2.IMREAD_UNCHANGED)
+                if self.logo_img is not None:
+                    # Resize logo to appropriate size (maintain aspect ratio)
+                    target_height = 330
+                    h, w = self.logo_img.shape[:2]
+                    aspect_ratio = w / h
+                    target_width = int(target_height * aspect_ratio)
+                    self.logo_img = cv2.resize(self.logo_img, (target_width, target_height), interpolation=cv2.INTER_AREA)
+                    print(f"✓ Logo loaded: {target_width}x{target_height}")
+                else:
+                    print("⚠ Logo image could not be loaded")
+            except Exception as e:
+                print(f"⚠ Error loading logo: {e}")
+                self.logo_img = None
+        else:
+            print(f"⚠ Logo not found at: {logo_path}")
     
     def toggle_fullscreen(self):
         """Toggle between fullscreen and windowed mode"""
@@ -487,9 +513,35 @@ class SewBotApp:
         self.draw_mute_button(frame)
         self.draw_tech_lines(frame)
         
+        # Draw logo if available
+        logo_y = 10  # Position from top (closer to accommodate larger logo)
+        if self.logo_img is not None:
+            h, w = self.logo_img.shape[:2]
+            logo_x = (self.width - w) // 2  # Center horizontally
+            
+            # Handle logo with alpha channel (transparency)
+            if self.logo_img.shape[2] == 4:
+                # Extract alpha channel
+                alpha = self.logo_img[:, :, 3] / 255.0
+                # Get RGB channels
+                logo_rgb = self.logo_img[:, :, :3]
+                
+                # Blend logo with background
+                for c in range(3):
+                    frame[logo_y:logo_y+h, logo_x:logo_x+w, c] = \
+                        alpha * logo_rgb[:, :, c] + (1 - alpha) * frame[logo_y:logo_y+h, logo_x:logo_x+w, c]
+            else:
+                # No alpha channel, just overlay
+                frame[logo_y:logo_y+h, logo_x:logo_x+w] = self.logo_img
+            
+            text_start_y = logo_y + h + 50  # Position text below logo
+        else:
+            text_start_y = self.height // 3  # Default position if no logo
+        
+        # Draw SEWBOT title
         text, font_scale, thickness = "SEWBOT", 2.5, 4
         (text_w, text_h), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_DUPLEX, font_scale, thickness)
-        text_x, text_y = (self.width - text_w) // 2, self.height // 3
+        text_x, text_y = (self.width - text_w) // 2, text_start_y
         
         # Reduced glow layers from 5 to 3 for performance
         glow_intensity = 0.5 + 0.5 * abs(math.sin(self.glow_phase))
@@ -504,9 +556,12 @@ class SewBotApp:
         subtitle = "[ PATTERN RECOGNITION SYSTEM ]"
         sub_font_scale = 0.6
         (sub_w, sub_h), _ = cv2.getTextSize(subtitle, cv2.FONT_HERSHEY_SIMPLEX, sub_font_scale, 1)
-        cv2.putText(frame, subtitle, ((self.width - sub_w) // 2, text_y + 40), cv2.FONT_HERSHEY_SIMPLEX, sub_font_scale, self.COLORS['text_accent'], 1)
+        subtitle_y = text_y + 40
+        cv2.putText(frame, subtitle, ((self.width - sub_w) // 2, subtitle_y), cv2.FONT_HERSHEY_SIMPLEX, sub_font_scale, self.COLORS['text_accent'], 1)
         
+        # Position START button below subtitle with spacing
         btn = self.start_button
+        btn['y'] = subtitle_y + 30  # 60px below subtitle
         pulse = 0.5 + 0.5 * abs(math.sin(self.glow_phase * 1.5))
         self.draw_glow_rect(frame, btn['x'], btn['y'], btn['w'], btn['h'], self.COLORS['button_hover'], pulse)
         
