@@ -8,6 +8,8 @@ A futuristic sewing guide application with camera overlay and pattern recognitio
 - **Main Menu**: Animated start screen with pulsing buttons
 - **Mode Selection**: Choose between Pattern and Wallet modes
 - **Pattern Mode**: 5 levels of sewing patterns with camera overlay
+- **AI-Powered Detection**: YOLOv8-nano segmentation model for real-time stitch line detection
+- **Adjustable Sensitivity**: Dynamic confidence threshold adjustment during runtime
 - **Wallet Mode**: Coming soon!
 
 ##  Project Structure
@@ -60,8 +62,23 @@ python main.py
 
 ##  Dependencies
 
-- OpenCV (cv2)
-- NumPy
+- OpenCV (cv2) - Computer vision and camera handling
+- NumPy - Numerical operations
+- Ultralytics - YOLOv8 model inference
+- ONNX Runtime - Optimized model execution
+
+##  AI Model
+
+The project uses a **YOLOv8-nano segmentation model** (`best.onnx`) trained to detect stitch lines:
+- **Model**: YOLOv8n-seg (ONNX format fo
+  - F: Toggle fullscreen
+  - **Pattern Mode Only**:
+    - '+' or '=': Increase confidence threshold (reduce false positives)
+    - '-': Decrease confidence threshold (more sensitive detection)r Raspberry Pi optimization)
+- **Classes**: stitch_line (real-time segmentation masks)
+- **Input**: 640x640 images
+- **Confidence**: Default 0.35 (adjustable with +/- keys)
+- **Performance**: Optimized for Raspberry Pi 4 inference
 
 ##  Controls
 
