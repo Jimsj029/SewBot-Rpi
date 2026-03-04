@@ -7,50 +7,40 @@
 run.sh: line 27: 2976 Illegal instruction python main.py
 ```
 
-**Cause**: Python packages compiled with x86 CPU instructions instead of ARM.
+**Cause**: Pip installed x86-compiled packages instead of ARM packages.
 
 ### 2. NumPy Version Error
 ```
 A module that was compiled using NumPy 1.x cannot be run in NumPy 2.2.6
-AttributeError: _ARRAY_API not found
-ImportError: numpy.core.multiarray failed to import
 ```
 
-**Cause**: NumPy 2.x installed, but OpenCV requires NumPy 1.x.
+**Cause**: Package version conflicts.
 
-## Universal Fix
+## The Fix (Works for All Errors)
 
-Both issues are fixed by deleting and rebuilding the virtual environment:
+Run this on your Raspberry Pi:
 
 ```bash
 cd ~/SewBot-Rpi
 rm -rf .venv
 ./setup.sh
-```
-
-Then run:
-```bash
 bash run.sh
 ```
 
-**What this does:**
-- `rm -rf .venv` - Deletes the broken virtual environment with wrong packages
-- `./setup.sh` - Creates a fresh environment with ARM-compatible packages, NumPy 1.x, etc.
-
 **One-liner:**
 ```bash
-rm -rf .venv && ./setup.sh && bash run.sh
+cd ~/SewBot-Rpi && rm -rf .venv && ./setup.sh && bash run.sh
 ```
 
-## What the Setup Script Does
+## Why This Works
 
-1. **Configures piwheels**: Uses ARM-compiled packages from https://www.piwheels.org/simple
-2. **Removes incompatible packages**: Uninstalls x86 versions and NumPy 2.x
-3. **Installs NumPy 1.x**: Force installs `numpy<2.0.0` for OpenCV compatibility
-4. **Installs PyTorch for ARM**: Uses ARM-compatible version from PyTorch's official CPU builds
-5. **Installs ultralytics properly**: Without dependencies to prevent version conflicts
-6. **Verifies NumPy version**: Checks and downgrades NumPy if it was upgraded to 2.x
-7. **Tests all imports**: Verifies everything works correctly
+The new setup script uses **system packages** approach:
+
+1. **Installs system packages**: `sudo apt-get install python3-numpy python3-opencv python3-pygame` - these are pre-compiled for ARM by Raspberry Pi OS
+2. **Creates venv with system access**: Uses `--system-site-packages` flag to access system Python packages
+3. **Installs only torch/ultralytics**: Via pip from piwheels (ARM repository)
+
+This completely avoids the "Illegal instruction" error because system packages are guaranteed to work on your ARM CPU.
 
 ## System Package Method (Recommended for older Pi models)
 

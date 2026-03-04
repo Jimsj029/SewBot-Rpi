@@ -37,28 +37,25 @@ SewBot/
 
 ##  How to Run
 
-### Setup (First Time or Fix "Illegal instruction" Error)
+### Setup (First Time or Fix Errors)
 
-One script does everything - initial setup AND fixes:
+**One command to fix everything:**
 
 ```bash
-# Make script executable
-chmod +x setup.sh run.sh
-
-# Run setup (installs ARM-compatible packages)
-./setup.sh
+cd ~/SewBot-Rpi
+rm -rf .venv && ./setup.sh
 ```
 
-The setup script automatically:
-- Creates virtual environment
-- Configures pip to use piwheels (Raspberry Pi packages)
-- Installs ARM-compatible versions of PyTorch and all dependencies
-- Fixes "Illegal instruction" errors
+The setup script will:
+- Install system packages (ARM-compatible, avoids "Illegal instruction")
+- Create virtual environment with system package access
+- Install PyTorch and ultralytics from piwheels
+- Verify all imports work
 
 ### Running the Application
 
 ```bash
-./run.sh
+bash run.sh
 ```
 
 Or manually:
@@ -67,32 +64,18 @@ source .venv/bin/activate
 python main.py
 ```
 
+### Why This Works
+
+The script uses **system packages** (python3-numpy, python3-opencv, python3-pygame) which are pre-compiled for ARM by Raspberry Pi OS. This completely avoids the "Illegal instruction" error that happens when pip installs x86 packages.
+
 ### Troubleshooting
 
-**Getting "Illegal instruction" or NumPy version errors?**
-
-Delete the environment and rebuild:
+**Any errors? Just run:**
 ```bash
 rm -rf .venv && ./setup.sh
 ```
 
-The setup script will recreate everything from scratch with correct packages.
-
-**What this does:**
-- `rm -rf .venv` - Deletes the broken virtual environment
-- `./setup.sh` - Creates a new one with ARM-compatible packages
-
-**Common issues this fixes:**
-- "Illegal instruction" errors (x86 packages on ARM)
-- NumPy 2.x incompatibility with OpenCV (requires NumPy 1.x)
-- Missing or incompatible PyTorch versions
-
-For older Raspberry Pi models (Pi 2, Pi 3), install system packages first:
-```bash
-sudo apt-get update
-sudo apt-get install -y python3-opencv python3-numpy python3-pygame libatlas-base-dev
-rm -rf .venv && ./setup.sh
-```
+This deletes everything and rebuilds from scratch.
 
 ##  Design Theme
 
