@@ -1,4 +1,5 @@
-opencv-python==4.8.1.78
-numpy==1.24.3
-pygame==2.5.2
-ultralytics>=8.0.0
+# Computer Vision
+opencv-python==4.8.1.78    # Note: Will install via system packages, not pip
+numpy==1.24.3              # For numerical operations
+pygame==2.5.2              # For game/sound functionality
+ultralytics>=8.0.0         # For YOLO AI models
