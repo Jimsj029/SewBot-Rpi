@@ -1,15 +1,3 @@
-"""
-Pattern Mode - Sewing Pattern Recognition
-
-Uses YOLOv8-nano segmentation model (best.onnx) for stitch line detection.
-The model detects 'stitch_line' class and provides segmentation masks
-for accurate pattern matching and scoring.
-
-Keyboard controls (in pattern mode):
-- '+' or '=' : Increase confidence threshold (reduce false positives)
-- '-' : Decrease confidence threshold (more sensitive detection)
-"""
-
 import cv2
 import numpy as np
 import math
@@ -445,31 +433,6 @@ class PatternMode:
         cv2.putText(frame, progress_text, (content_x + (bar_width - prog_w) // 2, bar_y + 15), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, self.COLORS['text_primary'], 1)
         
-        # Detection info section
-        detection_y = bar_y + bar_height + 35
-        cv2.putText(frame, "DETECTION", (content_x, detection_y), cv2.FONT_HERSHEY_SIMPLEX, 
-                   0.5, self.COLORS['text_secondary'], 1)
-        
-        # Model status
-        if self.stitch_model is None:
-            status_text = "Model: Not Loaded"
-            status_color = (0, 0, 255)  # Red
-        else:
-            status_text = "Model: Active"
-            status_color = (0, 255, 0)  # Green
-        
-        cv2.putText(frame, status_text, (content_x, detection_y + 18), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.35, status_color, 1)
-        
-        # Confidence threshold
-        conf_text = f"Confidence: {self.confidence_threshold:.2f}"
-        cv2.putText(frame, conf_text, (content_x, detection_y + 33), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.35, self.COLORS['text_secondary'], 1)
-        
-        # Controls hint
-        controls_text = "+/- Adjust threshold"
-        cv2.putText(frame, controls_text, (content_x, detection_y + 48), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.3, self.COLORS['text_accent'], 1)
     
     def draw_stat_item(self, frame, label, value, x, y, max_width, value_color=None):
         """Helper method to draw a stat item (label and value)"""
