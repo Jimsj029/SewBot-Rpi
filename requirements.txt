@@ -4,7 +4,7 @@
 
 # Computer Vision
 opencv-python==4.8.1.78    # OpenCV for image processing
-numpy==1.24.3              # For numerical operations
+numpy>=1.24.3,<2.0.0       # MUST be 1.x - OpenCV compiled against NumPy 1.x
 pygame==2.5.2              # For game/sound functionality
 
 # AI/ML Libraries - See setup.sh for Raspberry Pi installation

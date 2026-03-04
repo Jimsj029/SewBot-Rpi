@@ -86,17 +86,17 @@ echo ""
 echo "Installing dependencies (ARM-compatible versions)..."
 echo "This may take several minutes..."
 
-# Install numpy first (from piwheels if available)
-echo "  - Installing NumPy..."
-pip install --force-reinstall numpy==1.24.3
+# Install numpy first (MUST be 1.x for OpenCV compatibility)
+echo "  - Installing NumPy 1.24.3 (required for OpenCV)..."
+pip install --force-reinstall "numpy>=1.24.3,<2.0.0"
+
+# Install opencv-python (compiled against NumPy 1.x)
+echo "  - Installing OpenCV..."
+pip install --force-reinstall --no-build-isolation opencv-python==4.8.1.78
 
 # Install pygame
 echo "  - Installing Pygame..."
 pip install --force-reinstall pygame==2.5.2
-
-# Install opencv-python (try piwheels version)
-echo "  - Installing OpenCV..."
-pip install --force-reinstall opencv-python==4.8.1.78
 
 # Install PyTorch for Raspberry Pi (ARM architecture)
 echo ""
