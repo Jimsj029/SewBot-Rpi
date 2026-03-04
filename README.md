@@ -37,9 +37,51 @@ SewBot/
 
 ##  How to Run
 
+### Setup (First Time or Fix "Illegal instruction" Error)
+
+One script does everything - initial setup AND fixes:
+
 ```bash
+# Make script executable
+chmod +x setup.sh run.sh
+
+# Run setup (installs ARM-compatible packages)
+./setup.sh
+```
+
+The setup script automatically:
+- Creates virtual environment
+- Configures pip to use piwheels (Raspberry Pi packages)
+- Installs ARM-compatible versions of PyTorch and all dependencies
+- Fixes "Illegal instruction" errors
+
+### Running the Application
+
+```bash
+./run.sh
+```
+
+Or manually:
+```bash
+source .venv/bin/activate
 python main.py
 ```
+
+### Troubleshooting
+
+**Still getting "Illegal instruction"?**
+
+1. Re-run setup (it will reinstall packages):
+   ```bash
+   ./setup.sh
+   ```
+
+2. For older Raspberry Pi models (Pi 2, Pi 3), install system packages first:
+   ```bash
+   sudo apt-get update
+   sudo apt-get install -y python3-opencv python3-numpy python3-pygame libatlas-base-dev
+   ```
+   Then run setup.sh again.
 
 ##  Design Theme
 
@@ -62,10 +104,15 @@ python main.py
 
 ##  Dependencies
 
+- Python 3.10
 - OpenCV (cv2) - Computer vision and camera handling
 - NumPy - Numerical operations
+- Pygame - Game/sound functionality
+- PyTorch - Deep learning framework (ARM-compatible version required)
 - Ultralytics - YOLOv8 model inference
-- ONNX Runtime - Optimized model execution
+- ONNX Runtime - Optimized model execution (optional)
+
+**Note**: Standard pip packages may not work on Raspberry Pi ARM architecture. Use `setup.sh` which installs ARM-compatible versions from piwheels and PyTorch's ARM distribution.
 
 ##  AI Model
 

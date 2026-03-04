@@ -1,11 +1,13 @@
 #!/bin/bash
-# Setup script for SewBot-Rpi
-# Creates virtual environment and installs dependencies
+# Setup & Fix script for SewBot-Rpi
+# Creates virtual environment and installs ARM-compatible dependencies
+# Also fixes "Illegal instruction" errors on Raspberry Pi
 
 set -e  # Exit on error
 
 echo "========================================"
 echo "SewBot-Rpi Setup Script"
+echo "Fixes 'Illegal instruction' errors"
 echo "========================================"
 echo ""
 
@@ -24,22 +26,31 @@ echo "Python version:"
 python3.10 --version
 echo ""
 
-# Check requirements.txt
-if [ ! -f "requirements.txt" ]; then
-    echo "ERROR: requirements.txt not found!"
-    exit 1
+# Recommend system packages
+echo "========================================"
+echo "RECOMMENDED: Install system packages"
+echo "========================================"
+echo "For best compatibility, install these first:"
+echo "  sudo apt-get update"
+echo "  sudo apt-get install -y python3-opencv python3-numpy python3-pygame libatlas-base-dev"
+echo ""
+read -p "Continue with setup? (Y/n): " -n 1 -r
+echo ""
+if [[ $REPLY =~ ^[Nn]$ ]]; then
+    echo "Setup cancelled."
+    exit 0
 fi
 
 # Handle existing venv
 if [ -d ".venv" ]; then
     echo "Virtual environment already exists."
-    read -p "Recreate it? (y/N): " -n 1 -r
+    read -p "Recreate it? (recommended if you have errors) (Y/n): " -n 1 -r
     echo ""
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
+    if [[ ! $REPLY =~ ^[Nn]$ ]]; then
         echo "Removing existing venv..."
         rm -rf .venv
     else
-        echo "Using existing venv."
+        echo "Using existing venv (will reinstall packages)..."
     fi
 fi
 
@@ -60,18 +71,66 @@ echo ""
 echo "Upgrading pip..."
 pip install --upgrade pip
 
+# Configure pip to use piwheels (Raspberry Pi optimized packages)
+echo ""
+echo "Configuring pip for Raspberry Pi (piwheels)..."
+pip config set global.extra-index-url https://www.piwheels.org/simple
+
+# Uninstall potentially problematic packages
+echo ""
+echo "Removing any incompatible packages..."
+pip uninstall -y torch torchvision ultralytics onnxruntime 2>/dev/null || true
+
 # Install dependencies
 echo ""
-echo "Installing dependencies..."
+echo "Installing dependencies (ARM-compatible versions)..."
 echo "This may take several minutes..."
-pip install -r requirements.txt
+
+# Install numpy first (from piwheels if available)
+echo "  - Installing NumPy..."
+pip install --force-reinstall numpy==1.24.3
+
+# Install pygame
+echo "  - Installing Pygame..."
+pip install --force-reinstall pygame==2.5.2
+
+# Install opencv-python (try piwheels version)
+echo "  - Installing OpenCV..."
+pip install --force-reinstall opencv-python==4.8.1.78
+
+# Install PyTorch for Raspberry Pi (ARM architecture)
+echo ""
+echo "Installing PyTorch for ARM architecture (CPU-only)..."
+echo "This is a large download and may take a while..."
+pip install torch==2.0.0 torchvision==0.15.0 --index-url https://download.pytorch.org/whl/cpu
+
+# Install ultralytics dependencies first
+echo ""
+echo "Installing ultralytics dependencies..."
+pip install matplotlib pillow pyyaml requests scipy tqdm psutil py-cpuinfo thop pandas seaborn
+
+# Install ultralytics (YOLO) without dependencies
+echo "Installing ultralytics (YOLO model library)..."
+pip install ultralytics --no-deps
+
+# Verify installations
+echo ""
+echo "========================================"
+echo "Verifying Installation"
+echo "========================================"
+echo "Testing imports..."
+python -c "import numpy; print(f'✓ NumPy: {numpy.__version__}')" || echo "✗ NumPy import failed"
+python -c "import cv2; print(f'✓ OpenCV: {cv2.__version__}')" || echo "✗ OpenCV import failed"
+python -c "import pygame; print(f'✓ Pygame: {pygame.__version__}')" || echo "✗ Pygame import failed"
+python -c "import torch; print(f'✓ PyTorch: {torch.__version__}')" || echo "✗ PyTorch import failed"
+python -c "from ultralytics import YOLO; print('✓ Ultralytics: OK')" || echo "✗ Ultralytics import failed"
 
 # Show installed packages
 echo ""
 echo "========================================"
 echo "Installation Summary:"
 echo "========================================"
-pip list | grep -E "opencv|numpy|pygame|ultralytics|torch" || echo "Dependencies installed"
+pip list | grep -E "opencv|numpy|pygame|ultralytics|torch"
 
 echo ""
 echo "========================================"
@@ -79,9 +138,13 @@ echo "Setup completed successfully!"
 echo "========================================"
 echo ""
 echo "To run the application:"
-echo "  ./run.sh"
+echo "  bash run.sh"
 echo ""
 echo "Or manually:"
 echo "  source .venv/bin/activate"
 echo "  python main.py"
+echo ""
+echo "If you still get 'Illegal instruction' error:"
+echo "  - Check your Pi model: cat /proc/cpuinfo | grep Model"
+echo "  - For older Pi models, you may need system packages"
 echo ""

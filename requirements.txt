@@ -1,7 +1,13 @@
 # Python 3.10 required
+# IMPORTANT: On Raspberry Pi, use setup.sh which installs ARM-compatible versions
+# Direct pip install may cause "Illegal instruction" errors
 
 # Computer Vision
-opencv-python==4.8.1.78    # Note: Will install via system packages, not pip
+opencv-python==4.8.1.78    # OpenCV for image processing
 numpy==1.24.3              # For numerical operations
 pygame==2.5.2              # For game/sound functionality
-ultralytics>=8.0.0         # For YOLO AI models
+
+# AI/ML Libraries - See setup.sh for Raspberry Pi installation
+# ultralytics requires PyTorch which needs special handling on ARM
+# PyTorch: Install from https://download.pytorch.org/whl/cpu for ARM
+# ultralytics: Install with --no-deps then install dependencies separately
