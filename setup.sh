@@ -13,15 +13,15 @@ echo ""
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 cd "$SCRIPT_DIR"
 
-# Check Python 3
-if ! command -v python3 &> /dev/null; then
-    echo "ERROR: Python 3 not installed!"
-    echo "Install with: sudo apt install python3 python3-pip python3-venv"
+# Check Python 3.10
+if ! command -v python3.10 &> /dev/null; then
+    echo "ERROR: Python 3.10 not installed!"
+    echo "Install with: sudo apt install python3.10 python3.10-venv python3-pip"
     exit 1
 fi
 
 echo "Python version:"
-python3 --version
+python3.10 --version
 echo ""
 
 # Check requirements.txt
@@ -46,7 +46,7 @@ fi
 # Create venv
 if [ ! -d ".venv" ]; then
     echo "Creating virtual environment..."
-    python3 -m venv .venv
+    python3.10 -m venv .venv
     echo "Virtual environment created!"
 fi
 
