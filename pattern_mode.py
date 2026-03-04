@@ -208,46 +208,116 @@ class PatternMode:
             # Load pattern mask for comparison
             pattern_overlay, pattern_alpha = self.load_blueprint(self.current_level)
             
-            # Run stitch detection using ONNX segmentation model
+            # Run stitch detection using ONNX segmentation model with ROI optimization
             detected_stitch_masks = []
             detection_overlay = None
+            roi_bounds = None  # Store ROI boundaries for visualization
             
             if self.stitch_model is not None:
                 try:
-                    # Run inference with optimized parameters for stitch line detection
-                    results = self.stitch_model(
-                        cam_frame, 
-                        conf=self.confidence_threshold,
-                        iou=self.iou_threshold,
-                        imgsz=640,
-                        verbose=False
-                    )
-                    
-                    # Use YOLO's built-in plot method for accurate visualization
-                    # This handles mask rendering correctly like the working version
-                    detection_overlay = results[0].plot(boxes=False, labels=False)
-                    
-                    # Also extract masks for accuracy calculation
-                    for result in results:
-                        if hasattr(result, 'masks') and result.masks is not None:
-                            masks = result.masks.data.cpu().numpy()
-                            boxes = result.boxes
-                            
-                            # Get the original image shape from the result
-                            orig_shape = result.orig_shape  # (height, width) of original input
-                            
-                            for i, (mask, box) in enumerate(zip(masks, boxes)):
-                                conf = float(box.conf[0].cpu().numpy())
+                    # ========== ROI METHOD FOR FPS BOOST ==========
+                    # Use ROI only if pattern is loaded (otherwise use full frame)
+                    if pattern_overlay is not None and pattern_alpha is not None:
+                        # Calculate ROI based on pattern position (only detect where pattern is)
+                        overlay_h, overlay_w = pattern_overlay.shape[:2]
+                        x_offset = (self.camera_width - overlay_w) // 2
+                        y_offset = (self.camera_height - overlay_h) // 2
+                        
+                        # Reduced width padding for better FPS, keep height padding normal
+                        padding_x = int(overlay_w * 0.05)  # Minimal horizontal padding for FPS boost
+                        padding_y = int(overlay_h * 0.2)   # Normal vertical padding
+                        
+                        # Calculate ROI boundaries (ensure within frame bounds)
+                        roi_x1 = max(0, x_offset - padding_x)
+                        roi_y1 = max(0, y_offset - padding_y)
+                        roi_x2 = min(self.camera_width, x_offset + overlay_w + padding_x)
+                        roi_y2 = min(self.camera_height, y_offset + overlay_h + padding_y)
+                        
+                        # Store ROI bounds for visualization
+                        roi_bounds = (roi_x1, roi_y1, roi_x2, roi_y2)
+                        
+                        # Extract ROI from camera frame
+                        roi_frame = cam_frame[roi_y1:roi_y2, roi_x1:roi_x2].copy()
+                        
+                        # ONNX model requires 640x640 input (fixed size)
+                        # Still faster than full frame since ROI is smaller area
+                        roi_resized = cv2.resize(roi_frame, (640, 640))
+                        
+                        # Run inference ONLY on ROI (still faster due to smaller crop area)
+                        results = self.stitch_model(
+                            roi_resized, 
+                            conf=self.confidence_threshold,
+                            iou=self.iou_threshold,
+                            imgsz=640,
+                            verbose=False
+                        )
+                        
+                        # Get detection visualization from YOLO
+                        roi_detection_overlay = results[0].plot(boxes=False, labels=False)
+                        
+                        # Resize detection overlay back to ROI size
+                        roi_detection_overlay = cv2.resize(roi_detection_overlay, (roi_x2 - roi_x1, roi_y2 - roi_y1))
+                        
+                        # Create full frame detection overlay and place ROI result
+                        detection_overlay = cam_frame.copy()
+                        detection_overlay[roi_y1:roi_y2, roi_x1:roi_x2] = roi_detection_overlay
+                        
+                        # Extract masks for accuracy calculation and map back to full frame
+                        for result in results:
+                            if hasattr(result, 'masks') and result.masks is not None:
+                                masks = result.masks.data.cpu().numpy()
+                                boxes = result.boxes
                                 
-                                # Resize mask to original input frame size
-                                mask_resized = cv2.resize(mask, (orig_shape[1], orig_shape[0]))
-                                mask_binary = (mask_resized > 0.5).astype(np.uint8)
+                                # ROI dimensions
+                                roi_h = roi_y2 - roi_y1
+                                roi_w = roi_x2 - roi_x1
                                 
-                                # Store the mask for accuracy calculation
-                                detected_stitch_masks.append({
-                                    'mask': mask_binary,
-                                    'confidence': conf
-                                })
+                                for i, (mask, box) in enumerate(zip(masks, boxes)):
+                                    conf = float(box.conf[0].cpu().numpy())
+                                    
+                                    # Resize mask to ROI size
+                                    mask_resized = cv2.resize(mask, (roi_w, roi_h))
+                                    mask_binary = (mask_resized > 0.5).astype(np.uint8)
+                                    
+                                    # Create full frame mask and place ROI mask at correct position
+                                    full_frame_mask = np.zeros((self.camera_height, self.camera_width), dtype=np.uint8)
+                                    full_frame_mask[roi_y1:roi_y2, roi_x1:roi_x2] = mask_binary
+                                    
+                                    # Store the full frame mask for accuracy calculation
+                                    detected_stitch_masks.append({
+                                        'mask': full_frame_mask,
+                                        'confidence': conf
+                                    })
+                    else:
+                        # FALLBACK: Use full frame detection if pattern not loaded
+                        print("⚠ Pattern not loaded, using full frame detection")
+                        results = self.stitch_model(
+                            cam_frame, 
+                            conf=self.confidence_threshold,
+                            iou=self.iou_threshold,
+                            imgsz=640,
+                            verbose=False
+                        )
+                        
+                        # Use YOLO's built-in plot method
+                        detection_overlay = results[0].plot(boxes=False, labels=False)
+                        
+                        # Extract masks
+                        for result in results:
+                            if hasattr(result, 'masks') and result.masks is not None:
+                                masks = result.masks.data.cpu().numpy()
+                                boxes = result.boxes
+                                orig_shape = result.orig_shape
+                                
+                                for i, (mask, box) in enumerate(zip(masks, boxes)):
+                                    conf = float(box.conf[0].cpu().numpy())
+                                    mask_resized = cv2.resize(mask, (orig_shape[1], orig_shape[0]))
+                                    mask_binary = (mask_resized > 0.5).astype(np.uint8)
+                                    
+                                    detected_stitch_masks.append({
+                                        'mask': mask_binary,
+                                        'confidence': conf
+                                    })
                     
                 except Exception as e:
                     print(f"Stitch detection error: {e}")
@@ -294,6 +364,57 @@ class PatternMode:
             # If detection exists but pattern wasn't applied, use YOLO's visualization
             if not pattern_applied and detection_overlay is not None:
                 cam_frame = detection_overlay
+            
+            # Draw ROI detection box overlay (shows where detection is happening)
+            if roi_bounds is not None:
+                roi_x1, roi_y1, roi_x2, roi_y2 = roi_bounds
+                # Draw semi-transparent box
+                overlay_roi = cam_frame.copy()
+                cv2.rectangle(overlay_roi, (roi_x1, roi_y1), (roi_x2, roi_y2), 
+                             self.COLORS['cyan'], 2)
+                cv2.addWeighted(overlay_roi, 0.7, cam_frame, 0.3, 0, cam_frame)
+                
+                # Add corner markers for better visibility
+                corner_len = 15
+                corner_thick = 3
+                # Top-left
+                cv2.line(cam_frame, (roi_x1, roi_y1), (roi_x1 + corner_len, roi_y1), 
+                        self.COLORS['neon_blue'], corner_thick)
+                cv2.line(cam_frame, (roi_x1, roi_y1), (roi_x1, roi_y1 + corner_len), 
+                        self.COLORS['neon_blue'], corner_thick)
+                # Top-right
+                cv2.line(cam_frame, (roi_x2, roi_y1), (roi_x2 - corner_len, roi_y1), 
+                        self.COLORS['neon_blue'], corner_thick)
+                cv2.line(cam_frame, (roi_x2, roi_y1), (roi_x2, roi_y1 + corner_len), 
+                        self.COLORS['neon_blue'], corner_thick)
+                # Bottom-left
+                cv2.line(cam_frame, (roi_x1, roi_y2), (roi_x1 + corner_len, roi_y2), 
+                        self.COLORS['neon_blue'], corner_thick)
+                cv2.line(cam_frame, (roi_x1, roi_y2), (roi_x1, roi_y2 - corner_len), 
+                        self.COLORS['neon_blue'], corner_thick)
+                # Bottom-right
+                cv2.line(cam_frame, (roi_x2, roi_y2), (roi_x2 - corner_len, roi_y2), 
+                        self.COLORS['neon_blue'], corner_thick)
+                cv2.line(cam_frame, (roi_x2, roi_y2), (roi_x2, roi_y2 - corner_len), 
+                        self.COLORS['neon_blue'], corner_thick)
+                
+                # Add label "DETECTION ZONE"
+                label_text = "DETECTION ZONE"
+                font_scale = 0.4
+                thickness = 1
+                (text_w, text_h), _ = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, 
+                                                       font_scale, thickness)
+                label_x = roi_x1 + 5
+                label_y = roi_y1 - 5 if roi_y1 > 20 else roi_y1 + 15
+                
+                # Draw text background
+                cv2.rectangle(cam_frame, (label_x - 2, label_y - text_h - 2), 
+                            (label_x + text_w + 2, label_y + 2), 
+                            self.COLORS['dark_blue'], -1)
+                # Draw text
+                cv2.putText(cam_frame, label_text, (label_x, label_y), 
+                           cv2.FONT_HERSHEY_SIMPLEX, font_scale, 
+                           self.COLORS['neon_blue'], thickness)
             
             frame[self.camera_y:self.camera_y+self.camera_height, 
                   self.camera_x:self.camera_x+self.camera_width] = cam_frame
