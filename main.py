@@ -251,6 +251,10 @@ class SewBotApp:
                 pb = self.pattern_button
                 if pb['x'] <= x <= pb['x'] + pb['w'] and pb['y'] <= y <= pb['y'] + pb['h']:
                     self.play_button_click_sound()
+                    # Show guide on first pattern mode entry
+                    if not self.pattern_mode.guide_shown_this_session:
+                        self.pattern_mode.show_guide = True
+                        self.pattern_mode.guide_step = 1
                     self.state = 'level_selection'
                     # Start camera initialization in background
                     if self.camera is None and not self.camera_initializing:
@@ -276,18 +280,31 @@ class SewBotApp:
                     self.state = 'main_menu'
             
             elif self.state == 'level_selection':
-                # Handle level selection clicks
-                action, value = self.level_selection.handle_click(x, y)
-                if action == 'back':
-                    self.state = 'mode_selection'
-                    # Release camera when going back to mode selection
-                    self.release_camera()
-                elif action == 'level_selected':  # Level number selected
-                    self.pattern_mode.current_level = value
-                    self.state = 'pattern'
-                    # Initialize camera if not already opened
-                    if self.camera is None and not self.camera_initializing:
-                        threading.Thread(target=self.init_camera, daemon=True).start()
+                # Check if guide is showing first
+                if self.pattern_mode.show_guide:
+                    gb = self.pattern_mode.guide_button
+                    if gb['x'] <= x <= gb['x'] + gb['w'] and gb['y'] <= y <= gb['y'] + gb['h']:
+                        self.play_button_click_sound()
+                        if self.pattern_mode.guide_step < 4:
+                            # Advance to next step
+                            self.pattern_mode.guide_step += 1
+                        else:
+                            # Last step - close guide
+                            self.pattern_mode.show_guide = False
+                            self.pattern_mode.guide_shown_this_session = True
+                else:
+                    # Handle level selection clicks
+                    action, value = self.level_selection.handle_click(x, y)
+                    if action == 'back':
+                        self.state = 'mode_selection'
+                        # Release camera when going back to mode selection
+                        self.release_camera()
+                    elif action == 'level_selected':  # Level number selected
+                        self.pattern_mode.current_level = value
+                        self.state = 'pattern'
+                        # Initialize camera if not already opened
+                        if self.camera is None and not self.camera_initializing:
+                            threading.Thread(target=self.init_camera, daemon=True).start()
                     
             elif self.state == 'pattern':
                 # Handle pattern mode clicks
@@ -296,6 +313,15 @@ class SewBotApp:
                     # Don't release camera, just go back to level selection
                     # This allows quick switching between levels
                     self.state = 'level_selection'
+                elif result == 'next_level':
+                    # Move to next level
+                    next_level = self.pattern_mode.current_level + 1
+                    if next_level <= 5:  # Max 5 levels
+                        self.pattern_mode.current_level = next_level
+                        self.pattern_mode.reset_progress()
+                    else:
+                        # All levels completed, go back to level selection
+                        self.state = 'level_selection'
     
     def detect_camera_at_startup(self):
         """Detect camera availability at app startup"""
@@ -430,10 +456,10 @@ class SewBotApp:
         cv2.addWeighted(overlay, 0.6, img, 0.4, 0, img)
         
         text, font_scale, thickness = "< BACK", 0.6, 2
-        (text_w, text_h), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)
+        (text_w, text_h), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_TRIPLEX, font_scale, thickness)
         text_x = bb['x'] + (bb['w'] - text_w) // 2
         text_y = bb['y'] + (bb['h'] + text_h) // 2
-        cv2.putText(img, text, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, self.COLORS['text_primary'], thickness)
+        cv2.putText(img, text, (text_x, text_y), cv2.FONT_HERSHEY_TRIPLEX, font_scale, self.COLORS['text_primary'], thickness)
     
     def draw_quit_button(self, img):
         qb = self.quit_button
@@ -445,10 +471,10 @@ class SewBotApp:
         cv2.addWeighted(overlay, 0.6, img, 0.4, 0, img)
         
         text, font_scale, thickness = "QUIT", 0.6, 2
-        (text_w, text_h), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)
+        (text_w, text_h), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_TRIPLEX, font_scale, thickness)
         text_x = qb['x'] + (qb['w'] - text_w) // 2
         text_y = qb['y'] + (qb['h'] + text_h) // 2
-        cv2.putText(img, text, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, self.COLORS['text_primary'], thickness)
+        cv2.putText(img, text, (text_x, text_y), cv2.FONT_HERSHEY_TRIPLEX, font_scale, self.COLORS['text_primary'], thickness)
     
     def draw_mute_button(self, img):
         """Draw mute/unmute button in upper right corner"""
@@ -540,7 +566,7 @@ class SewBotApp:
         
         # Draw SEWBOT title
         text, font_scale, thickness = "SEWBOT", 2.5, 4
-        (text_w, text_h), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_DUPLEX, font_scale, thickness)
+        (text_w, text_h), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_TRIPLEX, font_scale, thickness)
         text_x, text_y = (self.width - text_w) // 2, text_start_y
         
         # Reduced glow layers from 5 to 3 for performance
@@ -548,16 +574,17 @@ class SewBotApp:
         for offset in [6, 4, 2]:
             alpha = glow_intensity * (1 - offset / 8)
             glow_color = tuple(int(c * alpha) for c in self.COLORS['glow_cyan'])
-            cv2.putText(frame, text, (text_x, text_y), cv2.FONT_HERSHEY_DUPLEX, font_scale, glow_color, thickness + offset)
+            cv2.putText(frame, text, (text_x, text_y), cv2.FONT_HERSHEY_TRIPLEX, font_scale, glow_color, thickness + offset)
         
-        cv2.putText(frame, text, (text_x, text_y), cv2.FONT_HERSHEY_DUPLEX, font_scale, self.COLORS['neon_blue'], thickness)
-        cv2.putText(frame, text, (text_x, text_y), cv2.FONT_HERSHEY_DUPLEX, font_scale, self.COLORS['text_primary'], 2)
+        cv2.putText(frame, text, (text_x, text_y), cv2.FONT_HERSHEY_TRIPLEX, font_scale, self.COLORS['neon_blue'], thickness)
+        cv2.putText(frame, text, (text_x, text_y), cv2.FONT_HERSHEY_TRIPLEX, font_scale, self.COLORS['text_primary'], 2)
         
-        subtitle = "[ PATTERN RECOGNITION SYSTEM ]"
-        sub_font_scale = 0.6
-        (sub_w, sub_h), _ = cv2.getTextSize(subtitle, cv2.FONT_HERSHEY_SIMPLEX, sub_font_scale, 1)
-        subtitle_y = text_y + 40
-        cv2.putText(frame, subtitle, ((self.width - sub_w) // 2, subtitle_y), cv2.FONT_HERSHEY_SIMPLEX, sub_font_scale, self.COLORS['text_accent'], 1)
+        subtitle = "[SEWING GUIDANCE SYSTEM ]"
+        sub_font_scale = 0.9
+        sub_thickness = 2
+        (sub_w, sub_h), _ = cv2.getTextSize(subtitle, cv2.FONT_HERSHEY_TRIPLEX, sub_font_scale, sub_thickness)
+        subtitle_y = text_y + 50
+        cv2.putText(frame, subtitle, ((self.width - sub_w) // 2, subtitle_y), cv2.FONT_HERSHEY_TRIPLEX, sub_font_scale, self.COLORS['text_accent'], sub_thickness, cv2.LINE_AA)
         
         # Position START button below subtitle with spacing
         btn = self.start_button
@@ -570,12 +597,12 @@ class SewBotApp:
         cv2.addWeighted(overlay, 0.7, frame, 0.3, 0, frame)
         
         text, font_scale, thickness = "START", 1.0, 2
-        (text_w, text_h), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_DUPLEX, font_scale, thickness)
+        (text_w, text_h), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_TRIPLEX, font_scale, thickness)
         text_x = btn['x'] + (btn['w'] - text_w) // 2
         text_y = btn['y'] + (btn['h'] + text_h) // 2
         # Reduced glow thickness
-        cv2.putText(frame, text, (text_x, text_y), cv2.FONT_HERSHEY_DUPLEX, font_scale, self.COLORS['glow_cyan'], thickness + 2)
-        cv2.putText(frame, text, (text_x, text_y), cv2.FONT_HERSHEY_DUPLEX, font_scale, self.COLORS['text_primary'], thickness)
+        cv2.putText(frame, text, (text_x, text_y), cv2.FONT_HERSHEY_TRIPLEX, font_scale, self.COLORS['glow_cyan'], thickness + 2)
+        cv2.putText(frame, text, (text_x, text_y), cv2.FONT_HERSHEY_TRIPLEX, font_scale, self.COLORS['text_primary'], thickness)
         
         self.draw_quit_button(frame)
     
@@ -612,6 +639,10 @@ class SewBotApp:
         """Draw level selection screen"""
         self.level_selection.draw(frame, self.grid_background)
         
+        # Draw guide overlay if showing
+        if self.pattern_mode.show_guide:
+            self.pattern_mode.draw_guide_overlay(frame)
+        
         # Draw mute button
         self.draw_mute_button(frame)
     
@@ -629,7 +660,7 @@ class SewBotApp:
         cv2.circle(frame, (offset, offset), 3, self.COLORS['cyan'], -1)
         
         text, font_scale, thickness = "SELECT MODE", 1.5, 3
-        (text_w, text_h), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_DUPLEX, font_scale, thickness)
+        (text_w, text_h), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_TRIPLEX, font_scale, thickness)
         text_x, text_y = (self.width - text_w) // 2, 80
         
         # Reduced glow layers from 6 to 3
@@ -637,10 +668,10 @@ class SewBotApp:
         for offset_val in [4, 2, 1]:
             alpha = glow_intensity * (1 - offset_val / 5)
             glow_color = tuple(int(c * alpha) for c in self.COLORS['glow_blue'])
-            cv2.putText(frame, text, (text_x, text_y), cv2.FONT_HERSHEY_DUPLEX, font_scale, glow_color, thickness + offset_val)
+            cv2.putText(frame, text, (text_x, text_y), cv2.FONT_HERSHEY_TRIPLEX, font_scale, glow_color, thickness + offset_val)
         
-        cv2.putText(frame, text, (text_x, text_y), cv2.FONT_HERSHEY_DUPLEX, font_scale, self.COLORS['bright_blue'], thickness)
-        cv2.putText(frame, text, (text_x, text_y), cv2.FONT_HERSHEY_DUPLEX, font_scale, self.COLORS['text_primary'], 1)
+        cv2.putText(frame, text, (text_x, text_y), cv2.FONT_HERSHEY_TRIPLEX, font_scale, self.COLORS['bright_blue'], thickness)
+        cv2.putText(frame, text, (text_x, text_y), cv2.FONT_HERSHEY_TRIPLEX, font_scale, self.COLORS['text_primary'], 1)
         
         # Draw all three mode buttons
         self.draw_mode_button(frame, self.pattern_button)
@@ -660,13 +691,13 @@ class SewBotApp:
         
         # Draw title (centered)
         title_font_scale, title_thickness = 1.0, 2
-        (title_w, title_h), _ = cv2.getTextSize(button_data['title'], cv2.FONT_HERSHEY_DUPLEX, title_font_scale, title_thickness)
+        (title_w, title_h), _ = cv2.getTextSize(button_data['title'], cv2.FONT_HERSHEY_TRIPLEX, title_font_scale, title_thickness)
         title_x = x + (w - title_w) // 2
         title_y = y + 40  # Better vertical positioning
         
         # Title with glow
-        cv2.putText(img, button_data['title'], (title_x, title_y), cv2.FONT_HERSHEY_DUPLEX, title_font_scale, self.COLORS['glow_cyan'], title_thickness + 2)
-        cv2.putText(img, button_data['title'], (title_x, title_y), cv2.FONT_HERSHEY_DUPLEX, title_font_scale, self.COLORS['text_primary'], title_thickness)
+        cv2.putText(img, button_data['title'], (title_x, title_y), cv2.FONT_HERSHEY_TRIPLEX, title_font_scale, self.COLORS['glow_cyan'], title_thickness + 2)
+        cv2.putText(img, button_data['title'], (title_x, title_y), cv2.FONT_HERSHEY_TRIPLEX, title_font_scale, self.COLORS['text_primary'], title_thickness)
         
         # Draw description (centered, wrapped if needed)
         desc_font_scale = 0.45
@@ -681,7 +712,7 @@ class SewBotApp:
         
         for word in words:
             test_line = ' '.join(current_line + [word])
-            (test_w, test_h), _ = cv2.getTextSize(test_line, cv2.FONT_HERSHEY_SIMPLEX, desc_font_scale, desc_thickness)
+            (test_w, test_h), _ = cv2.getTextSize(test_line, cv2.FONT_HERSHEY_TRIPLEX, desc_font_scale, desc_thickness)
             if test_w <= max_width:
                 current_line.append(word)
             else:
@@ -695,10 +726,10 @@ class SewBotApp:
         line_height = 18
         start_y = title_y + 25  # More space below title
         for i, line in enumerate(lines):
-            (line_w, line_h), _ = cv2.getTextSize(line, cv2.FONT_HERSHEY_SIMPLEX, desc_font_scale, desc_thickness)
+            (line_w, line_h), _ = cv2.getTextSize(line, cv2.FONT_HERSHEY_TRIPLEX, desc_font_scale, desc_thickness)
             line_x = x + (w - line_w) // 2
             line_y = start_y + i * line_height
-            cv2.putText(img, line, (line_x, line_y), cv2.FONT_HERSHEY_SIMPLEX, desc_font_scale, self.COLORS['text_secondary'], desc_thickness)
+            cv2.putText(img, line, (line_x, line_y), cv2.FONT_HERSHEY_TRIPLEX, desc_font_scale, self.COLORS['text_secondary'], desc_thickness)
     
     def run(self):
         
