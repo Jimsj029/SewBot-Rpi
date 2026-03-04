@@ -47,9 +47,18 @@ class PatternMode:
         # Load models from models directory
         models_dir = os.path.join(os.path.dirname(__file__), 'models')
         
-        # Detection settings
+        # Detection settings - Optimized for RPi4
         self.confidence_threshold = 0.35  # Optimized for stitch line detection
         self.iou_threshold = 0.6  # Intersection over Union threshold
+        
+        # RPi4 Optimization Settings
+        self.MODEL_INPUT_SIZE = 320  # Reduced from 640 for 2-3x faster inference
+        self.MAX_DET = 100  # Maximum detections per image
+        self.HALF_PRECISION = False  # FP16 not supported on RPi4 CPU
+        
+        # Performance tracking
+        self.inference_times = []
+        self.max_performance_samples = 30
         
         # Load stitch detection model (ONNX model)
         try:
@@ -70,11 +79,25 @@ class PatternMode:
                 print(f"  Confidence threshold: {self.confidence_threshold}")
                 print(f"  IOU threshold: {self.iou_threshold}")
                 
-                # Test the model with dummy data
+                # Test the model with optimized settings
                 print("  Testing model inference...")
-                test_img = np.zeros((640, 640, 3), dtype=np.uint8)
-                test_result = self.stitch_model(test_img, conf=self.confidence_threshold, verbose=False)
-                print("  ✓ Model test successful!")
+                test_img = np.zeros((self.MODEL_INPUT_SIZE, self.MODEL_INPUT_SIZE, 3), dtype=np.uint8)
+                import time
+                start_time = time.time()
+                test_result = self.stitch_model(
+                    test_img, 
+                    conf=self.confidence_threshold, 
+                    iou=self.iou_threshold,
+                    imgsz=self.MODEL_INPUT_SIZE,
+                    max_det=self.MAX_DET,
+                    half=self.HALF_PRECISION,
+                    verbose=False
+                )
+                test_time = (time.time() - start_time) * 1000
+                print(f"  ✓ Model test successful! (inference: {test_time:.1f}ms)")
+                print(f"  ✓ Optimized for RPi4: {self.MODEL_INPUT_SIZE}x{self.MODEL_INPUT_SIZE} input")
+                expected_fps = 1000 / test_time if test_time > 0 else 0
+                print(f"  ✓ Expected FPS: {expected_fps:.1f} (may vary with detection load)")
             else:
                 print(f"⚠ Stitch model not found: {stitch_model_path}")
                 self.stitch_model = None
@@ -248,18 +271,28 @@ class PatternMode:
                         # Extract ROI from camera frame
                         roi_frame = cam_frame[roi_y1:roi_y2, roi_x1:roi_x2].copy()
                         
-                        # ONNX model requires 640x640 input (fixed size)
-                        # Still faster than full frame since ROI is smaller area
-                        roi_resized = cv2.resize(roi_frame, (640, 640))
+                        # ONNX model - using optimized size for RPi4 speed
+                        # Resize to optimized input size (320x320 for 2-3x faster inference)
+                        roi_resized = cv2.resize(roi_frame, (self.MODEL_INPUT_SIZE, self.MODEL_INPUT_SIZE))
                         
-                        # Run inference ONLY on ROI (still faster due to smaller crop area)
+                        # Run inference ONLY on ROI with optimized settings
+                        import time
+                        inference_start = time.time()
                         results = self.stitch_model(
                             roi_resized, 
                             conf=self.confidence_threshold,
                             iou=self.iou_threshold,
-                            imgsz=640,
+                            imgsz=self.MODEL_INPUT_SIZE,
+                            max_det=self.MAX_DET,
+                            half=self.HALF_PRECISION,
                             verbose=False
                         )
+                        
+                        # Track inference performance
+                        inference_time = (time.time() - inference_start) * 1000
+                        self.inference_times.append(inference_time)
+                        if len(self.inference_times) > self.max_performance_samples:
+                            self.inference_times.pop(0)
                         
                         # Debug: Check if detections found
                         if len(results) > 0 and results[0].boxes is not None and len(results[0].boxes) > 0:
@@ -308,13 +341,23 @@ class PatternMode:
                     else:
                         # FALLBACK: Use full frame detection if pattern not loaded
                         print("⚠ Pattern not loaded, using full frame detection")
+                        import time
+                        inference_start = time.time()
                         results = self.stitch_model(
                             cam_frame, 
                             conf=self.confidence_threshold,
                             iou=self.iou_threshold,
-                            imgsz=640,
+                            imgsz=self.MODEL_INPUT_SIZE,
+                            max_det=self.MAX_DET,
+                            half=self.HALF_PRECISION,
                             verbose=False
                         )
+                        
+                        # Track inference performance
+                        inference_time = (time.time() - inference_start) * 1000
+                        self.inference_times.append(inference_time)
+                        if len(self.inference_times) > self.max_performance_samples:
+                            self.inference_times.pop(0)
                         
                         # Use YOLO's built-in plot method
                         detection_overlay = results[0].plot(boxes=False, labels=False)
@@ -570,6 +613,21 @@ class PatternMode:
         (prog_w, prog_h), _ = cv2.getTextSize(progress_text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
         cv2.putText(frame, progress_text, (content_x + (bar_width - prog_w) // 2, bar_y + 15), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, self.COLORS['text_primary'], 1)
+        
+        # Performance metrics (FPS and inference time)
+        if len(self.inference_times) > 0:
+            perf_y = bar_y + bar_height + 45
+            avg_inference = sum(self.inference_times) / len(self.inference_times)
+            fps = 1000 / avg_inference if avg_inference > 0 else 0
+            
+            # FPS
+            fps_color = self.COLORS['neon_blue'] if fps >= 15 else self.COLORS['text_secondary']
+            self.draw_stat_item(frame, "FPS", f"{fps:.1f}", 
+                               content_x, perf_y, w - 40, fps_color)
+            
+            # Inference time
+            self.draw_stat_item(frame, "INFERENCE", f"{avg_inference:.0f}ms", 
+                               content_x, perf_y + 30, w - 40)
         
     
     def draw_stat_item(self, frame, label, value, x, y, max_width, value_color=None):

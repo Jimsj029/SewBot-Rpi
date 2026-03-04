@@ -29,6 +29,7 @@ class SewBotApp:
         self.glow_phase = 0
         self.running = True
         self.fullscreen = False  # Fullscreen state
+        self.skip_next_frame = False  # Flag to skip frame after window recreation
         
         # Theme colors
         self.COLORS = {
@@ -710,17 +711,30 @@ class SewBotApp:
                     if self.previous_state == 'pattern':
                         self.pattern_mode.stop_music()
                     
-                    # Start new music based on state
-                    if self.state == 'main_menu':
-                        self.music_manager.play('main_menu.mp3', loops=-1, fade_ms=1000)
-                    elif self.state == 'tutorial':
-                        self.music_manager.play('tutorial.mp3', loops=-1, fade_ms=1000)
-                    elif self.state == 'mode_selection':
-                        self.music_manager.play('mode_selection.mp3', loops=-1, fade_ms=1000)
-                    elif self.state == 'wallet_tutorial':
-                        self.music_manager.play('wallet.mp3', loops=-1, fade_ms=1000)
-                    elif self.state == 'pattern':
-                        self.pattern_mode.start_music()
+                    # Start new music based on state - handle fade_ms parameter
+                    try:
+                        if self.state == 'main_menu':
+                            self.music_manager.play('main_menu.mp3', loops=-1, fade_ms=1000)
+                        elif self.state == 'tutorial':
+                            self.music_manager.play('tutorial.mp3', loops=-1, fade_ms=1000)
+                        elif self.state == 'mode_selection':
+                            self.music_manager.play('mode_selection.mp3', loops=-1, fade_ms=1000)
+                        elif self.state == 'wallet_tutorial':
+                            self.music_manager.play('wallet.mp3', loops=-1, fade_ms=1000)
+                        elif self.state == 'pattern':
+                            self.pattern_mode.start_music()
+                    except TypeError:
+                        # fade_ms not supported, play without it
+                        if self.state == 'main_menu':
+                            self.music_manager.play('main_menu.mp3', -1)
+                        elif self.state == 'tutorial':
+                            self.music_manager.play('tutorial.mp3', -1)
+                        elif self.state == 'mode_selection':
+                            self.music_manager.play('mode_selection.mp3', -1)
+                        elif self.state == 'wallet_tutorial':
+                            self.music_manager.play('wallet.mp3', -1)
+                        elif self.state == 'pattern':
+                            self.pattern_mode.start_music()
                     
                     # Update previous state
                     self.previous_state = self.state
@@ -752,7 +766,23 @@ class SewBotApp:
                     self.draw_mute_button(frame)
                 
                 self.glow_phase += 0.05
-                cv2.imshow(self.window_name, frame)
+                
+                # Skip frame if we just recreated the window
+                if self.skip_next_frame:
+                    self.skip_next_frame = False
+                    cv2.waitKey(30)  # Still process events
+                    continue
+                
+                # Safely show frame
+                try:
+                    cv2.imshow(self.window_name, frame)
+                except cv2.error as e:
+                    print(f"⚠ OpenCV error: {e}")
+                    # Try to recreate window
+                    cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
+                    cv2.setWindowProperty(self.window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+                    cv2.setMouseCallback(self.window_name, self.mouse_callback)
+                    continue
                 
                 # Check if window was closed (X button clicked)
                 # This needs to be checked after imshow
