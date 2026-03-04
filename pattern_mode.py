@@ -2,7 +2,6 @@ import cv2
 import numpy as np
 import math
 import os
-import time
 from ultralytics import YOLO
 from music_manager import get_music_manager
 
@@ -20,18 +19,6 @@ class PatternMode:
         self.uniform_height = 300
         self.alpha_blend = 0.9
         self.glow_phase = 0
-        
-        # FPS tracking
-        self.fps_values = []
-        self.fps_max_samples = 30  # Average over 30 frames
-        self.last_frame_time = time.time()
-        self.current_fps = 0.0
-        
-        # Performance optimization: frame skipping for detection
-        self.frame_skip = 2  # Run detection every 2 frames (can be adjusted)
-        self.frame_counter = 0
-        self.last_detection_overlay = None  # Cache last detection result
-        self.last_detected_masks = []  # Cache last detected masks
         
         # Level info display at top center (aligned with back button)
         self.level_display_y = 60
@@ -100,24 +87,6 @@ class PatternMode:
         # Music flag to track if music is playing
         self.music_playing = False
     
-    def update_fps(self):
-        """Update FPS calculation"""
-        current_time = time.time()
-        delta_time = current_time - self.last_frame_time
-        
-        if delta_time > 0:
-            fps = 1.0 / delta_time
-            self.fps_values.append(fps)
-            
-            # Keep only recent samples
-            if len(self.fps_values) > self.fps_max_samples:
-                self.fps_values.pop(0)
-            
-            # Calculate moving average
-            self.current_fps = sum(self.fps_values) / len(self.fps_values)
-        
-        self.last_frame_time = current_time
-    
     def start_music(self):
         """Start pattern mode music"""
         if not self.music_playing:
@@ -167,9 +136,6 @@ class PatternMode:
     
     def draw(self, frame, camera_frame, grid_background):
         """Draw the entire pattern mode interface"""
-        # Update FPS
-        self.update_fps()
-        
         # Use grid background
         frame[:] = grid_background
         
@@ -252,16 +218,11 @@ class PatternMode:
             pattern_overlay, pattern_alpha = self.load_blueprint(self.current_level)
             
             # Run stitch detection using ONNX segmentation model with ROI optimization
-            # Use frame skipping to improve FPS
             detected_stitch_masks = []
             detection_overlay = None
             roi_bounds = None  # Store ROI boundaries for visualization
             
-            # Frame skipping optimization: only run detection every N frames
-            self.frame_counter += 1
-            should_run_detection = (self.frame_counter % self.frame_skip == 0)
-            
-            if self.stitch_model is not None and should_run_detection:
+            if self.stitch_model is not None:
                 try:
                     # ========== ROI METHOD FOR FPS BOOST ==========
                     # Use ROI only if pattern is loaded (otherwise use full frame)
@@ -344,10 +305,6 @@ class PatternMode:
                                         'mask': full_frame_mask,
                                         'confidence': conf
                                     })
-                        
-                        # Cache detection results for frame skipping
-                        self.last_detection_overlay = detection_overlay.copy()
-                        self.last_detected_masks = detected_stitch_masks.copy()
                     else:
                         # FALLBACK: Use full frame detection if pattern not loaded
                         print("⚠ Pattern not loaded, using full frame detection")
@@ -378,19 +335,11 @@ class PatternMode:
                                         'mask': mask_binary,
                                         'confidence': conf
                                     })
-                        
-                        # Cache detection results for frame skipping
-                        self.last_detection_overlay = detection_overlay.copy() if detection_overlay is not None else None
-                        self.last_detected_masks = detected_stitch_masks.copy()
                     
                 except Exception as e:
                     print(f"Stitch detection error: {e}")
                     import traceback
                     traceback.print_exc()
-            elif self.stitch_model is not None and not should_run_detection:
-                # Use cached detection results for skipped frames
-                detection_overlay = self.last_detection_overlay.copy() if self.last_detection_overlay is not None else None
-                detected_stitch_masks = self.last_detected_masks.copy()
             
             # First, overlay pattern mask (draw pattern first, detection on top)
             pattern_applied = False
@@ -486,33 +435,6 @@ class PatternMode:
             
             frame[self.camera_y:self.camera_y+self.camera_height, 
                   self.camera_x:self.camera_x+self.camera_width] = cam_frame
-            
-            # Draw FPS counter on camera feed (top-right corner)
-            fps_text = f"FPS: {self.current_fps:.1f}"
-            fps_font_scale = 0.6
-            fps_thickness = 2
-            (fps_w, fps_h), _ = cv2.getTextSize(fps_text, cv2.FONT_HERSHEY_SIMPLEX, 
-                                                fps_font_scale, fps_thickness)
-            
-            # Position top-right of camera feed
-            fps_x = self.camera_x + self.camera_width - fps_w - 10
-            fps_y = self.camera_y + 25
-            
-            # Draw background for better readability
-            cv2.rectangle(frame, (fps_x - 5, fps_y - fps_h - 5), 
-                         (fps_x + fps_w + 5, fps_y + 5), 
-                         self.COLORS['dark_blue'], -1)
-            
-            # Color code FPS (green if good, yellow if medium, red if low)
-            if self.current_fps >= 25:
-                fps_color = (0, 255, 0)  # Green
-            elif self.current_fps >= 15:
-                fps_color = (0, 255, 255)  # Yellow
-            else:
-                fps_color = (0, 100, 255)  # Orange/Red
-            
-            cv2.putText(frame, fps_text, (fps_x, fps_y), cv2.FONT_HERSHEY_SIMPLEX, 
-                       fps_font_scale, fps_color, fps_thickness)
         
         # Draw corner accents
         corner_size = 25
