@@ -87,7 +87,7 @@ python3 main.py
 
 ##  Dependencies
 
-- Python 3.x
+- Python 3.10+ (Required)
 - OpenCV (cv2) - Computer vision and camera handling
 - NumPy 1.x - Numerical operations (MUST be <2.0 for OpenCV compatibility)
 - Pygame - Game/sound functionality

@@ -1,9 +1,34 @@
 # SewBot - Complete Setup & Fix Script (Windows)
 # This script fixes all common errors and sets up your environment
+# Requires: Python 3.10+
 
-Write-Host "==========================================" -ForegroundColor Cyan
+Write-Host "=========================================" -ForegroundColor Cyan
 Write-Host "  SewBot - Complete Setup" -ForegroundColor Cyan
-Write-Host "==========================================" -ForegroundColor Cyan
+Write-Host "=========================================" -ForegroundColor Cyan
+Write-Host ""
+
+# Check Python version
+Write-Host "Checking Python version..."
+try {
+    $PythonVersion = python --version 2>&1 | Select-String -Pattern '\d+\.\d+' | ForEach-Object { $_.Matches.Value }
+    $VersionParts = $PythonVersion.Split('.')
+    $Major = [int]$VersionParts[0]
+    $Minor = [int]$VersionParts[1]
+    
+    if ($Major -lt 3 -or ($Major -eq 3 -and $Minor -lt 10)) {
+        Write-Host "❌ ERROR: Python $PythonVersion detected" -ForegroundColor Red
+        Write-Host "   SewBot requires Python 3.10 or higher" -ForegroundColor Yellow
+        Write-Host ""
+        Write-Host "   Download from: https://www.python.org/downloads/" -ForegroundColor White
+        Write-Host ""
+        exit 1
+    } else {
+        Write-Host "✓ Python $PythonVersion (compatible)" -ForegroundColor Green
+    }
+} catch {
+    Write-Host "❌ ERROR: Python not found" -ForegroundColor Red
+    exit 1
+}
 Write-Host ""
 
 # Check if running in virtual environment

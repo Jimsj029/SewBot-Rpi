@@ -1,10 +1,31 @@
 #!/bin/bash
 # SewBot - Complete Setup & Fix Script
 # This script fixes all common errors and sets up your environment
+# Requires: Python 3.10+
 
 echo "=========================================="
 echo "  SewBot - Complete Setup"
 echo "=========================================="
+echo
+
+# Check Python version
+echo "Checking Python version..."
+PYTHON_VERSION=$(python3 --version 2>&1 | grep -oP '\d+\.\d+' | head -1)
+PYTHON_MAJOR=$(echo $PYTHON_VERSION | cut -d'.' -f1)
+PYTHON_MINOR=$(echo $PYTHON_VERSION | cut -d'.' -f2)
+
+if [ "$PYTHON_MAJOR" -lt 3 ] || ([ "$PYTHON_MAJOR" -eq 3 ] && [ "$PYTHON_MINOR" -lt 10 ]); then
+    echo "❌ ERROR: Python $PYTHON_VERSION detected"
+    echo "   SewBot requires Python 3.10 or higher"
+    echo ""
+    echo "   Install Python 3.10 with:"
+    echo "     sudo apt update"
+    echo "     sudo apt install python3.10 python3.10-venv python3.10-dev"
+    echo ""
+    exit 1
+else
+    echo "✓ Python $PYTHON_VERSION (compatible)"
+fi
 echo
 
 # Check if running in virtual environment
@@ -18,7 +39,7 @@ else
         echo "✓ Virtual environment activated"
     else
         echo "  Creating virtual environment..."
-        python3 -m venv .venv
+        python3.10 -m venv .venv 2>/dev/null || python3 -m venv .venv
         source .venv/bin/activate
         echo "✓ Virtual environment created and activated"
     fi
