@@ -55,8 +55,9 @@ class PatternMode:
         try:
             stitch_model_path = os.path.join(models_dir, 'best.onnx')
             if os.path.exists(stitch_model_path):
+                print(f"Loading stitch detection model: {stitch_model_path}")
                 self.stitch_model = YOLO(stitch_model_path, task='segment')
-                print(f"✓ Stitch detection model loaded: {stitch_model_path}")
+                print(f"✓ Stitch detection model loaded successfully!")
                 print(f"  Model type: {self.stitch_model.task if hasattr(self.stitch_model, 'task') else 'unknown'}")
                 
                 # Print available classes
@@ -64,13 +65,19 @@ class PatternMode:
                     print(f"  Detected classes:")
                     for idx, name in self.stitch_model.names.items():
                         print(f"    Class {idx}: {name}")
-                    print(f"  Confidence threshold: {self.confidence_threshold}")
-                    print(f"  IOU threshold: {self.iou_threshold}")
+                print(f"  Confidence threshold: {self.confidence_threshold}")
+                print(f"  IOU threshold: {self.iou_threshold}")
+                
+                # Test the model
+                print("  Testing model inference...")
+                test_img = np.zeros((640, 640, 3), dtype=np.uint8)
+                test_result = self.stitch_model(test_img, conf=self.confidence_threshold, verbose=False)
+                print("  ✓ Model test successful!")
             else:
                 print(f"⚠ Stitch model not found: {stitch_model_path}")
                 self.stitch_model = None
         except Exception as e:
-            print(f"Warning: Could not load stitch model: {e}")
+            print(f"⚠ ERROR loading stitch model: {e}")
             import traceback
             traceback.print_exc()
             self.stitch_model = None
@@ -251,6 +258,14 @@ class PatternMode:
                             imgsz=640,
                             verbose=False
                         )
+                        
+                        # Debug: Check if detections found
+                        if len(results) > 0 and results[0].boxes is not None and len(results[0].boxes) > 0:
+                            num_detections = len(results[0].boxes)
+                            print(f"🎯 Detections found: {num_detections}")
+                            for i, box in enumerate(results[0].boxes):
+                                conf = float(box.conf[0].cpu().numpy())
+                                print(f"  Detection {i+1}: confidence={conf:.3f}")
                         
                         # Get detection visualization from YOLO
                         roi_detection_overlay = results[0].plot(boxes=False, labels=False)

@@ -91,6 +91,10 @@ pip install torch torchvision
 echo "Installing ultralytics..."
 pip install ultralytics
 
+# Install onnxruntime for ONNX model inference
+echo "Installing onnxruntime (for ONNX model support)..."
+pip install onnxruntime
+
 echo ""
 echo "========================================"
 echo "Step 4: Verification"
