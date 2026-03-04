@@ -20,18 +20,26 @@ ImportError: numpy.core.multiarray failed to import
 
 ## Universal Fix
 
-Both issues are fixed by running the setup script:
+Both issues are fixed by deleting and rebuilding the virtual environment:
 
 ```bash
-chmod +x setup.sh
+cd ~/SewBot-Rpi
+rm -rf .venv
 ./setup.sh
 ```
-
-When asked "Recreate it?", answer **Y** to rebuild everything.
 
 Then run:
 ```bash
 bash run.sh
+```
+
+**What this does:**
+- `rm -rf .venv` - Deletes the broken virtual environment with wrong packages
+- `./setup.sh` - Creates a fresh environment with ARM-compatible packages, NumPy 1.x, etc.
+
+**One-liner:**
+```bash
+rm -rf .venv && ./setup.sh && bash run.sh
 ```
 
 ## What the Setup Script Does

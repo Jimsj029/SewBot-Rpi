@@ -71,14 +71,18 @@ python main.py
 
 **Getting "Illegal instruction" or NumPy version errors?**
 
-Just re-run setup (it handles all fixes):
+Delete the environment and rebuild:
 ```bash
-./setup.sh
+rm -rf .venv && ./setup.sh
 ```
 
-When asked "Recreate it?", answer **Y** to rebuild the environment.
+The setup script will recreate everything from scratch with correct packages.
 
-**Common issues fixed by setup.sh:**
+**What this does:**
+- `rm -rf .venv` - Deletes the broken virtual environment
+- `./setup.sh` - Creates a new one with ARM-compatible packages
+
+**Common issues this fixes:**
 - "Illegal instruction" errors (x86 packages on ARM)
 - NumPy 2.x incompatibility with OpenCV (requires NumPy 1.x)
 - Missing or incompatible PyTorch versions
@@ -87,8 +91,8 @@ For older Raspberry Pi models (Pi 2, Pi 3), install system packages first:
 ```bash
 sudo apt-get update
 sudo apt-get install -y python3-opencv python3-numpy python3-pygame libatlas-base-dev
+rm -rf .venv && ./setup.sh
 ```
-Then run setup.sh again.
 
 ##  Design Theme
 

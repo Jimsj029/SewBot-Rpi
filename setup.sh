@@ -44,13 +44,20 @@ fi
 # Handle existing venv
 if [ -d ".venv" ]; then
     echo "Virtual environment already exists."
-    read -p "Recreate it? (recommended if you have errors) (Y/n): " -n 1 -r
     echo ""
-    if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+    echo "Options:"
+    echo "  1) Recreate (RECOMMENDED - fixes all package issues)"
+    echo "  2) Keep and reinstall packages only"
+    echo ""
+    read -p "Choice (1 or 2) [1]: " -n 1 -r
+    echo ""
+    
+    # Default to 1 if just Enter pressed
+    if [[ -z "$REPLY" ]] || [[ "$REPLY" = "1" ]]; then
         echo "Removing existing venv..."
         rm -rf .venv
     else
-        echo "Using existing venv (will reinstall packages)..."
+        echo "Keeping venv, will reinstall packages..."
     fi
 fi
 
@@ -155,8 +162,8 @@ echo "Or manually:"
 echo "  source .venv/bin/activate"
 echo "  python main.py"
 echo ""
-echo "If you get errors:"
-echo "  - 'Illegal instruction': Re-run this setup script"
-echo "  - NumPy version errors: Re-run this setup script"
-echo "  - For older Pi models: Install system packages first"
+echo "If you get 'Illegal instruction' or NumPy errors:"
+echo "  1. Run: rm -rf .venv"
+echo "  2. Run: ./setup.sh"
+echo "  (This deletes and recreates everything)"
 echo ""
