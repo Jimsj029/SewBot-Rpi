@@ -20,7 +20,21 @@ Examples:
 
 import os
 import sys
-from ultralytics import YOLO
+
+# Check for required packages
+try:
+    from ultralytics import YOLO
+except ImportError:
+    print("\n❌ Error: 'ultralytics' package not found")
+    print("   Install with: pip install ultralytics")
+    sys.exit(1)
+
+try:
+    import onnx
+except ImportError:
+    print("\n❌ Error: 'onnx' package not found")
+    print("   Install with: pip install onnx")
+    sys.exit(1)
 
 # Configuration
 MODELS_DIR = "models"

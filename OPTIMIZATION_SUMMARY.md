@@ -22,21 +22,50 @@
 - **Inference time** tracking (ms)
 - Color-coded performance indicators
 
+### 5. ✅ Auto-Detects Model Input Size
+- Works with both 640x640 and 320x320 models
+- No more dimension mismatch errors!
+- Suggests optimization if using slow model
+
 ## 🚀 Quick Start
 
-### Step 1: Download Optimized Model
-```powershell
-# In PowerShell (you're already here)
-python download_faster_model.py yolo11n-seg
+**⚠️ IMPORTANT: Install ONNX packages first (if missing):**
+
+```bash
+# On Raspberry Pi
+./install_onnx.sh
+
+# Or manually
+pip install onnx onnxruntime
 ```
 
-This will:
-- Download YOLO11n-seg model
-- Export to ONNX (320x320 input)
-- Backup your current model
-- Install as `models/best.onnx`
+**Then choose ONE option:**
 
-### Step 2: Run SewBot
+### Option 1: Use Existing Model (Works Now!) ✨
+The code now auto-detects your model's input size. Your existing 640x640 model will work:
+
+```bash
+python main.py
+```
+
+### Option 2: Download Faster Model (Recommended) 🚀
+For 2-3x better performance, download the optimized 320x320 model:
+
+```powershell
+# Download optimized YOLO11n-seg model
+python download_faster_model.py yolo11n-seg
+
+# Then run SewBot
+python main.py
+```
+
+**What this does:**
+- Downloads YOLO11n-seg model
+- Exports to ONNX (320x320 input)
+- Backs up your current model
+- Installs as `models/best.onnx`
+
+### Previously:
 ```powershell
 python main.py
 ```
@@ -136,9 +165,26 @@ cp models/best.onnx.backup models/best.onnx
 
 ## ❓ Troubleshooting
 
+### Issue: "INVALID_ARGUMENT: Got invalid dimensions... Expected: 640" ✅ FIXED
+This error means you need the `onnx` package for auto-detection:
+```bash
+# On Raspberry Pi
+./install_onnx.sh
+
+# Or manually
+pip install onnx onnxruntime
+```
+
+After installing, the code will automatically detect your model's input size!
+
 ### Issue: "Module 'ultralytics' not found"
 ```powershell
 pip install ultralytics
+```
+
+### Issue: "Module 'onnx' not found"
+```bash
+pip install onnx onnxruntime
 ```
 
 ### Issue: Still low FPS
@@ -153,8 +199,13 @@ See [TROUBLESHOOTING_ILLEGAL_INSTRUCTION.md](TROUBLESHOOTING_ILLEGAL_INSTRUCTION
 
 ✅ Merge conflicts fixed  
 ✅ Fast model downloader created  
-✅ Inference optimized (2-3x faster)  
+✅ Inference optimized (2-3x faster with new model)  
 ✅ Real-time FPS monitoring added  
+✅ **Auto-detects model input size** - dimension error FIXED!  
 ✅ Full documentation provided  
 
-**Next step**: Run `python download_faster_model.py yolo11n-seg` to get started! 🚀
+**Next steps:**
+1. Install ONNX: `./install_onnx.sh` (or `pip install onnx onnxruntime`)
+2. Either:
+   - Run with existing model: `python main.py` (works now!)
+   - Or download faster model: `python download_faster_model.py yolo11n-seg`

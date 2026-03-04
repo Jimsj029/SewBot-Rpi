@@ -51,8 +51,8 @@ class PatternMode:
         self.confidence_threshold = 0.35  # Optimized for stitch line detection
         self.iou_threshold = 0.6  # Intersection over Union threshold
         
-        # RPi4 Optimization Settings
-        self.MODEL_INPUT_SIZE = 320  # Reduced from 640 for 2-3x faster inference
+        # RPi4 Optimization Settings (defaults)
+        self.MODEL_INPUT_SIZE = 320  # Will be auto-detected from ONNX model
         self.MAX_DET = 100  # Maximum detections per image
         self.HALF_PRECISION = False  # FP16 not supported on RPi4 CPU
         
@@ -67,6 +67,21 @@ class PatternMode:
             
             if os.path.exists(stitch_model_path):
                 print(f"Loading stitch detection model: {stitch_model_path}")
+                
+                # Auto-detect model input size from ONNX file
+                try:
+                    import onnx
+                    onnx_model = onnx.load(stitch_model_path)
+                    input_shape = onnx_model.graph.input[0].type.tensor_type.shape.dim
+                    detected_size = input_shape[2].dim_value  # Height dimension
+                    if detected_size > 0:
+                        self.MODEL_INPUT_SIZE = detected_size
+                        print(f"  ✓ Auto-detected model input size: {self.MODEL_INPUT_SIZE}x{self.MODEL_INPUT_SIZE}")
+                    else:
+                        print(f"  ⚠ Could not auto-detect input size, using default: {self.MODEL_INPUT_SIZE}")
+                except Exception as e:
+                    print(f"  ⚠ Could not auto-detect input size ({e}), using default: {self.MODEL_INPUT_SIZE}")
+                
                 self.stitch_model = YOLO(stitch_model_path, task='segment')
                 print(f"✓ Stitch detection model loaded successfully!")
                 print(f"  Model type: {self.stitch_model.task if hasattr(self.stitch_model, 'task') else 'unknown'}")
@@ -79,7 +94,7 @@ class PatternMode:
                 print(f"  Confidence threshold: {self.confidence_threshold}")
                 print(f"  IOU threshold: {self.iou_threshold}")
                 
-                # Test the model with optimized settings
+                # Test the model with detected settings
                 print("  Testing model inference...")
                 test_img = np.zeros((self.MODEL_INPUT_SIZE, self.MODEL_INPUT_SIZE, 3), dtype=np.uint8)
                 import time
@@ -95,9 +110,14 @@ class PatternMode:
                 )
                 test_time = (time.time() - start_time) * 1000
                 print(f"  ✓ Model test successful! (inference: {test_time:.1f}ms)")
-                print(f"  ✓ Optimized for RPi4: {self.MODEL_INPUT_SIZE}x{self.MODEL_INPUT_SIZE} input")
+                print(f"  ✓ Using {self.MODEL_INPUT_SIZE}x{self.MODEL_INPUT_SIZE} input size")
                 expected_fps = 1000 / test_time if test_time > 0 else 0
                 print(f"  ✓ Expected FPS: {expected_fps:.1f} (may vary with detection load)")
+                
+                # Suggest optimization if using 640
+                if self.MODEL_INPUT_SIZE >= 640:
+                    print(f"  💡 TIP: For 2-3x faster inference, run:")
+                    print(f"     python download_faster_model.py yolo11n-seg")
             else:
                 print(f"⚠ Stitch model not found: {stitch_model_path}")
                 self.stitch_model = None
