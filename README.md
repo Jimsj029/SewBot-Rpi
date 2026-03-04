@@ -37,45 +37,34 @@ SewBot/
 
 ##  How to Run
 
-### Setup (First Time or Fix Errors)
+### Setup (One Command)
 
-**One command to fix everything:**
-
+**On Raspberry Pi:**
 ```bash
-cd ~/SewBot-Rpi
-rm -rf .venv && ./setup.sh
+chmod +x setup_complete.sh
+./setup_complete.sh
+python3 main.py
 ```
 
-The setup script will:
-- Install system packages (ARM-compatible, avoids "Illegal instruction")
-- Create virtual environment with system package access
-- Install PyTorch and ultralytics from piwheels
-- Verify all imports work
-
-### Running the Application
-
-```bash
-bash run.sh
-```
-
-Or manually:
-```bash
-source .venv/bin/activate
+**On Windows (for testing):**
+```powershell
+.\setup_complete.ps1
 python main.py
 ```
 
-### Why This Works
+**What it does:**
+- Fixes NumPy 2.x compatibility (downgrades to 1.x)
+- Installs ONNX packages for model auto-detection
+- Checks your model and suggests optimization if needed
+- Verifies all packages are working
 
-The script uses **system packages** (python3-numpy, python3-opencv, python3-pygame) which are pre-compiled for ARM by Raspberry Pi OS. This completely avoids the "Illegal instruction" error that happens when pip installs x86 packages.
+### Optional: Better Performance
 
-### Troubleshooting
-
-**Any errors? Just run:**
+For 2-3x faster FPS (15-25 instead of 5-8):
 ```bash
-rm -rf .venv && ./setup.sh
+python download_faster_model.py yolo11n-seg
+python3 main.py
 ```
-
-This deletes everything and rebuilds from scratch.
 
 ##  Design Theme
 
@@ -110,17 +99,25 @@ This deletes everything and rebuilds from scratch.
 
 ##  AI Model
 
-The project uses a **YOLOv8-nano segmentation model** (`best.onnx`) trained to detect stitch lines:
-- **Model**: YOLOv8n-seg (ONNX format fo
+The project uses a **YOLO segmentation model** (`best.onnx`) trained to detect stitch lines:
+- **Model**: YOLOv8n-seg or YOLO11n-seg (ONNX format)
+- **Classes**: stitch_line (real-time segmentation masks)
+- **Input**: Auto-detected (640x640 or 320x320)
+- **Confidence**: Default 0.35 (adjustable with +/- keys)
+- **Performance**: 15-25 FPS on RPi4 with optimized model
+
   - F: Toggle fullscreen
   - **Pattern Mode Only**:
     - '+' or '=': Increase confidence threshold (reduce false positives)
-    - '-': Decrease confidence threshold (more sensitive detection)r Raspberry Pi optimization)
-- **Classes**: stitch_line (real-time segmentation masks)
-- **Input**: 640x640 images
-- **Confidence**: Default 0.35 (adjustable with +/- keys)
-- **Performance**: Optimized for Raspberry Pi 4 inference
+    - '-': Decrease confidence threshold (more sensitive detection)
 
+##  Documentation
+
+- **[COMMON_ERRORS.md](COMMON_ERRORS.md)** - Quick fixes for common errors
+- **[NUMPY_FIX.md](NUMPY_FIX.md)** - NumPy 2.x compatibility fix
+- **[DIMENSION_ERROR_FIX.md](DIMENSION_ERROR_FIX.md)** - ONNX dimension mismatch fix
+- **[OPTIMIZATION_GUIDE.md](OPTIMIZATION_GUIDE.md)** - Performance optimization guide
+- **[OPTIMIZATION_SUMMARY.md](OPTIMIZATION_SUMMARY.md)** - Quick optimization overview
 ##  Controls
 
 - **Mouse**: Click buttons to navigate
