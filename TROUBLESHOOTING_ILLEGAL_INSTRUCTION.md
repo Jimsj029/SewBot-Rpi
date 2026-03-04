@@ -1,39 +1,48 @@
-# Fixing "Illegal Instruction" Error on Raspberry Pi
+# Fixing Raspberry Pi Errors
 
-## Problem
+## Common Problems
+
+### 1. "Illegal instruction" Error
 ```
 run.sh: line 27: 2976 Illegal instruction python main.py
 ```
 
-This error occurs when Python packages (especially PyTorch, NumPy, or ONNX Runtime) are compiled with CPU instructions not supported by your Raspberry Pi's ARM processor.
+**Cause**: Python packages compiled with x86 CPU instructions instead of ARM.
 
-## Quick Fix
+### 2. NumPy Version Error
+```
+A module that was compiled using NumPy 1.x cannot be run in NumPy 2.2.6
+AttributeError: _ARRAY_API not found
+ImportError: numpy.core.multiarray failed to import
+```
 
-Just run the setup script on your Raspberry Pi:
+**Cause**: NumPy 2.x installed, but OpenCV requires NumPy 1.x.
+
+## Universal Fix
+
+Both issues are fixed by running the setup script:
 
 ```bash
 chmod +x setup.sh
 ./setup.sh
 ```
 
-Then try running again:
+When asked "Recreate it?", answer **Y** to rebuild everything.
+
+Then run:
 ```bash
 bash run.sh
 ```
 
-The setup script handles everything:
-- Configures pip to use piwheels (ARM packages)
-- Removes incompatible packages
-- Installs ARM-compatible versions
-- Verifies all imports work correctly
-
 ## What the Setup Script Does
 
-1. **Configures piwheels**: Sets pip to use https://www.piwheels.org/simple, which provides ARM-compiled packages
-2. **Removes incompatible packages**: Uninstalls any existing x86 versions
-3. **Installs PyTorch for ARM**: Uses ARM-compatible version from PyTorch's official CPU builds
-4. **Installs ultralytics properly**: Installs without dependencies, then manually installs each dependency to avoid conflicts
-5. **Verifies installation**: Tests that all packages import correctly
+1. **Configures piwheels**: Uses ARM-compiled packages from https://www.piwheels.org/simple
+2. **Removes incompatible packages**: Uninstalls x86 versions and NumPy 2.x
+3. **Installs NumPy 1.x**: Force installs `numpy<2.0.0` for OpenCV compatibility
+4. **Installs PyTorch for ARM**: Uses ARM-compatible version from PyTorch's official CPU builds
+5. **Installs ultralytics properly**: Without dependencies to prevent version conflicts
+6. **Verifies NumPy version**: Checks and downgrades NumPy if it was upgraded to 2.x
+7. **Tests all imports**: Verifies everything works correctly
 
 ## System Package Method (Recommended for older Pi models)
 

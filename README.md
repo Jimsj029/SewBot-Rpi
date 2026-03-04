@@ -69,19 +69,26 @@ python main.py
 
 ### Troubleshooting
 
-**Still getting "Illegal instruction"?**
+**Getting "Illegal instruction" or NumPy version errors?**
 
-1. Re-run setup (it will reinstall packages):
-   ```bash
-   ./setup.sh
-   ```
+Just re-run setup (it handles all fixes):
+```bash
+./setup.sh
+```
 
-2. For older Raspberry Pi models (Pi 2, Pi 3), install system packages first:
-   ```bash
-   sudo apt-get update
-   sudo apt-get install -y python3-opencv python3-numpy python3-pygame libatlas-base-dev
-   ```
-   Then run setup.sh again.
+When asked "Recreate it?", answer **Y** to rebuild the environment.
+
+**Common issues fixed by setup.sh:**
+- "Illegal instruction" errors (x86 packages on ARM)
+- NumPy 2.x incompatibility with OpenCV (requires NumPy 1.x)
+- Missing or incompatible PyTorch versions
+
+For older Raspberry Pi models (Pi 2, Pi 3), install system packages first:
+```bash
+sudo apt-get update
+sudo apt-get install -y python3-opencv python3-numpy python3-pygame libatlas-base-dev
+```
+Then run setup.sh again.
 
 ##  Design Theme
 

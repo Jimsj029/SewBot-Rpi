@@ -79,7 +79,7 @@ pip config set global.extra-index-url https://www.piwheels.org/simple
 # Uninstall potentially problematic packages
 echo ""
 echo "Removing any incompatible packages..."
-pip uninstall -y torch torchvision ultralytics onnxruntime 2>/dev/null || true
+pip uninstall -y torch torchvision ultralytics onnxruntime numpy opencv-python 2>/dev/null || true
 
 # Install dependencies
 echo ""
@@ -87,16 +87,16 @@ echo "Installing dependencies (ARM-compatible versions)..."
 echo "This may take several minutes..."
 
 # Install numpy first (MUST be 1.x for OpenCV compatibility)
-echo "  - Installing NumPy 1.24.3 (required for OpenCV)..."
-pip install --force-reinstall "numpy>=1.24.3,<2.0.0"
+echo "  - Installing NumPy 1.x (CRITICAL: OpenCV requires NumPy 1.x)..."
+pip install "numpy>=1.24.3,<2.0.0"
 
 # Install opencv-python (compiled against NumPy 1.x)
-echo "  - Installing OpenCV..."
-pip install --force-reinstall --no-build-isolation opencv-python==4.8.1.78
+echo "  - Installing OpenCV (with NumPy 1.x compatibility)..."
+pip install --no-build-isolation opencv-python==4.8.1.78
 
 # Install pygame
 echo "  - Installing Pygame..."
-pip install --force-reinstall pygame==2.5.2
+pip install pygame==2.5.2
 
 # Install PyTorch for Raspberry Pi (ARM architecture)
 echo ""
@@ -112,6 +112,17 @@ pip install matplotlib pillow pyyaml requests scipy tqdm psutil py-cpuinfo thop 
 # Install ultralytics (YOLO) without dependencies
 echo "Installing ultralytics (YOLO model library)..."
 pip install ultralytics --no-deps
+
+# CRITICAL: Verify NumPy hasn't been upgraded to 2.x
+echo ""
+echo "Verifying NumPy version (must be 1.x for OpenCV)..."
+NUMPY_VERSION=$(python -c "import numpy; print(numpy.__version__)" 2>/dev/null | cut -d. -f1)
+if [ "$NUMPY_VERSION" = "2" ]; then
+    echo "WARNING: NumPy was upgraded to 2.x! Downgrading..."
+    pip uninstall -y numpy
+    pip install "numpy>=1.24.3,<2.0.0"
+    echo "NumPy downgraded to 1.x"
+fi
 
 # Verify installations
 echo ""
@@ -144,7 +155,8 @@ echo "Or manually:"
 echo "  source .venv/bin/activate"
 echo "  python main.py"
 echo ""
-echo "If you still get 'Illegal instruction' error:"
-echo "  - Check your Pi model: cat /proc/cpuinfo | grep Model"
-echo "  - For older Pi models, you may need system packages"
+echo "If you get errors:"
+echo "  - 'Illegal instruction': Re-run this setup script"
+echo "  - NumPy version errors: Re-run this setup script"
+echo "  - For older Pi models: Install system packages first"
 echo ""
