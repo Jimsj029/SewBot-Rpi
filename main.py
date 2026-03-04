@@ -769,6 +769,15 @@ class SewBotApp:
                         self.running = False
                         break
                 
+                # Pattern mode specific controls
+                elif self.state == 'pattern':
+                    if key == ord('+') or key == ord('='):  # Increase confidence threshold
+                        self.pattern_mode.confidence_threshold = min(0.9, self.pattern_mode.confidence_threshold + 0.05)
+                        print(f"Confidence threshold: {self.pattern_mode.confidence_threshold:.2f}")
+                    elif key == ord('-') or key == ord('_'):  # Decrease confidence threshold
+                        self.pattern_mode.confidence_threshold = max(0.1, self.pattern_mode.confidence_threshold - 0.05)
+                        print(f"Confidence threshold: {self.pattern_mode.confidence_threshold:.2f}")
+                
                 # Check window property to detect X button click
                 try:
                     if cv2.getWindowProperty(self.window_name, cv2.WND_PROP_VISIBLE) < 1:
