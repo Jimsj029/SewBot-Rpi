@@ -37,9 +37,45 @@ SewBot/
 
 ##  How to Run
 
+### Setup (First Time or Fix Errors)
+
+**One command to fix everything:**
+
 ```bash
+cd ~/SewBot-Rpi
+rm -rf .venv && ./setup.sh
+```
+
+The setup script will:
+- Install system packages (ARM-compatible, avoids "Illegal instruction")
+- Create virtual environment with system package access
+- Install PyTorch and ultralytics from piwheels
+- Verify all imports work
+
+### Running the Application
+
+```bash
+bash run.sh
+```
+
+Or manually:
+```bash
+source .venv/bin/activate
 python main.py
 ```
+
+### Why This Works
+
+The script uses **system packages** (python3-numpy, python3-opencv, python3-pygame) which are pre-compiled for ARM by Raspberry Pi OS. This completely avoids the "Illegal instruction" error that happens when pip installs x86 packages.
+
+### Troubleshooting
+
+**Any errors? Just run:**
+```bash
+rm -rf .venv && ./setup.sh
+```
+
+This deletes everything and rebuilds from scratch.
 
 ##  Design Theme
 
@@ -62,10 +98,15 @@ python main.py
 
 ##  Dependencies
 
+- Python 3.x
 - OpenCV (cv2) - Computer vision and camera handling
-- NumPy - Numerical operations
+- NumPy 1.x - Numerical operations (MUST be <2.0 for OpenCV compatibility)
+- Pygame - Game/sound functionality
+- PyTorch - Deep learning framework (ARM-compatible version required)
 - Ultralytics - YOLOv8 model inference
-- ONNX Runtime - Optimized model execution
+- ONNX Runtime 1.14+ - Required for ONNX model inference (IR version 10 support)
+
+**Note**: Standard pip packages may not work on Raspberry Pi ARM architecture. Use `setup.sh` which installs ARM-compatible versions from piwheels and PyTorch's ARM distribution.
 
 ##  AI Model
 
