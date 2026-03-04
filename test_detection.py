@@ -28,15 +28,37 @@ except Exception as e:
     print(f"   ✗ Ultralytics: {e}")
     exit(1)
 
+# Check NumPy version
+try:
+    import numpy as np
+    numpy_version = np.__version__
+    numpy_major = int(numpy_version.split('.')[0])
+    print(f"   ✓ NumPy: {numpy_version}")
+    if numpy_major >= 2:
+        print(f"   ⚠ WARNING: NumPy 2.x detected! This may cause issues with OpenCV.")
+        print(f"   Run: pip uninstall -y numpy && pip install 'numpy<2'")
+except Exception as e:
+    print(f"   ✗ NumPy: {e}")
+
+# Check ONNX Runtime version
 try:
     import onnxruntime as ort
-    print(f"   ✓ ONNX Runtime: {ort.__version__}")
+    ort_version = ort.__version__
+    print(f"   ✓ ONNX Runtime: {ort_version}")
+    # Check if version is sufficient (need 1.14+ for IR version 10)
+    major, minor = map(int, ort_version.split('.')[:2])
+    if major < 1 or (major == 1 and minor < 14):
+        print(f"   ⚠ WARNING: ONNX Runtime {ort_version} is too old!")
+        print(f"   Need version 1.14+ for your ONNX model")
+        print(f"   Run: pip uninstall -y onnxruntime && pip install 'onnxruntime>=1.14.0'")
 except Exception as e:
-    print(f"   ⚠ ONNX Runtime not available: {e}")
+    print(f"   ✗ ONNX Runtime: {e}")
+    print(f"   Install with: pip install 'onnxruntime>=1.14.0'")
 
 # Check model file
 print("\n2. Checking model file...")
 model_path = os.path.join('models', 'best.onnx')
+    
 if os.path.exists(model_path):
     print(f"   ✓ Model found: {model_path}")
     file_size = os.path.getsize(model_path) / (1024 * 1024)

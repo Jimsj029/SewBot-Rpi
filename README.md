@@ -98,13 +98,13 @@ This deletes everything and rebuilds from scratch.
 
 ##  Dependencies
 
-- Python 3.10
+- Python 3.x
 - OpenCV (cv2) - Computer vision and camera handling
-- NumPy - Numerical operations
+- NumPy 1.x - Numerical operations (MUST be <2.0 for OpenCV compatibility)
 - Pygame - Game/sound functionality
 - PyTorch - Deep learning framework (ARM-compatible version required)
 - Ultralytics - YOLOv8 model inference
-- ONNX Runtime - Optimized model execution (optional)
+- ONNX Runtime 1.14+ - Required for ONNX model inference (IR version 10 support)
 
 **Note**: Standard pip packages may not work on Raspberry Pi ARM architecture. Use `setup.sh` which installs ARM-compatible versions from piwheels and PyTorch's ARM distribution.
 

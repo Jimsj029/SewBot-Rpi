@@ -83,6 +83,10 @@ echo ""
 echo "Installing additional packages (using piwheels)..."
 pip config set global.extra-index-url https://www.piwheels.org/simple
 
+# CRITICAL: Ensure NumPy 1.x (OpenCV compatibility)
+echo "Ensuring NumPy 1.x (required for OpenCV)..."
+pip install "numpy>=1.21.0,<2.0.0" --upgrade
+
 # Install torch for ARM - use pip which will get from piwheels
 echo "Installing PyTorch (from piwheels - ARM compatible)..."
 pip install torch torchvision
@@ -91,9 +95,25 @@ pip install torch torchvision
 echo "Installing ultralytics..."
 pip install ultralytics
 
-# Install onnxruntime for ONNX model inference
-echo "Installing onnxruntime (for ONNX model support)..."
-pip install onnxruntime
+# Install ONNX Runtime (need version 1.14+ for IR version 10 support)
+echo "Installing ONNX Runtime (version 1.14+ required for ONNX model)..."
+# Uninstall old system version first
+pip uninstall -y onnxruntime 2>/dev/null || true
+# Install from pip (will try piwheels first)
+pip install "onnxruntime>=1.14.0"
+
+# CRITICAL: Verify NumPy version (ultralytics may upgrade it)
+echo ""
+echo "Verifying NumPy version..."
+NUMPY_VERSION=$(python3 -c "import numpy; print(numpy.__version__.split('.')[0])" 2>/dev/null || echo "0")
+if [ "$NUMPY_VERSION" = "2" ]; then
+    echo "⚠ WARNING: NumPy 2.x detected! Downgrading to 1.x for OpenCV compatibility..."
+    pip uninstall -y numpy
+    pip install "numpy>=1.21.0,<2.0.0"
+    echo "✓ NumPy downgraded to 1.x"
+else
+    echo "✓ NumPy 1.x is installed (version: $(python3 -c 'import numpy; print(numpy.__version__)' 2>/dev/null || echo 'unknown'))"
+fi
 
 echo ""
 echo "========================================"

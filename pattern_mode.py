@@ -51,9 +51,11 @@ class PatternMode:
         self.confidence_threshold = 0.35  # Optimized for stitch line detection
         self.iou_threshold = 0.6  # Intersection over Union threshold
         
-        # Load stitch detection model (ONNX segmentation model)
+        # Load stitch detection model (ONNX model)
         try:
+            # Use ONNX model (best.onnx)
             stitch_model_path = os.path.join(models_dir, 'best.onnx')
+            
             if os.path.exists(stitch_model_path):
                 print(f"Loading stitch detection model: {stitch_model_path}")
                 self.stitch_model = YOLO(stitch_model_path, task='segment')
@@ -68,7 +70,7 @@ class PatternMode:
                 print(f"  Confidence threshold: {self.confidence_threshold}")
                 print(f"  IOU threshold: {self.iou_threshold}")
                 
-                # Test the model
+                # Test the model with dummy data
                 print("  Testing model inference...")
                 test_img = np.zeros((640, 640, 3), dtype=np.uint8)
                 test_result = self.stitch_model(test_img, conf=self.confidence_threshold, verbose=False)
