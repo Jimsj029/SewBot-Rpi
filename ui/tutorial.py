@@ -4,12 +4,7 @@ import cv2
 import numpy as np
 import math
 import os
-import sys
 import time
-
-# Add parent directory to path for imports
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-from music_manager import get_music_manager
 
 # Try to import pygame for audio playback
 try:
@@ -89,9 +84,6 @@ class TutorialPlayer:
             except Exception as e:
                 print(f"Failed to load audio: {e}")
         
-        # Music manager for sound effects
-        self.music_manager = get_music_manager()
-        
         # Load the first video
         self.load_current_video()
         
@@ -105,27 +97,11 @@ class TutorialPlayer:
         }
         
         self.replay_current_button = {
-            'x': 170,
-            'y': self.height - 80,
+            'x': 160,
+            'y': self.height - 60,
             'w': 140,
-            'h': 50,
+            'h': 40,
             'text': 'REPLAY'
-        }
-        
-        self.previous_button = {
-            'x': 20,
-            'y': self.height - 80,
-            'w': 140,
-            'h': 50,
-            'text': 'PREVIOUS'
-        }
-        
-        self.back_button = {
-            'x': 20,
-            'y': 20,
-            'w': 140,
-            'h': 50,
-            'text': '< BACK'
         }
         
         self.skip_all_button = {
@@ -228,16 +204,6 @@ class TutorialPlayer:
             # Last step completed
             return False
     
-    def previous_step(self):
-        """Move to the previous tutorial step"""
-        if self.current_step > 0:
-            self.current_step -= 1
-            self.load_current_video()
-            return True
-        else:
-            # Already on first step
-            return False
-    
     def replay_current_video(self):
         """Replay the current video from the beginning"""
         self.video_frame = 0
@@ -295,27 +261,12 @@ class TutorialPlayer:
         # Load the first video
         self.load_current_video()
     
-    def play_button_click_sound(self):
-        """Play button click sound effect"""
-        try:
-            self.music_manager.play_sound_effect('button_click.mp3')
-        except Exception as e:
-            pass  # Silently fail if sound effect doesn't exist
-    
     def handle_click(self, x, y):
-        """Handle mouse clicks, returns action: 'next', 'done', 'replay_current', 'replay', 'continue', 'back', 'previous', or None"""
-        # Check back button (top left)
-        if not self.skipped and not self.completed:
-            btn = self.back_button
-            if btn['x'] <= x <= btn['x'] + btn['w'] and btn['y'] <= y <= btn['y'] + btn['h']:
-                self.play_button_click_sound()
-                return 'back'
-        
+        """Handle mouse clicks, returns action: 'next', 'done', 'replay_current', 'replay', 'continue', or None"""
         # Check skip all button (top right - skips entire tutorial)
         if not self.skipped and not self.completed:
             btn = self.skip_all_button
             if btn['x'] <= x <= btn['x'] + btn['w'] and btn['y'] <= y <= btn['y'] + btn['h']:
-                self.play_button_click_sound()
                 self.skipped = True
                 # Stop audio when skipping
                 if AUDIO_AVAILABLE and pygame.mixer.get_init():
@@ -334,20 +285,10 @@ class TutorialPlayer:
                 self.seek_to_position(click_percentage)
                 return 'seek'
         
-        # Check previous button (only when video is playing or paused and not on first step)
-        if not self.skipped and not self.completed and self.current_step > 0:
-            btn = self.previous_button
-            if btn['x'] <= x <= btn['x'] + btn['w'] and btn['y'] <= y <= btn['y'] + btn['h']:
-                self.play_button_click_sound()
-                # Go to previous step
-                if self.previous_step():
-                    return 'previous'
-        
         # Check replay current video button (only when video is playing or paused)
         if not self.skipped and not self.completed:
             btn = self.replay_current_button
             if btn['x'] <= x <= btn['x'] + btn['w'] and btn['y'] <= y <= btn['y'] + btn['h']:
-                self.play_button_click_sound()
                 # Replay current video from beginning
                 self.replay_current_video()
                 return 'replay_current'
@@ -356,7 +297,6 @@ class TutorialPlayer:
         if not self.skipped and not self.completed:
             btn = self.next_button
             if btn['x'] <= x <= btn['x'] + btn['w'] and btn['y'] <= y <= btn['y'] + btn['h']:
-                self.play_button_click_sound()
                 # If on last step, this is the Done button
                 if self.current_step >= self.total_steps - 1:
                     return 'continue'  # Done with all tutorials
@@ -371,14 +311,12 @@ class TutorialPlayer:
         if self.skipped or self.completed:
             btn = self.continue_button
             if btn['x'] <= x <= btn['x'] + btn['w'] and btn['y'] <= y <= btn['y'] + btn['h']:
-                self.play_button_click_sound()
                 return 'continue'
         
         # Check replay button (after skip or completion)
         if self.skipped or self.completed:
             btn = self.replay_button
             if btn['x'] <= x <= btn['x'] + btn['w'] and btn['y'] <= y <= btn['y'] + btn['h']:
-                self.play_button_click_sound()
                 return 'replay'
         
         return None
@@ -565,17 +503,10 @@ class TutorialPlayer:
             # Draw step indicator
             self.draw_step_indicator(img)
             
-            # Draw back button (top left)
-            self.draw_button(img, self.back_button, COLORS['button_hover'])
-            
             # Draw skip all button (top right)
             self.draw_button(img, self.skip_all_button, COLORS['button_normal'])
             
-            # Draw previous button (bottom left) - only show if not on first step
-            if self.current_step > 0:
-                self.draw_button(img, self.previous_button, COLORS['button_normal'])
-            
-            # Draw replay current button (bottom left, next to previous)
+            # Draw replay current button (left side)
             self.draw_button(img, self.replay_current_button, COLORS['button_normal'])
             
             # Draw next/done button (right side)

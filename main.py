@@ -16,7 +16,6 @@ from tutorial import TutorialPlayer
 from wallet_tutorial import WalletTutorialPlayer
 from level_selection import LevelSelection
 from pattern_mode import PatternMode
-from music_manager import get_music_manager
 
 
 class SewBotApp:
@@ -25,10 +24,8 @@ class SewBotApp:
         self.height = 600
         self.window_name = 'SewBot - Pattern Recognition System'
         self.state = 'main_menu'  # main_menu, tutorial, wallet_tutorial, mode_selection, level_selection, pattern
-        self.previous_state = None  # Track previous state for music transitions
         self.glow_phase = 0
         self.running = True
-        self.fullscreen = False  # Fullscreen state
         
         # Theme colors
         self.COLORS = {
@@ -100,25 +97,14 @@ class SewBotApp:
         self.back_button = {'x': 20, 'y': self.height - 60, 'w': 120, 'h': 40}
         self.quit_button = {'x': self.width - 140, 'y': self.height - 60, 'w': 120, 'h': 40}
         
-        # Mute button (upper right corner)
-        self.mute_button = {'x': self.width - 70, 'y': 20, 'w': 50, 'h': 50}
-        self.is_muted = False
-        
-        # Music manager
-        self.music_manager = get_music_manager()
-        
         # Pattern mode - separate module
         self.pattern_mode = PatternMode(self.width, self.height, self.COLORS, 'blueprint')
-        
-        # Load logo image for main menu
-        self.logo_img = None
-        self.load_logo()
         
         # Pre-render grid background (performance optimization)
         self.grid_background = self.create_grid_background()
         
         try:
-            cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
+            cv2.namedWindow(self.window_name)
             cv2.setMouseCallback(self.window_name, self.mouse_callback)
         except:
             print("Failed to create window")
@@ -126,38 +112,6 @@ class SewBotApp:
         
         # Detect camera at startup
         self.detect_camera_at_startup()
-    
-    def load_logo(self):
-        """Load the logo image for main menu"""
-        logo_path = os.path.join(os.path.dirname(__file__), 'images', 'logo.png')
-        if os.path.exists(logo_path):
-            try:
-                self.logo_img = cv2.imread(logo_path, cv2.IMREAD_UNCHANGED)
-                if self.logo_img is not None:
-                    # Resize logo to appropriate size (maintain aspect ratio)
-                    target_height = 330
-                    h, w = self.logo_img.shape[:2]
-                    aspect_ratio = w / h
-                    target_width = int(target_height * aspect_ratio)
-                    self.logo_img = cv2.resize(self.logo_img, (target_width, target_height), interpolation=cv2.INTER_AREA)
-                    print(f"✓ Logo loaded: {target_width}x{target_height}")
-                else:
-                    print("⚠ Logo image could not be loaded")
-            except Exception as e:
-                print(f"⚠ Error loading logo: {e}")
-                self.logo_img = None
-        else:
-            print(f"⚠ Logo not found at: {logo_path}")
-    
-    def toggle_fullscreen(self):
-        """Toggle between fullscreen and windowed mode"""
-        self.fullscreen = not self.fullscreen
-        if self.fullscreen:
-            cv2.setWindowProperty(self.window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
-            print("Fullscreen mode enabled")
-        else:
-            cv2.setWindowProperty(self.window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_NORMAL)
-            print("Fullscreen mode disabled")
     
     def create_grid_background(self):
         """Pre-render grid background once for better performance"""
@@ -179,78 +133,57 @@ class SewBotApp:
         
     def mouse_callback(self, event, x, y, flags, param):
         if event == cv2.EVENT_LBUTTONDOWN:
-            # Check mute button (available on all screens)
-            # Adjust position for tutorial state where it's moved left of skip all button
-            mb = self.mute_button.copy()
-            if self.state == 'tutorial':
-                mb['x'] = self.width - 160 - 50 - 20  # Same adjustment as in draw_tutorial
-            
-            if mb['x'] <= x <= mb['x'] + mb['w'] and mb['y'] <= y <= mb['y'] + mb['h']:
-                self.play_button_click_sound()
-                self.toggle_mute()
-                return
-            
             if self.state == 'main_menu':
                 # Check quit button only on main menu
                 qb = self.quit_button
                 if qb['x'] <= x <= qb['x'] + qb['w'] and qb['y'] <= y <= qb['y'] + qb['h']:
-                    self.play_button_click_sound()
                     print("Quit button clicked - Exiting...")
                     self.running = False
                     return
                 
                 btn = self.start_button
                 if btn['x'] <= x <= btn['x'] + btn['w'] and btn['y'] <= y <= btn['y'] + btn['h']:
-                    self.play_button_click_sound()
                     self.state = 'tutorial'
                     self.tutorial_player.reset()
                     
             elif self.state == 'tutorial':
-                # Handle tutorial clicks (tutorial now manages back button internally)
-                action = self.tutorial_player.handle_click(x, y)
-                if action == 'back':
+                # Check back button first
+                bb = self.back_button
+                if bb['x'] <= x <= bb['x'] + bb['w'] and bb['y'] <= y <= bb['y'] + bb['h']:
                     self.state = 'main_menu'
-                elif action == 'continue':
+                    return
+                    
+                # Handle tutorial clicks
+                action = self.tutorial_player.handle_click(x, y)
+                if action == 'continue':
                     self.state = 'mode_selection'
                 elif action == 'replay':
                     self.tutorial_player.reset()
             
             elif self.state == 'wallet_tutorial':
+                # Check back button first
+                bb = self.back_button
+                if bb['x'] <= x <= bb['x'] + bb['w'] and bb['y'] <= y <= bb['y'] + bb['h']:
+                    self.state = 'mode_selection'
+                    return
+                    
                 # Handle wallet tutorial clicks
                 action = self.wallet_tutorial_player.handle_click(x, y)
-                if action == 'back':
+                if action == 'continue':
                     self.state = 'mode_selection'
-                    # Release camera when going back
-                    self.release_camera()
-                elif action == 'continue':
-                    self.state = 'mode_selection'
-                    # Release camera when done
-                    self.release_camera()
                 elif action == 'replay':
                     self.wallet_tutorial_player.reset()
-                    # Release camera when restarting
-                    self.release_camera()
-                elif action == 'enter_your_turn':
-                    # Initialize camera in background thread for your turn mode
-                    if self.camera is None and not self.camera_initializing:
-                        threading.Thread(target=self.init_camera, daemon=True).start()
-                elif action == 'your_turn_next':
-                    # Keep camera open for next your turn, but check if it needs initialization
-                    if self.camera is None and not self.camera_initializing:
-                        threading.Thread(target=self.init_camera, daemon=True).start()
                     
             elif self.state == 'mode_selection':
                 # Check quit button
                 qb = self.quit_button
                 if qb['x'] <= x <= qb['x'] + qb['w'] and qb['y'] <= y <= qb['y'] + qb['h']:
-                    self.play_button_click_sound()
                     print("Quit button clicked - Exiting...")
                     self.running = False
                     return
                 
                 pb = self.pattern_button
                 if pb['x'] <= x <= pb['x'] + pb['w'] and pb['y'] <= y <= pb['y'] + pb['h']:
-                    self.play_button_click_sound()
                     self.state = 'level_selection'
                     # Start camera initialization in background
                     if self.camera is None and not self.camera_initializing:
@@ -258,21 +191,18 @@ class SewBotApp:
                 
                 wb = self.wallet_button
                 if wb['x'] <= x <= wb['x'] + wb['w'] and wb['y'] <= y <= wb['y'] + wb['h']:
-                    self.play_button_click_sound()
                     # Go to wallet tutorial
                     self.state = 'wallet_tutorial'
                     self.wallet_tutorial_player.reset()
                 
                 tb = self.tutorial_button
                 if tb['x'] <= x <= tb['x'] + tb['w'] and tb['y'] <= y <= tb['y'] + tb['h']:
-                    self.play_button_click_sound()
                     # Go back to tutorial state to replay it
                     self.state = 'tutorial'
                     self.tutorial_player.reset()
                 
                 bb = self.back_button
                 if bb['x'] <= x <= bb['x'] + bb['w'] and bb['y'] <= y <= bb['y'] + bb['h']:
-                    self.play_button_click_sound()
                     self.state = 'main_menu'
             
             elif self.state == 'level_selection':
@@ -280,21 +210,15 @@ class SewBotApp:
                 action, value = self.level_selection.handle_click(x, y)
                 if action == 'back':
                     self.state = 'mode_selection'
-                    # Release camera when going back to mode selection
-                    self.release_camera()
                 elif action == 'level_selected':  # Level number selected
                     self.pattern_mode.current_level = value
                     self.state = 'pattern'
-                    # Initialize camera if not already opened
-                    if self.camera is None and not self.camera_initializing:
-                        threading.Thread(target=self.init_camera, daemon=True).start()
                     
             elif self.state == 'pattern':
                 # Handle pattern mode clicks
                 result = self.pattern_mode.handle_click(x, y)
                 if result == 'back':
-                    # Don't release camera, just go back to level selection
-                    # This allows quick switching between levels
+                    self.release_camera()
                     self.state = 'level_selection'
     
     def detect_camera_at_startup(self):
@@ -408,15 +332,12 @@ class SewBotApp:
         h, w = img.shape[:2]
         bracket_size, bracket_thickness = 40, 3
         
-        # Top-left corner
         cv2.line(img, (20, 20), (20 + bracket_size, 20), self.COLORS['cyan'], bracket_thickness)
         cv2.line(img, (20, 20), (20, 20 + bracket_size), self.COLORS['cyan'], bracket_thickness)
-        
-        # Bottom-left corner
+        cv2.line(img, (w - 20, 20), (w - 20 - bracket_size, 20), self.COLORS['cyan'], bracket_thickness)
+        cv2.line(img, (w - 20, 20), (w - 20, 20 + bracket_size), self.COLORS['cyan'], bracket_thickness)
         cv2.line(img, (20, h - 20), (20 + bracket_size, h - 20), self.COLORS['cyan'], bracket_thickness)
         cv2.line(img, (20, h - 20), (20, h - 20 - bracket_size), self.COLORS['cyan'], bracket_thickness)
-        
-        # Bottom-right corner
         cv2.line(img, (w - 20, h - 20), (w - 20 - bracket_size, h - 20), self.COLORS['cyan'], bracket_thickness)
         cv2.line(img, (w - 20, h - 20), (w - 20, h - 20 - bracket_size), self.COLORS['cyan'], bracket_thickness)
     
@@ -450,98 +371,14 @@ class SewBotApp:
         text_y = qb['y'] + (qb['h'] + text_h) // 2
         cv2.putText(img, text, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, self.COLORS['text_primary'], thickness)
     
-    def draw_mute_button(self, img):
-        """Draw mute/unmute button in upper right corner"""
-        mb = self.mute_button
-        pulse = 0.3 + 0.2 * abs(math.sin(self.glow_phase))
-        
-        # Button background
-        overlay = img.copy()
-        button_color = self.COLORS['button_normal'] if not self.is_muted else (100, 100, 100)
-        cv2.rectangle(overlay, (mb['x'], mb['y']), (mb['x'] + mb['w'], mb['y'] + mb['h']), button_color, -1)
-        cv2.addWeighted(overlay, 0.7, img, 0.3, 0, img)
-        
-        # Button border with glow
-        border_color = self.COLORS['button_hover'] if not self.is_muted else (150, 150, 150)
-        self.draw_glow_rect(img, mb['x'], mb['y'], mb['w'], mb['h'], border_color, pulse)
-        
-        # Draw speaker icon (properly centered)
-        center_x = mb['x'] + mb['w'] // 2
-        center_y = mb['y'] + mb['h'] // 2
-        
-        # Shift to properly center the entire icon
-        icon_offset = -3
-        
-        if not self.is_muted:
-            # Speaker base
-            cv2.rectangle(img, (center_x - 11 + icon_offset, center_y - 6), (center_x - 5 + icon_offset, center_y + 6), self.COLORS['text_primary'], -1)
-            # Speaker cone
-            pts = np.array([[center_x - 5 + icon_offset, center_y - 6], [center_x + 1 + icon_offset, center_y - 12], [center_x + 1 + icon_offset, center_y + 12], [center_x - 5 + icon_offset, center_y + 6]], np.int32)
-            cv2.fillPoly(img, [pts], self.COLORS['text_primary'])
-            # Sound waves using ellipse
-            cv2.ellipse(img, (center_x + 1 + icon_offset, center_y), (8, 8), 0, -60, 60, self.COLORS['text_primary'], 2)
-            cv2.ellipse(img, (center_x + 1 + icon_offset, center_y), (14, 14), 0, -40, 40, self.COLORS['text_primary'], 2)
-        else:
-            # Speaker base (muted)
-            cv2.rectangle(img, (center_x - 11 + icon_offset, center_y - 6), (center_x - 5 + icon_offset, center_y + 6), self.COLORS['text_secondary'], -1)
-            # Speaker cone (muted)
-            pts = np.array([[center_x - 5 + icon_offset, center_y - 6], [center_x + 1 + icon_offset, center_y - 12], [center_x + 1 + icon_offset, center_y + 12], [center_x - 5 + icon_offset, center_y + 6]], np.int32)
-            cv2.fillPoly(img, [pts], self.COLORS['text_secondary'])
-            # X mark
-            cv2.line(img, (center_x + 3 + icon_offset, center_y - 10), (center_x + 13 + icon_offset, center_y + 10), (200, 200, 200), 3)
-            cv2.line(img, (center_x + 3 + icon_offset, center_y + 10), (center_x + 13 + icon_offset, center_y - 10), (200, 200, 200), 3)
-    
-    def toggle_mute(self):
-        """Toggle mute state"""
-        self.is_muted = not self.is_muted
-        if self.is_muted:
-            self.music_manager.set_volume(0.0)
-            print("🔇 Music muted")
-        else:
-            self.music_manager.set_volume(0.5)
-            print("🔊 Music unmuted")
-    
-    def play_button_click_sound(self):
-        """Play button click sound effect"""
-        self.music_manager.play_sound_effect('button_click.mp3')
-    
     def draw_main_menu(self, frame):
         # Use pre-rendered grid background
         frame[:] = self.grid_background
-        
-        # Draw mute button
-        self.draw_mute_button(frame)
         self.draw_tech_lines(frame)
         
-        # Draw logo if available
-        logo_y = 10  # Position from top (closer to accommodate larger logo)
-        if self.logo_img is not None:
-            h, w = self.logo_img.shape[:2]
-            logo_x = (self.width - w) // 2  # Center horizontally
-            
-            # Handle logo with alpha channel (transparency)
-            if self.logo_img.shape[2] == 4:
-                # Extract alpha channel
-                alpha = self.logo_img[:, :, 3] / 255.0
-                # Get RGB channels
-                logo_rgb = self.logo_img[:, :, :3]
-                
-                # Blend logo with background
-                for c in range(3):
-                    frame[logo_y:logo_y+h, logo_x:logo_x+w, c] = \
-                        alpha * logo_rgb[:, :, c] + (1 - alpha) * frame[logo_y:logo_y+h, logo_x:logo_x+w, c]
-            else:
-                # No alpha channel, just overlay
-                frame[logo_y:logo_y+h, logo_x:logo_x+w] = self.logo_img
-            
-            text_start_y = logo_y + h + 50  # Position text below logo
-        else:
-            text_start_y = self.height // 3  # Default position if no logo
-        
-        # Draw SEWBOT title
         text, font_scale, thickness = "SEWBOT", 2.5, 4
         (text_w, text_h), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_DUPLEX, font_scale, thickness)
-        text_x, text_y = (self.width - text_w) // 2, text_start_y
+        text_x, text_y = (self.width - text_w) // 2, self.height // 3
         
         # Reduced glow layers from 5 to 3 for performance
         glow_intensity = 0.5 + 0.5 * abs(math.sin(self.glow_phase))
@@ -556,12 +393,9 @@ class SewBotApp:
         subtitle = "[ PATTERN RECOGNITION SYSTEM ]"
         sub_font_scale = 0.6
         (sub_w, sub_h), _ = cv2.getTextSize(subtitle, cv2.FONT_HERSHEY_SIMPLEX, sub_font_scale, 1)
-        subtitle_y = text_y + 40
-        cv2.putText(frame, subtitle, ((self.width - sub_w) // 2, subtitle_y), cv2.FONT_HERSHEY_SIMPLEX, sub_font_scale, self.COLORS['text_accent'], 1)
+        cv2.putText(frame, subtitle, ((self.width - sub_w) // 2, text_y + 40), cv2.FONT_HERSHEY_SIMPLEX, sub_font_scale, self.COLORS['text_accent'], 1)
         
-        # Position START button below subtitle with spacing
         btn = self.start_button
-        btn['y'] = subtitle_y + 30  # 60px below subtitle
         pulse = 0.5 + 0.5 * abs(math.sin(self.glow_phase * 1.5))
         self.draw_glow_rect(frame, btn['x'], btn['y'], btn['w'], btn['h'], self.COLORS['button_hover'], pulse)
         
@@ -586,47 +420,34 @@ class SewBotApp:
         # Draw tutorial player
         self.tutorial_player.draw(frame)
         
-        # Draw mute button (positioned to left of skip all button)
-        # Skip all button is at x=(width-160), so position mute button to its left
-        original_mute_x = self.mute_button['x']
-        self.mute_button['x'] = self.width - 160 - 50 - 20  # 20px spacing from skip all
-        self.draw_mute_button(frame)
-        self.mute_button['x'] = original_mute_x  # Restore original position
+        # Draw back button
+        self.draw_back_button(frame)
     
     def draw_wallet_tutorial(self, frame):
         # Use pre-rendered grid background
         frame[:] = self.grid_background
         
-        # Get camera frame if in your_turn mode
-        camera_frame = None
-        if self.wallet_tutorial_player.your_turn_mode:
-            if self.camera is not None and self.camera.isOpened():
-                ret, camera_frame = self.camera.read()
-                if not ret:
-                    camera_frame = None
+        # Draw wallet tutorial player
+        self.wallet_tutorial_player.draw(frame)
         
-        # Draw wallet tutorial player (pass camera frame)
-        self.wallet_tutorial_player.draw(frame, camera_frame)
+        # Draw back button
+        self.draw_back_button(frame)
     
     def draw_level_selection(self, frame):
         """Draw level selection screen"""
         self.level_selection.draw(frame, self.grid_background)
-        
-        # Draw mute button
-        self.draw_mute_button(frame)
     
     def draw_mode_selection(self, frame):
         # Use pre-rendered grid background
         frame[:] = self.grid_background
         
-        # Draw mute button first
-        self.draw_mute_button(frame)
-        
-        # Top-left corner bracket only
         bracket_size, thickness, offset = 50, 2, 15
         cv2.line(frame, (offset, offset + bracket_size), (offset, offset), self.COLORS['neon_blue'], thickness)
         cv2.line(frame, (offset, offset), (offset + bracket_size, offset), self.COLORS['neon_blue'], thickness)
         cv2.circle(frame, (offset, offset), 3, self.COLORS['cyan'], -1)
+        cv2.line(frame, (self.width - offset, offset + bracket_size), (self.width - offset, offset), self.COLORS['neon_blue'], thickness)
+        cv2.line(frame, (self.width - offset, offset), (self.width - offset - bracket_size, offset), self.COLORS['neon_blue'], thickness)
+        cv2.circle(frame, (self.width - offset, offset), 3, self.COLORS['cyan'], -1)
         
         text, font_scale, thickness = "SELECT MODE", 1.5, 3
         (text_w, text_h), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_DUPLEX, font_scale, thickness)
@@ -662,7 +483,7 @@ class SewBotApp:
         title_font_scale, title_thickness = 1.0, 2
         (title_w, title_h), _ = cv2.getTextSize(button_data['title'], cv2.FONT_HERSHEY_DUPLEX, title_font_scale, title_thickness)
         title_x = x + (w - title_w) // 2
-        title_y = y + 40  # Better vertical positioning
+        title_y = y + 35
         
         # Title with glow
         cv2.putText(img, button_data['title'], (title_x, title_y), cv2.FONT_HERSHEY_DUPLEX, title_font_scale, self.COLORS['glow_cyan'], title_thickness + 2)
@@ -693,7 +514,7 @@ class SewBotApp:
         
         # Draw description lines
         line_height = 18
-        start_y = title_y + 25  # More space below title
+        start_y = title_y + 20
         for i, line in enumerate(lines):
             (line_w, line_h), _ = cv2.getTextSize(line, cv2.FONT_HERSHEY_SIMPLEX, desc_font_scale, desc_thickness)
             line_x = x + (w - line_w) // 2
@@ -701,30 +522,16 @@ class SewBotApp:
             cv2.putText(img, line, (line_x, line_y), cv2.FONT_HERSHEY_SIMPLEX, desc_font_scale, self.COLORS['text_secondary'], desc_thickness)
     
     def run(self):
+        print("=" * 60)
+        print("SEWBOT - PATTERN RECOGNITION SYSTEM")
+        print("=" * 60)
+        print("Optimized for Raspberry Pi")
+        print(f"Camera Status: {self.camera_status_message}")
+        print("Click the X button to quit")
+        print()
         
         while self.running:
             try:
-                # Handle music transitions based on state changes
-                if self.state != self.previous_state:
-                    # Stop current music
-                    if self.previous_state == 'pattern':
-                        self.pattern_mode.stop_music()
-                    
-                    # Start new music based on state
-                    if self.state == 'main_menu':
-                        self.music_manager.play('main_menu.mp3', loops=-1, fade_ms=1000)
-                    elif self.state == 'tutorial':
-                        self.music_manager.play('tutorial.mp3', loops=-1, fade_ms=1000)
-                    elif self.state == 'mode_selection':
-                        self.music_manager.play('mode_selection.mp3', loops=-1, fade_ms=1000)
-                    elif self.state == 'wallet_tutorial':
-                        self.music_manager.play('wallet.mp3', loops=-1, fade_ms=1000)
-                    elif self.state == 'pattern':
-                        self.pattern_mode.start_music()
-                    
-                    # Update previous state
-                    self.previous_state = self.state
-                
                 frame = np.zeros((self.height, self.width, 3), dtype=np.uint8)
                 
                 if self.state == 'main_menu':
@@ -747,36 +554,13 @@ class SewBotApp:
                     
                     # Draw pattern mode
                     self.pattern_mode.draw(frame, camera_frame, self.grid_background)
-                    
-                    # Draw mute button on top of pattern mode
-                    self.draw_mute_button(frame)
                 
                 self.glow_phase += 0.05
                 cv2.imshow(self.window_name, frame)
                 
                 # Check if window was closed (X button clicked)
                 # This needs to be checked after imshow
-                key = cv2.waitKey(30) & 0xFF
-                
-                # Handle keyboard shortcuts
-                if key == ord('f') or key == ord('F'):  # F key to toggle fullscreen
-                    self.toggle_fullscreen()
-                elif key == 27:  # ESC key to exit fullscreen or quit
-                    if self.fullscreen:
-                        self.toggle_fullscreen()
-                    else:
-                        print("ESC pressed - Exiting...")
-                        self.running = False
-                        break
-                
-                # Pattern mode specific controls
-                elif self.state == 'pattern':
-                    if key == ord('+') or key == ord('='):  # Increase confidence threshold
-                        self.pattern_mode.confidence_threshold = min(0.9, self.pattern_mode.confidence_threshold + 0.05)
-                        print(f"Confidence threshold: {self.pattern_mode.confidence_threshold:.2f}")
-                    elif key == ord('-') or key == ord('_'):  # Decrease confidence threshold
-                        self.pattern_mode.confidence_threshold = max(0.1, self.pattern_mode.confidence_threshold - 0.05)
-                        print(f"Confidence threshold: {self.pattern_mode.confidence_threshold:.2f}")
+                key = cv2.waitKey(30)
                 
                 # Check window property to detect X button click
                 try:
@@ -797,11 +581,6 @@ class SewBotApp:
         self.release_camera()
         self.tutorial_player.cleanup()
         self.wallet_tutorial_player.cleanup()
-        
-        # Cleanup music system
-        music_manager = get_music_manager()
-        music_manager.cleanup()
-        
         cv2.destroyAllWindows()
         print("Program closed.")
 

@@ -5,12 +5,6 @@ Level Selection Screen - Choose a level before starting pattern mode
 import cv2
 import numpy as np
 import math
-import sys
-import os
-
-# Add parent directory to path for imports
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-from music_manager import get_music_manager
 
 
 class LevelSelection:
@@ -33,7 +27,7 @@ class LevelSelection:
         # Calculate positions to center all 5 buttons
         total_width = (self.button_width * 5) + (self.button_spacing * 4)
         start_x = (width - total_width) // 2
-        button_y = 210  # Positioned higher for better vertical centering
+        button_y = height // 2 - 50
         
         # Create level buttons
         self.level_buttons = []
@@ -54,9 +48,6 @@ class LevelSelection:
             'w': 120,
             'h': 50
         }
-        
-        # Music manager for sound effects
-        self.music_manager = get_music_manager()
     
     def draw_glow_rect(self, img, x, y, w, h, color, glow_intensity):
         """Draw rectangle with glow effect"""
@@ -199,26 +190,17 @@ class LevelSelection:
         cv2.putText(frame, text, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 
                    font_scale, self.COLORS['text_primary'], thickness)
     
-    def play_button_click_sound(self):
-        """Play button click sound effect"""
-        try:
-            self.music_manager.play_sound_effect('button_click.mp3')
-        except Exception as e:
-            pass  # Silently fail if sound effect doesn't exist
-    
     def handle_click(self, x, y):
         """Handle mouse clicks"""
         # Check back button
         bb = self.back_button
         if bb['x'] <= x <= bb['x'] + bb['w'] and bb['y'] <= y <= bb['y'] + bb['h']:
-            self.play_button_click_sound()
             return ('back', None)
         
         # Check level buttons
         for btn in self.level_buttons:
             if btn['x'] <= x <= btn['x'] + btn['w'] and btn['y'] <= y <= btn['y'] + btn['h']:
                 if not btn.get('locked', False):
-                    self.play_button_click_sound()
                     return ('level_selected', btn['level'])
         
         return (None, None)
