@@ -119,7 +119,7 @@ class ModeSelection:
     def draw_title(self, img):
         """Draw the mode selection title"""
         text = "SELECT MODE"
-        font = cv2.FONT_HERSHEY_DUPLEX
+        font = cv2.FONT_HERSHEY_TRIPLEX
         font_scale = 1.5
         thickness = 3
         
@@ -166,7 +166,7 @@ class ModeSelection:
         cv2.addWeighted(overlay, alpha, img, 1 - alpha, 0, img)
         
         # Main text
-        font = cv2.FONT_HERSHEY_DUPLEX
+        font = cv2.FONT_HERSHEY_TRIPLEX
         font_scale = 1.1
         thickness = 2
         
@@ -185,13 +185,13 @@ class ModeSelection:
         # Subtitle
         sub_font_scale = 0.5
         (sub_w, sub_h), _ = cv2.getTextSize(button_data['subtitle'], 
-                                            cv2.FONT_HERSHEY_SIMPLEX, sub_font_scale, 1)
+                                            cv2.FONT_HERSHEY_TRIPLEX, sub_font_scale, 1)
         sub_x = x + (w - sub_w) // 2
         sub_y = text_y + 30
         
         sub_color = COLORS['text_accent'] if is_active else COLORS['text_secondary']
         cv2.putText(img, button_data['subtitle'], (sub_x, sub_y), 
-                   cv2.FONT_HERSHEY_SIMPLEX, sub_font_scale, sub_color, 1)
+                   cv2.FONT_HERSHEY_TRIPLEX, sub_font_scale, sub_color, 1)
     
     def run(self):
         """Main loop for mode selection"""

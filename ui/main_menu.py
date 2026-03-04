@@ -83,7 +83,7 @@ class MainMenu:
     def draw_title(self, img):
         """Draw the SewBot title with futuristic styling"""
         text = "SEWBOT"
-        font = cv2.FONT_HERSHEY_DUPLEX
+        font = cv2.FONT_HERSHEY_TRIPLEX
         font_scale = FONTS['title_size']
         thickness = 4
         
@@ -113,12 +113,12 @@ class MainMenu:
         # Subtitle
         subtitle = "[ PATTERN RECOGNITION SYSTEM ]"
         sub_font_scale = FONTS['small_size']
-        (sub_w, sub_h), _ = cv2.getTextSize(subtitle, cv2.FONT_HERSHEY_SIMPLEX, 
+        (sub_w, sub_h), _ = cv2.getTextSize(subtitle, cv2.FONT_HERSHEY_TRIPLEX, 
                                             sub_font_scale, 1)
         sub_x = (self.width - sub_w) // 2
         sub_y = text_y + 40
         
-        cv2.putText(img, subtitle, (sub_x, sub_y), cv2.FONT_HERSHEY_SIMPLEX, 
+        cv2.putText(img, subtitle, (sub_x, sub_y), cv2.FONT_HERSHEY_TRIPLEX, 
                    sub_font_scale, COLORS['text_accent'], 1)
     
     def draw_button(self, img):
@@ -142,7 +142,7 @@ class MainMenu:
         
         # Button text
         text = "START"
-        font = cv2.FONT_HERSHEY_DUPLEX
+        font = cv2.FONT_HERSHEY_TRIPLEX
         font_scale = FONTS['button_size']
         thickness = 2
         

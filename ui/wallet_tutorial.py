@@ -515,7 +515,7 @@ class WalletTutorialPlayer:
         cv2.rectangle(img, (x, y), (x + w, y + h), border_color, 2)
         
         # Text
-        font = cv2.FONT_HERSHEY_DUPLEX
+        font = cv2.FONT_HERSHEY_TRIPLEX
         font_scale = 0.8
         thickness = 2
         text = btn['text']
@@ -579,7 +579,7 @@ class WalletTutorialPlayer:
             cv2.circle(img, (center_x, center_y), radius + 10, COLORS['cyan'], 1)
             
             # Tutorial text
-            font = cv2.FONT_HERSHEY_DUPLEX
+            font = cv2.FONT_HERSHEY_TRIPLEX
             
             # Title
             title = "WALLET TUTORIAL VIDEO"
@@ -671,7 +671,7 @@ class WalletTutorialPlayer:
             
         else:
             # Completed or skipped
-            font = cv2.FONT_HERSHEY_DUPLEX
+            font = cv2.FONT_HERSHEY_TRIPLEX
             title = "WALLET TUTORIAL COMPLETED" if self.completed else "WALLET TUTORIAL"
             font_scale = 1.5
             thickness = 3
@@ -689,7 +689,7 @@ class WalletTutorialPlayer:
     
     def draw_step_indicator(self, img):
         """Draw step indicator showing current progress (Materials, Step 1-9, Showcase)"""
-        font = cv2.FONT_HERSHEY_DUPLEX
+        font = cv2.FONT_HERSHEY_TRIPLEX
         
         # Determine the text based on current step
         if self.current_step == 0:
@@ -726,7 +726,7 @@ class WalletTutorialPlayer:
     
     def draw_your_turn(self, img, camera_frame):
         """Draw the 'Your Turn' practice screen with webcam feed"""
-        font = cv2.FONT_HERSHEY_DUPLEX
+        font = cv2.FONT_HERSHEY_TRIPLEX
         
         # Title at top
         title = f"Your Turn - Practice Step {self.current_step}"
