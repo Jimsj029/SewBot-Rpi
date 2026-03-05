@@ -345,16 +345,37 @@ class PatternMode:
             # Load pattern mask for comparison
             pattern_overlay, pattern_alpha = self.load_blueprint(self.current_level)
             
-            # ========== STEP 1: ROI CROPPING (440x380 adjustable) ==========
-            # Center ROI on camera frame
-            roi_x1 = max(0, (self.camera_width - self.roi_width) // 2)
-            roi_y1 = max(0, (self.camera_height - self.roi_height) // 2)
-            roi_x2 = min(self.camera_width, roi_x1 + self.roi_width)
-            roi_y2 = min(self.camera_height, roi_y1 + self.roi_height)
-            roi_bounds = (roi_x1, roi_y1, roi_x2, roi_y2)
+            # ========== STEP 1: ROI CROPPING (Pattern-based dynamic ROI) ==========
+            # Use pattern dimensions to set ROI bounds
+            pattern_alpha_roi = None  # Will be used to filter detections
+            if pattern_overlay is not None and pattern_alpha is not None:
+                overlay_h, overlay_w = pattern_overlay.shape[:2]
+                # Center pattern on camera frame
+                pattern_x_offset = (self.camera_width - overlay_w) // 2
+                pattern_y_offset = (self.camera_height - overlay_h) // 2
+                
+                # ROI matches pattern boundaries exactly
+                roi_x1 = max(0, pattern_x_offset)
+                roi_y1 = max(0, pattern_y_offset)
+                roi_x2 = min(self.camera_width, pattern_x_offset + overlay_w)
+                roi_y2 = min(self.camera_height, pattern_y_offset + overlay_h)
+                
+                # Extract ROI from camera frame
+                roi_frame = cam_frame[roi_y1:roi_y2, roi_x1:roi_x2].copy()
+                
+                # Extract pattern alpha for this ROI (for filtering detections later)
+                actual_h = roi_y2 - roi_y1
+                actual_w = roi_x2 - roi_x1
+                pattern_alpha_roi = pattern_alpha[0:actual_h, 0:actual_w]
+            else:
+                # Fallback to center ROI if no pattern
+                roi_x1 = max(0, (self.camera_width - self.roi_width) // 2)
+                roi_y1 = max(0, (self.camera_height - self.roi_height) // 2)
+                roi_x2 = min(self.camera_width, roi_x1 + self.roi_width)
+                roi_y2 = min(self.camera_height, roi_y1 + self.roi_height)
+                roi_frame = cam_frame[roi_y1:roi_y2, roi_x1:roi_x2].copy()
             
-            # Extract ROI from camera frame
-            roi_frame = cam_frame[roi_y1:roi_y2, roi_x1:roi_x2].copy()
+            roi_bounds = (roi_x1, roi_y1, roi_x2, roi_y2)
             
             # ========== STEP 2: SMART DETECTION (Every 3 frames) ==========
             detected_stitch_masks = []
@@ -411,6 +432,17 @@ class PatternMode:
                                     # Resize mask to ROI size
                                     mask_resized = cv2.resize(mask, (roi_w, roi_h))
                                     mask_binary = (mask_resized > 0.5).astype(np.uint8) * 255
+                                    
+                                    # Filter: only keep if mask overlaps with pattern
+                                    if pattern_alpha_roi is not None:
+                                        # Check if mask overlaps with pattern alpha
+                                        pattern_mask_binary = (pattern_alpha_roi > 0.1).astype(np.uint8)
+                                        overlap = np.logical_and(mask_binary > 0, pattern_mask_binary > 0)
+                                        overlap_ratio = np.sum(overlap) / max(1, np.sum(mask_binary > 0))
+                                        
+                                        # Skip if less than 30% of the detection overlaps with pattern
+                                        if overlap_ratio < 0.3:
+                                            continue
                                     
                                     # Get box coordinates for tracking
                                     x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
@@ -785,13 +817,59 @@ class PatternMode:
         kernel = np.ones((3, 3), np.uint8)
         roi_combined_mask = cv2.dilate(roi_combined_mask, kernel, iterations=1)
         
-        # Get pattern mask in ROI coordinates (not full camera frame)
-        pattern_crop = (pattern_alpha[0:actual_h, 0:actual_w] * 255).astype(np.uint8)
+        # Get pattern dimensions
+        overlay_h, overlay_w = pattern_alpha.shape[:2]
+        
+        # Calculate proper coordinate alignment between ROI and pattern
+        # Pattern bounds in camera coordinates
+        pattern_x1, pattern_y1 = x_offset, y_offset
+        pattern_x2 = x_offset + overlay_w
+        pattern_y2 = y_offset + overlay_h
+        
+        # ROI bounds in camera coordinates (extract from roi_bounds if available)
+        if roi_bounds is not None and len(roi_bounds) == 4:
+            roi_x1, roi_y1, roi_x2, roi_y2 = roi_bounds
+        else:
+            # Fallback: calculate ROI position
+            roi_x1 = (self.camera_width - self.roi_width) // 2
+            roi_y1 = (self.camera_height - self.roi_height) // 2
+            roi_x2 = roi_x1 + self.roi_width
+            roi_y2 = roi_y1 + self.roi_height
+        
+        # Calculate overlap region in camera coordinates
+        overlap_x1 = max(roi_x1, pattern_x1)
+        overlap_y1 = max(roi_y1, pattern_y1)
+        overlap_x2 = min(roi_x2, pattern_x2)
+        overlap_y2 = min(roi_y2, pattern_y2)
+        
+        # Check if there's actual overlap
+        if overlap_x1 >= overlap_x2 or overlap_y1 >= overlap_y2:
+            self.out_of_segment_warning = False
+            return
+        
+        # Convert overlap to ROI-relative coordinates (for extracting from stitch mask)
+        roi_overlap_x1 = overlap_x1 - roi_x1
+        roi_overlap_y1 = overlap_y1 - roi_y1
+        roi_overlap_x2 = overlap_x2 - roi_x1
+        roi_overlap_y2 = overlap_y2 - roi_y1
+        
+        # Convert overlap to pattern-relative coordinates (for extracting from pattern)
+        pat_overlap_x1 = overlap_x1 - pattern_x1
+        pat_overlap_y1 = overlap_y1 - pattern_y1
+        pat_overlap_x2 = overlap_x2 - pattern_x1
+        pat_overlap_y2 = overlap_y2 - pattern_y1
+        
+        # Extract the overlapping regions
+        roi_overlap_mask = roi_combined_mask[roi_overlap_y1:roi_overlap_y2, roi_overlap_x1:roi_overlap_x2]
+        pattern_crop = (pattern_alpha[pat_overlap_y1:pat_overlap_y2, pat_overlap_x1:pat_overlap_x2] * 255).astype(np.uint8)
         pattern_mask_roi = (pattern_crop > 128).astype(np.uint8)
         
         # Ensure masks are same size
-        if roi_combined_mask.shape != pattern_mask_roi.shape:
-            roi_combined_mask = cv2.resize(roi_combined_mask, (actual_w, actual_h))
+        if roi_overlap_mask.shape != pattern_mask_roi.shape:
+            roi_overlap_mask = cv2.resize(roi_overlap_mask, (pattern_mask_roi.shape[1], pattern_mask_roi.shape[0]))
+        
+        # Use the aligned overlap masks for all subsequent calculations
+        roi_combined_mask = roi_overlap_mask
         
         # Extract stitches that are within the pattern area (all in ROI coordinates)
         stitches_in_pattern = np.logical_and(roi_combined_mask > 0, pattern_mask_roi > 0)
