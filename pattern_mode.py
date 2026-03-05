@@ -88,8 +88,8 @@ class PatternMode:
         models_dir = os.path.join(os.path.dirname(__file__), 'models')
         
         # Detection settings
-        self.confidence_threshold = 0.3  # Lowered for INT8 model (produces lower confidence scores)
-        self.iou_threshold = 0.6  # Intersection over Union threshold
+        self.confidence_threshold = 0.15  # Lowered threshold for better detection
+        self.iou_threshold = 0.45  # Intersection over Union threshold
         
         # Performance optimization: Frame skipping for detection
         # Process detection every N frames to reduce CPU load
@@ -108,7 +108,7 @@ class PatternMode:
         
         # Load stitch detection model (ONNX model)
         try:
-            # Use ONNX model (best.onnx)
+            # Use INT8 quantized ONNX model for better performance
             stitch_model_path = os.path.join(models_dir, 'best_int8.onnx')
             
             if os.path.exists(stitch_model_path):
@@ -127,7 +127,7 @@ class PatternMode:
                 
                 # Test the model with dummy data
                 print("  Testing model inference...")
-                test_img = np.zeros((320, 320, 3), dtype=np.uint8)
+                test_img = np.zeros((256, 256, 3), dtype=np.uint8)
                 test_result = self.stitch_model(test_img, conf=self.confidence_threshold, verbose=False)
                 print("  ✓ Model test successful!")
             else:
@@ -347,6 +347,7 @@ class PatternMode:
             
             # ========== STEP 1: ROI CROPPING (Pattern-based dynamic ROI) ==========
             # Calculate ROI based on actual pattern dimensions
+            pattern_mask_roi = None
             if pattern_overlay is not None:
                 overlay_h, overlay_w = pattern_overlay.shape[:2]
                 # Center pattern on camera frame
@@ -358,6 +359,11 @@ class PatternMode:
                 roi_y1 = max(0, pattern_y_offset)
                 roi_x2 = min(self.camera_width, pattern_x_offset + overlay_w)
                 roi_y2 = min(self.camera_height, pattern_y_offset + overlay_h)
+                
+                # Extract pattern mask for ROI area (for filtering YOLO predictions)
+                actual_h = roi_y2 - roi_y1
+                actual_w = roi_x2 - roi_x1
+                pattern_mask_roi = (pattern_alpha[0:actual_h, 0:actual_w] * 255).astype(np.uint8)
             else:
                 # Fallback to center ROI if no pattern
                 roi_x1 = max(0, (self.camera_width - self.roi_width) // 2)
@@ -387,15 +393,15 @@ class PatternMode:
                         # DETECTING MODE: Run YOLO inference
                         self.detection_mode = "DETECTING"
                         
-                        # Resize ROI to 320x320 for YOLO
-                        roi_resized = cv2.resize(roi_frame, (320, 320))
+                        # Resize ROI to 256x256 for YOLO
+                        roi_resized = cv2.resize(roi_frame, (256, 256))
                         
                         # Run YOLO detection on ROI
                         results = self.stitch_model(
                             roi_resized,
                             conf=self.confidence_threshold,
                             iou=self.iou_threshold,
-                            imgsz=320,
+                            imgsz=256,
                             verbose=False
                         )
                         
@@ -426,10 +432,18 @@ class PatternMode:
                                     mask_resized = cv2.resize(mask, (roi_w, roi_h))
                                     mask_binary = (mask_resized > 0.5).astype(np.uint8) * 255
                                     
+                                    # Pro Tip: Multiply YOLO output with pattern mask for huge accuracy boost
+                                    if pattern_mask_roi is not None:
+                                        mask_binary = (mask_binary * (pattern_mask_roi / 255.0)).astype(np.uint8)
+                                    
+                                    # Skip if mask is now empty after pattern filtering
+                                    if np.sum(mask_binary) == 0:
+                                        continue
+                                    
                                     # Get box coordinates for tracking
                                     x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-                                    scale_x = roi_w / 320.0
-                                    scale_y = roi_h / 320.0
+                                    scale_x = roi_w / 256.0
+                                    scale_y = roi_h / 256.0
                                     x1 = int(x1 * scale_x)
                                     y1 = int(y1 * scale_y)
                                     x2 = int(x2 * scale_x)
@@ -516,7 +530,7 @@ class PatternMode:
         cv2.line(frame, (self.camera_x - 15, self.camera_y - 15), 
                 (self.camera_x - 15, self.camera_y - 15 + corner_size), self.COLORS['cyan'], corner_thickness)
         cv2.line(frame, (self.camera_x + self.camera_width + 15, self.camera_y - 15), 
-                (self.camera_x + self.camera_width + 15 - corner_size, self.camera_y - 15), self.COLORS['cyan'], corner_thickness)
+               (self.camera_x + self.camera_width + 15 - corner_size, self.camera_y - 15), self.COLORS['cyan'], corner_thickness)
         cv2.line(frame, (self.camera_x + self.camera_width + 15, self.camera_y - 15), 
                 (self.camera_x + self.camera_width + 15, self.camera_y - 15 + corner_size), self.COLORS['cyan'], corner_thickness)
         cv2.line(frame, (self.camera_x - 15, self.camera_y + self.camera_height + 15), 
@@ -589,6 +603,21 @@ class PatternMode:
         # Draw status text
         cv2.putText(frame, self.detection_mode, (status_x, status_y), 
                    cv2.FONT_HERSHEY_TRIPLEX, 0.5, status_color, 2)
+        
+        # Draw debug info: detection count and confidence threshold
+        debug_y = status_y + 35
+        debug_text = f"Detect: {self.stitches_detected} | Conf: {self.confidence_threshold:.2f}"
+        (debug_w, debug_h), _ = cv2.getTextSize(debug_text, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+        
+        # Draw semi-transparent background for debug text
+        cv2.rectangle(frame, 
+                     (status_x - 5, debug_y - debug_h - 5), 
+                     (status_x + debug_w + 5, debug_y + 5), 
+                     (40, 40, 40), -1)
+        
+        # Draw debug text
+        cv2.putText(frame, debug_text, (status_x, debug_y), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
     
     def draw_guide_overlay(self, frame):
         """Draw game guide/tutorial overlay - multi-step"""
