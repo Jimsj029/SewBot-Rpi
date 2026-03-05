@@ -400,10 +400,17 @@ class SewBotApp:
                 print(f"  Trying {backend_name} backend...")
                 self.camera = cv2.VideoCapture(0, backend)
                 if self.camera.isOpened():
+                    # Optimize camera settings for performance
+                    # Set buffer size to 1 to reduce latency
+                    self.camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                    
                     # Test if we can actually read a frame
-                    ret, _ = self.camera.read()
+                    ret, frame = self.camera.read()
                     if ret:
+                        actual_w = int(self.camera.get(cv2.CAP_PROP_FRAME_WIDTH))
+                        actual_h = int(self.camera.get(cv2.CAP_PROP_FRAME_HEIGHT))
                         print(f"  Camera opened successfully with {backend_name}!")
+                        print(f"  Resolution: {actual_w}x{actual_h}")
                         self.camera_initializing = False
                         return
                     else:
