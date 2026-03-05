@@ -92,13 +92,13 @@ class PatternMode:
         models_dir = os.path.join(os.path.dirname(__file__), 'models')
         
         # Detection settings
-        self.confidence_threshold = 0.35  # Optimized for stitch line detection
+        self.confidence_threshold = 0.3  # Lowered for INT8 model (produces lower confidence scores)
         self.iou_threshold = 0.6  # Intersection over Union threshold
         
         # Load stitch detection model (ONNX model)
         try:
             # Use ONNX model (best.onnx)
-            stitch_model_path = os.path.join(models_dir, 'best.onnx')
+            stitch_model_path = os.path.join(models_dir, 'best_int8.onnx')
             
             if os.path.exists(stitch_model_path):
                 print(f"Loading stitch detection model: {stitch_model_path}")
