@@ -345,12 +345,26 @@ class PatternMode:
             # Load pattern mask for comparison
             pattern_overlay, pattern_alpha = self.load_blueprint(self.current_level)
             
-            # ========== STEP 1: ROI CROPPING (440x380 adjustable) ==========
-            # Center ROI on camera frame
-            roi_x1 = max(0, (self.camera_width - self.roi_width) // 2)
-            roi_y1 = max(0, (self.camera_height - self.roi_height) // 2)
-            roi_x2 = min(self.camera_width, roi_x1 + self.roi_width)
-            roi_y2 = min(self.camera_height, roi_y1 + self.roi_height)
+            # ========== STEP 1: ROI CROPPING (Pattern-based dynamic ROI) ==========
+            # Calculate ROI based on actual pattern dimensions
+            if pattern_overlay is not None:
+                overlay_h, overlay_w = pattern_overlay.shape[:2]
+                # Center pattern on camera frame
+                pattern_x_offset = (self.camera_width - overlay_w) // 2
+                pattern_y_offset = (self.camera_height - overlay_h) // 2
+                
+                # ROI matches pattern boundaries exactly
+                roi_x1 = max(0, pattern_x_offset)
+                roi_y1 = max(0, pattern_y_offset)
+                roi_x2 = min(self.camera_width, pattern_x_offset + overlay_w)
+                roi_y2 = min(self.camera_height, pattern_y_offset + overlay_h)
+            else:
+                # Fallback to center ROI if no pattern
+                roi_x1 = max(0, (self.camera_width - self.roi_width) // 2)
+                roi_y1 = max(0, (self.camera_height - self.roi_height) // 2)
+                roi_x2 = min(self.camera_width, roi_x1 + self.roi_width)
+                roi_y2 = min(self.camera_height, roi_y1 + self.roi_height)
+            
             roi_bounds = (roi_x1, roi_y1, roi_x2, roi_y2)
             
             # Extract ROI from camera frame
