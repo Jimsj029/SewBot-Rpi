@@ -29,7 +29,7 @@ try:
     
     # Try a dummy inference
     print("\n🔄 Testing inference with dummy data...")
-    dummy_input = np.random.randn(1, 3, 640, 640).astype(np.float32)
+    dummy_input = np.random.randn(1, 3, 320, 320).astype(np.float32)
     results = session.run(None, {inputs[0].name: dummy_input})
     print(f"✅ Inference successful!")
     print(f"   Output shapes: {[r.shape for r in results]}")

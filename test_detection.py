@@ -84,7 +84,7 @@ except Exception as e:
 # Test with dummy image
 print("\n4. Testing inference with dummy image...")
 try:
-    test_img = np.random.randint(0, 255, (640, 640, 3), dtype=np.uint8)
+    test_img = np.random.randint(0, 255, (320, 320, 3), dtype=np.uint8)
     results = model(test_img, conf=0.35, verbose=False)
     print(f"   ✓ Inference successful")
     print(f"   Results type: {type(results)}")
@@ -111,7 +111,7 @@ try:
             print(f"   ✓ Camera frame captured: {frame.shape}")
             
             # Resize to model input size
-            frame_resized = cv2.resize(frame, (640, 640))
+            frame_resized = cv2.resize(frame, (320, 320))
             
             # Run detection
             results = model(frame_resized, conf=0.35, verbose=False)

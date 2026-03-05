@@ -65,6 +65,10 @@ class PatternMode:
         self.guide_step = 1  # Current step (1-4)
         self.guide_button = {'x': 0, 'y': 0, 'w': 200, 'h': 60}  # "Next"/"Got it!" button, calculated dynamically
         
+        # Real-time stitch tracking for progressive coloring
+        self.completed_stitch_mask = None  # Accumulated mask of all detected stitches
+        self.proximity_radius = 30  # Pixels around completed stitches that turn cyan
+        
         # Segment tracking (divide pattern into 4 quarters)
         self.current_segment = 1  # 1=first 25%, 2=25-50%, 3=50-75%, 4=75-100%
         self.highest_segment_reached = 1  # Track highest segment to prevent going backwards
@@ -112,7 +116,7 @@ class PatternMode:
                 
                 # Test the model with dummy data
                 print("  Testing model inference...")
-                test_img = np.zeros((640, 640, 3), dtype=np.uint8)
+                test_img = np.zeros((320, 320, 3), dtype=np.uint8)
                 test_result = self.stitch_model(test_img, conf=self.confidence_threshold, verbose=False)
                 print("  ✓ Model test successful!")
             else:
@@ -184,50 +188,45 @@ class PatternMode:
         self.stitches_detected = 0
         self.is_evaluated = False
         self.level_completed = False
+        # Clear accumulated stitch mask for real-time coloring
+        self.completed_stitch_mask = None
         print(f"🔄 Progress reset for Level {self.current_level}")
     
-    def create_segmented_pattern(self, overlay, alpha, current_segment, pattern_progress):
-        """Create color-coded pattern overlay divided into 4 vertical segments
+    def create_realtime_pattern(self, overlay, alpha):
+        """Create real-time colored pattern overlay that progressively changes to cyan
+        as stitches are detected nearby
         
         Args:
             overlay: Original pattern overlay (BGR)
             alpha: Pattern alpha mask
-            current_segment: Current segment number (1-4)
-            pattern_progress: Progress percentage (0, 25, 50, 75, 100)
             
         Returns:
-            Colored pattern overlay with segments highlighted
+            Colored pattern overlay with progressive real-time coloring
         """
         if overlay is None or alpha is None:
             return None
         
-        # Create colored overlay
+        # Create colored overlay - start with yellow (uncompleted)
         colored_overlay = overlay.copy()
-        height = overlay.shape[0]
+        height, width = overlay.shape[:2]
         
-        # Calculate segment boundaries (divide vertically into 4 parts)
-        segment_height = height // 4
+        # Default color: yellow (current/to-be-sewn)
+        pattern_pixels = alpha > 0.1
+        colored_overlay[pattern_pixels] = self.segment_colors['current']
         
-        # Color each segment based on progress
-        for seg in range(1, 5):
-            # Calculate segment boundaries
-            y_start = (seg - 1) * segment_height
-            y_end = height if seg == 4 else seg * segment_height
+        # If we have completed stitches, color nearby pattern pixels cyan
+        if self.completed_stitch_mask is not None:
+            # Resize completed mask to match pattern size
+            completed_mask_resized = cv2.resize(self.completed_stitch_mask, (width, height))
             
-            # Determine color based on progress milestones
-            if pattern_progress >= seg * 25:
-                # Completed segment - cyan
-                color = self.segment_colors['completed']
-            elif seg == current_segment:
-                # Current segment - yellow
-                color = self.segment_colors['current']
-            else:
-                # Upcoming segment - dim gray
-                color = self.segment_colors['upcoming']
+            # Dilate the completed stitch mask to affect nearby pattern areas
+            kernel_size = self.proximity_radius
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+            proximity_mask = cv2.dilate(completed_mask_resized, kernel, iterations=1)
             
-            # Apply color to segment where pattern exists
-            segment_mask = alpha[y_start:y_end, :] > 0.1
-            colored_overlay[y_start:y_end, :][segment_mask] = color
+            # Only color pattern pixels that are near completed stitches
+            completed_pattern_pixels = np.logical_and(pattern_pixels, proximity_mask > 0)
+            colored_overlay[completed_pattern_pixels] = self.segment_colors['completed']
         
         return colored_overlay
     
@@ -366,16 +365,16 @@ class PatternMode:
                         # Extract ROI from camera frame
                         roi_frame = cam_frame[roi_y1:roi_y2, roi_x1:roi_x2].copy()
                         
-                        # ONNX model requires 640x640 input (fixed size)
+                        # ONNX model requires 320x320 input (fixed size)
                         # Still faster than full frame since ROI is smaller area
-                        roi_resized = cv2.resize(roi_frame, (640, 640))
+                        roi_resized = cv2.resize(roi_frame, (320, 320))
                         
                         # Run inference ONLY on ROI (still faster due to smaller crop area)
                         results = self.stitch_model(
                             roi_resized, 
                             conf=self.confidence_threshold,
                             iou=self.iou_threshold,
-                            imgsz=640,
+                            imgsz=320,
                             verbose=False
                         )
                         
@@ -430,7 +429,7 @@ class PatternMode:
                             cam_frame, 
                             conf=self.confidence_threshold,
                             iou=self.iou_threshold,
-                            imgsz=640,
+                            imgsz=320,
                             verbose=False
                         )
                         
@@ -481,12 +480,12 @@ class PatternMode:
                         if detection_overlay is not None:
                             cam_frame = detection_overlay
                         
-                        # Create segmented colored pattern based on progress
-                        segmented_pattern = self.create_segmented_pattern(pattern_overlay, pattern_alpha, self.current_segment, self.pattern_progress)
+                        # Create real-time colored pattern based on completed stitches
+                        realtime_pattern = self.create_realtime_pattern(pattern_overlay, pattern_alpha)
                         
                         # Apply pattern overlay on top
                         roi = cam_frame[y_offset:overlay_end_y, x_offset:overlay_end_x]
-                        pattern_crop = segmented_pattern[0:actual_h, 0:actual_w] if segmented_pattern is not None else pattern_overlay[0:actual_h, 0:actual_w]
+                        pattern_crop = realtime_pattern[0:actual_h, 0:actual_w] if realtime_pattern is not None else pattern_overlay[0:actual_h, 0:actual_w]
                         alpha_crop = pattern_alpha[0:actual_h, 0:actual_w]
                         
                         # Apply with higher opacity for better visibility
@@ -593,11 +592,10 @@ class PatternMode:
         # Start legend from left side of camera with small padding
         legend_x = self.camera_x + 30
         
-        # Legend items
+        # Legend items - updated for real-time coloring
         legend_items = [
             ("Completed", self.segment_colors['completed']),
-            ("Current", self.segment_colors['current']),
-            ("Upcoming", self.segment_colors['upcoming'])
+            ("To Sew", self.segment_colors['current'])
         ]
         
         # Draw each legend item
@@ -670,32 +668,33 @@ class PatternMode:
         
         if self.guide_step == 1:
             instructions = [
-                ("PATTERN SEGMENTS", self.COLORS['text_primary'], 0.85, 2),
+                ("REAL-TIME COLORING", self.COLORS['text_primary'], 0.85, 2),
                 "",
-                ("The pattern is divided into 4 sections", self.COLORS['text_secondary'], 0.7, 2),
-                ("from top to bottom.", self.COLORS['text_secondary'], 0.7, 2),
+                ("As you sew, the pattern will", self.COLORS['text_secondary'], 0.7, 2),
+                ("change color in real-time.", self.COLORS['text_secondary'], 0.7, 2),
                 "",
-                ("Follow the YELLOW highlighted section", self.COLORS['text_secondary'], 0.7, 2),
-                ("to sew correctly.", self.COLORS['text_secondary'], 0.7, 2),
+                ("Start anywhere on the pattern", self.COLORS['text_secondary'], 0.7, 2),
+                ("and sew freely.", self.COLORS['text_secondary'], 0.7, 2),
             ]
         elif self.guide_step == 2:
             instructions = [
                 ("COLOR GUIDE", self.COLORS['text_primary'], 0.85, 2),
                 "",
-                ("CYAN = Completed sections", self.COLORS['text_secondary'], 0.7, 2),
+                ("CYAN = Completed stitches", self.COLORS['text_secondary'], 0.7, 2),
                 "",
-                ("YELLOW = Current section to sew", self.COLORS['text_secondary'], 0.7, 2),
+                ("YELLOW = Pattern to sew", self.COLORS['text_secondary'], 0.7, 2),
                 "",
-                ("GRAY = Upcoming sections", self.COLORS['text_secondary'], 0.7, 2),
+                ("The pattern progressively turns cyan!", self.COLORS['text_secondary'], 0.7, 2),
             ]
         elif self.guide_step == 3:
             instructions = [
-                ("STAY ON TRACK", self.COLORS['text_primary'], 0.85, 2),
+                ("PROGRESSIVE FEEDBACK", self.COLORS['text_primary'], 0.85, 2),
                 "",
-                ("Sew only within the YELLOW section.", self.COLORS['text_secondary'], 0.7, 2),
+                ("Only stitches near your completed", self.COLORS['text_secondary'], 0.7, 2),
+                ("work will change to cyan.", self.COLORS['text_secondary'], 0.7, 2),
                 "",
-                ("A warning will appear if you go", self.COLORS['text_secondary'], 0.7, 2),
-                ("off-course too much.", self.COLORS['text_secondary'], 0.7, 2),
+                ("Watch the pattern transform as", self.COLORS['text_secondary'], 0.7, 2),
+                ("you progress!", self.COLORS['text_secondary'], 0.7, 2),
             ]
         else:  # step 4
             instructions = [
@@ -790,7 +789,11 @@ class PatternMode:
             self.out_of_segment_warning = False
             return
         
-        # Create combined stitch mask
+        # Initialize completed stitch mask if needed (in pattern coordinates)
+        if self.completed_stitch_mask is None:
+            self.completed_stitch_mask = np.zeros((self.uniform_height, self.uniform_width), dtype=np.uint8)
+        
+        # Create combined stitch mask (in camera coordinates)
         combined_stitch_mask = np.zeros((self.camera_height, self.camera_width), dtype=np.uint8)
         for stitch_data in detected_stitch_masks:
             combined_stitch_mask = np.maximum(combined_stitch_mask, stitch_data['mask'])
@@ -799,50 +802,28 @@ class PatternMode:
         kernel = np.ones((3, 3), np.uint8)
         combined_stitch_mask = cv2.dilate(combined_stitch_mask, kernel, iterations=1)
         
-        # Get pattern mask in the ROI area
+        # Get pattern mask in the ROI area (camera coordinates)
         pattern_mask_roi = np.zeros((self.camera_height, self.camera_width), dtype=np.uint8)
         pattern_crop = (pattern_alpha[0:actual_h, 0:actual_w] * 255).astype(np.uint8)
         pattern_mask_roi[y_offset:y_offset+actual_h, x_offset:x_offset+actual_w] = (pattern_crop > 128).astype(np.uint8)
         
-        # Calculate segment boundaries in camera coordinates
-        segment_height = actual_h // 4
-        current_seg_y_start = y_offset + (self.current_segment - 1) * segment_height
-        current_seg_y_end = y_offset + actual_h if self.current_segment == 4 else y_offset + self.current_segment * segment_height
-        
-        # Create mask for current segment only
-        current_segment_mask = np.zeros_like(pattern_mask_roi, dtype=np.uint8)
-        pattern_in_segment = pattern_mask_roi[current_seg_y_start:current_seg_y_end, :]
-        current_segment_mask[current_seg_y_start:current_seg_y_end, :] = pattern_in_segment
-        
-        # Check if stitches are within pattern but outside current segment
+        # Extract stitches that are within the pattern area
         stitches_in_pattern = np.logical_and(combined_stitch_mask > 0, pattern_mask_roi > 0)
-        stitches_in_current_segment = np.logical_and(combined_stitch_mask > 0, current_segment_mask > 0)
         
-        # Count stitches that are in pattern but NOT in current segment
-        stitches_in_pattern_count = np.sum(stitches_in_pattern)
-        stitches_in_current_count = np.sum(stitches_in_current_segment)
-        
-        if stitches_in_pattern_count > 0:
-            stitches_outside_current = stitches_in_pattern_count - stitches_in_current_count
-            percent_outside = (stitches_outside_current / stitches_in_pattern_count) * 100
+        # Convert detected stitches in pattern to pattern coordinates and accumulate
+        if np.sum(stitches_in_pattern) > 0:
+            # Extract just the ROI portion where the pattern is
+            stitches_roi = combined_stitch_mask[y_offset:y_offset+actual_h, x_offset:x_offset+actual_w]
             
-            # Trigger warning if more than 40% of pattern stitches are outside current segment
-            if percent_outside > 40:
-                self.out_of_segment_warning = True
-                # Determine direction
-                stitch_coords = np.where(np.logical_and(stitches_in_pattern, ~stitches_in_current_segment))
-                if len(stitch_coords[0]) > 0:
-                    avg_y = np.mean(stitch_coords[0])
-                    segment_center = (current_seg_y_start + current_seg_y_end) / 2
-                    if avg_y > segment_center:
-                        self.warning_message = "⚠️ Stay in the YELLOW section!"
-                    else:
-                        self.warning_message = "⚠️ Stay in the YELLOW section!"
-                self.warning_flash_phase += 0.3
-            else:
-                self.out_of_segment_warning = False
-        else:
-            self.out_of_segment_warning = False
+            # Resize to pattern dimensions
+            stitches_pattern_coords = cv2.resize(stitches_roi, (self.uniform_width, self.uniform_height))
+            
+            # Accumulate into completed mask (using maximum to not lose previous stitches)
+            self.completed_stitch_mask = np.maximum(self.completed_stitch_mask, 
+                                                     (stitches_pattern_coords > 0).astype(np.uint8) * 255)
+        
+        # No more segment-based warnings - all pattern area is valid now
+        self.out_of_segment_warning = False
         
         # Calculate overlap (intersection) and union
         intersection = np.logical_and(combined_stitch_mask > 0, pattern_mask_roi > 0)
