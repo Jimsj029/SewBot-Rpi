@@ -396,7 +396,7 @@ class PatternMode:
                         detection_overlay = cam_frame.copy()
                         detection_overlay[roi_y1:roi_y2, roi_x1:roi_x2] = roi_detection_overlay
                         
-                        # Extract masks for accuracy calculation and map back to full frame
+                        # Extract masks - keep at ROI resolution only (no full-frame expansion)
                         for result in results:
                             if hasattr(result, 'masks') and result.masks is not None:
                                 masks = result.masks.data.cpu().numpy()
@@ -409,18 +409,15 @@ class PatternMode:
                                 for i, (mask, box) in enumerate(zip(masks, boxes)):
                                     conf = float(box.conf[0].cpu().numpy())
                                     
-                                    # Resize mask to ROI size
+                                    # Resize mask to ROI size only
                                     mask_resized = cv2.resize(mask, (roi_w, roi_h))
                                     mask_binary = (mask_resized > 0.5).astype(np.uint8)
                                     
-                                    # Create full frame mask and place ROI mask at correct position
-                                    full_frame_mask = np.zeros((self.camera_height, self.camera_width), dtype=np.uint8)
-                                    full_frame_mask[roi_y1:roi_y2, roi_x1:roi_x2] = mask_binary
-                                    
-                                    # Store the full frame mask for accuracy calculation
+                                    # Store ROI mask with its bounds (avoid full-frame expansion)
                                     detected_stitch_masks.append({
-                                        'mask': full_frame_mask,
-                                        'confidence': conf
+                                        'mask': mask_binary,  # ROI-sized mask only
+                                        'confidence': conf,
+                                        'roi_bounds': (roi_x1, roi_y1, roi_x2, roi_y2)  # ROI position
                                     })
                     else:
                         # FALLBACK: Use full frame detection if pattern not loaded
@@ -436,7 +433,7 @@ class PatternMode:
                         # Use YOLO's built-in plot method
                         detection_overlay = results[0].plot(boxes=False, labels=False)
                         
-                        # Extract masks
+                        # Extract masks (full frame fallback - keep at camera resolution)
                         for result in results:
                             if hasattr(result, 'masks') and result.masks is not None:
                                 masks = result.masks.data.cpu().numpy()
@@ -450,7 +447,8 @@ class PatternMode:
                                     
                                     detected_stitch_masks.append({
                                         'mask': mask_binary,
-                                        'confidence': conf
+                                        'confidence': conf,
+                                        'roi_bounds': None  # No ROI for full-frame detection
                                     })
                     
                 except Exception as e:
@@ -784,7 +782,7 @@ class PatternMode:
                    cv2.FONT_HERSHEY_TRIPLEX, font_scale, (255, 255, 255), thickness)  # White text
     
     def update_game_stats(self, detected_stitch_masks, pattern_alpha, x_offset, y_offset, actual_w, actual_h):
-        """Update game statistics based on detected stitches vs pattern"""
+        """Update game statistics based on detected stitches vs pattern (ROI-optimized)"""
         if len(detected_stitch_masks) == 0:
             self.out_of_segment_warning = False
             return
@@ -793,30 +791,53 @@ class PatternMode:
         if self.completed_stitch_mask is None:
             self.completed_stitch_mask = np.zeros((self.uniform_height, self.uniform_width), dtype=np.uint8)
         
-        # Create combined stitch mask (in camera coordinates)
-        combined_stitch_mask = np.zeros((self.camera_height, self.camera_width), dtype=np.uint8)
+        # Create combined stitch mask in ROI coordinates only (avoid full-frame allocation)
+        # We'll work directly with ROI-sized masks
+        roi_combined_mask = None
+        roi_bounds = None
+        
         for stitch_data in detected_stitch_masks:
-            combined_stitch_mask = np.maximum(combined_stitch_mask, stitch_data['mask'])
+            if stitch_data.get('roi_bounds') is not None:
+                # ROI-based mask
+                roi_bounds = stitch_data['roi_bounds']
+                roi_x1, roi_y1, roi_x2, roi_y2 = roi_bounds
+                
+                if roi_combined_mask is None:
+                    roi_combined_mask = np.zeros((roi_y2 - roi_y1, roi_x2 - roi_x1), dtype=np.uint8)
+                
+                roi_combined_mask = np.maximum(roi_combined_mask, stitch_data['mask'])
+            else:
+                # Full-frame fallback (shouldn't happen with ROI optimization)
+                # Convert to ROI for consistency
+                if roi_combined_mask is None:
+                    roi_combined_mask = np.zeros((actual_h, actual_w), dtype=np.uint8)
+                    roi_bounds = (x_offset, y_offset, x_offset + actual_w, y_offset + actual_h)
+                
+                roi_mask = stitch_data['mask'][y_offset:y_offset+actual_h, x_offset:x_offset+actual_w]
+                roi_combined_mask = np.maximum(roi_combined_mask, roi_mask)
+        
+        if roi_combined_mask is None:
+            return
         
         # Dilate the detected stitch mask to be more forgiving (smaller dilation)
         kernel = np.ones((3, 3), np.uint8)
-        combined_stitch_mask = cv2.dilate(combined_stitch_mask, kernel, iterations=1)
+        roi_combined_mask = cv2.dilate(roi_combined_mask, kernel, iterations=1)
         
-        # Get pattern mask in the ROI area (camera coordinates)
-        pattern_mask_roi = np.zeros((self.camera_height, self.camera_width), dtype=np.uint8)
+        # Get pattern mask in ROI coordinates (not full camera frame)
         pattern_crop = (pattern_alpha[0:actual_h, 0:actual_w] * 255).astype(np.uint8)
-        pattern_mask_roi[y_offset:y_offset+actual_h, x_offset:x_offset+actual_w] = (pattern_crop > 128).astype(np.uint8)
+        pattern_mask_roi = (pattern_crop > 128).astype(np.uint8)
         
-        # Extract stitches that are within the pattern area
-        stitches_in_pattern = np.logical_and(combined_stitch_mask > 0, pattern_mask_roi > 0)
+        # Ensure masks are same size
+        if roi_combined_mask.shape != pattern_mask_roi.shape:
+            roi_combined_mask = cv2.resize(roi_combined_mask, (actual_w, actual_h))
+        
+        # Extract stitches that are within the pattern area (all in ROI coordinates)
+        stitches_in_pattern = np.logical_and(roi_combined_mask > 0, pattern_mask_roi > 0)
         
         # Convert detected stitches in pattern to pattern coordinates and accumulate
         if np.sum(stitches_in_pattern) > 0:
-            # Extract just the ROI portion where the pattern is
-            stitches_roi = combined_stitch_mask[y_offset:y_offset+actual_h, x_offset:x_offset+actual_w]
-            
-            # Resize to pattern dimensions
-            stitches_pattern_coords = cv2.resize(stitches_roi, (self.uniform_width, self.uniform_height))
+            # Resize to pattern dimensions (from ROI to pattern coords)
+            stitches_pattern_coords = cv2.resize(roi_combined_mask, (self.uniform_width, self.uniform_height))
             
             # Accumulate into completed mask (using maximum to not lose previous stitches)
             self.completed_stitch_mask = np.maximum(self.completed_stitch_mask, 
@@ -825,9 +846,9 @@ class PatternMode:
         # No more segment-based warnings - all pattern area is valid now
         self.out_of_segment_warning = False
         
-        # Calculate overlap (intersection) and union
-        intersection = np.logical_and(combined_stitch_mask > 0, pattern_mask_roi > 0)
-        union = np.logical_or(combined_stitch_mask > 0, pattern_mask_roi > 0)
+        # Calculate overlap (intersection) and union (all in ROI coordinates)
+        intersection = np.logical_and(roi_combined_mask > 0, pattern_mask_roi > 0)
+        union = np.logical_or(roi_combined_mask > 0, pattern_mask_roi > 0)
         
         # Calculate IoU (Intersection over Union) as accuracy metric
         intersection_pixels = np.sum(intersection)
@@ -843,7 +864,7 @@ class PatternMode:
             # Calculate progress (how much of pattern is covered by stitches)
             pattern_pixels = np.sum(pattern_mask_roi > 0)
             if pattern_pixels > 0:
-                covered_pixels = np.sum(np.logical_and(combined_stitch_mask > 0, pattern_mask_roi > 0))
+                covered_pixels = np.sum(np.logical_and(roi_combined_mask > 0, pattern_mask_roi > 0))
                 raw_progress = min(100.0, (covered_pixels / pattern_pixels) * 100.0)
                 
                 # Store raw progress for evaluation
