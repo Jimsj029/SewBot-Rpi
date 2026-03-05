@@ -82,9 +82,6 @@ class PatternMode:
         self.out_of_segment_warning = False
         self.warning_message = ""
         self.warning_flash_phase = 0
-        # Combo and stitch tracking
-        self.current_combo = 0
-        self.max_combo = 0
         self.stitches_detected = 0
         
         # Load models from models directory
@@ -96,12 +93,18 @@ class PatternMode:
         
         # Performance optimization: Frame skipping for detection
         # Process detection every N frames to reduce CPU load
-        self.frame_skip = 2  # Process every 2nd frame (doubles FPS)
+        self.frame_skip = 3  # Run YOLO every 3rd frame (~3x FPS boost)
         self.frame_counter = 0
         self.last_detected_masks = []  # Cache last detection results
+        self.last_detected_boxes = []  # Cache bounding boxes for tracking
+        self.detection_mode = "DETECTING"  # "DETECTING" or "TRACKING"
         
-        # Process only top N detections for mask computation (huge performance boost)
-        self.max_detections_to_process = 2  # Only compute masks for top 2 detections
+        # Fixed ROI configuration (adjustable)
+        self.roi_width = 440
+        self.roi_height = 380
+        
+        # Process only top N detections for mask computation
+        self.max_detections_to_process = 12
         
         # Load stitch detection model (ONNX model)
         try:
@@ -342,153 +345,94 @@ class PatternMode:
             # Load pattern mask for comparison
             pattern_overlay, pattern_alpha = self.load_blueprint(self.current_level)
             
-            # Run stitch detection using ONNX segmentation model with ROI optimization
+            # ========== STEP 1: ROI CROPPING (440x380 adjustable) ==========
+            # Center ROI on camera frame
+            roi_x1 = max(0, (self.camera_width - self.roi_width) // 2)
+            roi_y1 = max(0, (self.camera_height - self.roi_height) // 2)
+            roi_x2 = min(self.camera_width, roi_x1 + self.roi_width)
+            roi_y2 = min(self.camera_height, roi_y1 + self.roi_height)
+            roi_bounds = (roi_x1, roi_y1, roi_x2, roi_y2)
+            
+            # Extract ROI from camera frame
+            roi_frame = cam_frame[roi_y1:roi_y2, roi_x1:roi_x2].copy()
+            
+            # ========== STEP 2: SMART DETECTION (Every 3 frames) ==========
             detected_stitch_masks = []
             detection_overlay = None
-            roi_bounds = None  # Store ROI boundaries for visualization
             
-            # Frame skipping for performance optimization
             self.frame_counter += 1
             process_detection = (self.frame_counter % self.frame_skip == 0)
             
             if self.stitch_model is not None:
                 try:
-                    # Use cached results if skipping this frame
                     if not process_detection:
+                        # TRACKING MODE: Reuse previous boxes
+                        self.detection_mode = "TRACKING"
                         detected_stitch_masks = self.last_detected_masks
                     else:
-                        # ========== ROI METHOD FOR FPS BOOST ==========
-                        # Use ROI only if pattern is loaded (otherwise use full frame)
-                        if pattern_overlay is not None and pattern_alpha is not None:
-                            # Calculate ROI based on pattern position (only detect where pattern is)
-                            overlay_h, overlay_w = pattern_overlay.shape[:2]
-                            x_offset = (self.camera_width - overlay_w) // 2
-                            y_offset = (self.camera_height - overlay_h) // 2
-                            
-                            # Reduced width padding for better FPS, keep height padding normal
-                            padding_x = int(overlay_w * 0.05)  # Minimal horizontal padding for FPS boost
-                            padding_y = int(overlay_h * 0.2)   # Normal vertical padding
-                            
-                            # Calculate ROI boundaries (ensure within frame bounds)
-                            roi_x1 = max(0, x_offset - padding_x)
-                            roi_y1 = max(0, y_offset - padding_y)
-                            roi_x2 = min(self.camera_width, x_offset + overlay_w + padding_x)
-                            roi_y2 = min(self.camera_height, y_offset + overlay_h + padding_y)
-                            
-                            # Store ROI bounds for visualization
-                            roi_bounds = (roi_x1, roi_y1, roi_x2, roi_y2)
-                            
-                            # Extract ROI from camera frame
-                            roi_frame = cam_frame[roi_y1:roi_y2, roi_x1:roi_x2].copy()
-                            
-                            # ONNX model requires 320x320 input (fixed size)
-                            # Still faster than full frame since ROI is smaller area
-                            roi_resized = cv2.resize(roi_frame, (320, 320))
-                            
-                            # Run inference ONLY on ROI (still faster due to smaller crop area)
-                            results = self.stitch_model(
-                                roi_resized, 
-                                conf=self.confidence_threshold,
-                                iou=self.iou_threshold,
-                                imgsz=320,
-                                verbose=False
-                            )
-                            
-                            # Debug: Check if detections found
-                            if len(results) > 0 and results[0].boxes is not None and len(results[0].boxes) > 0:
-                                num_detections = len(results[0].boxes)
-                                print(f"🎯 Detections found: {num_detections}")
-                                for i, box in enumerate(results[0].boxes):
-                                    conf = float(box.conf[0].cpu().numpy())
-                                    print(f"  Detection {i+1}: confidence={conf:.3f}")
-                            
-                            # Get detection visualization from YOLO
-                            roi_detection_overlay = results[0].plot(boxes=False, labels=False)
-                            
-                            # Resize detection overlay back to ROI size
-                            roi_detection_overlay = cv2.resize(roi_detection_overlay, (roi_x2 - roi_x1, roi_y2 - roi_y1))
-                            
-                            # Create full frame detection overlay and place ROI result
-                            detection_overlay = cam_frame.copy()
-                            detection_overlay[roi_y1:roi_y2, roi_x1:roi_x2] = roi_detection_overlay
-                            
-                            # Extract masks - keep at ROI resolution only (no full-frame expansion)
-                            # OPTIMIZATION: Only process top 2 detections to reduce CPU load
-                            for result in results:
-                                if hasattr(result, 'masks') and result.masks is not None:
-                                    masks = result.masks.data.cpu().numpy()
-                                    boxes = result.boxes
-                                    
-                                    # ROI dimensions
-                                    roi_h = roi_y2 - roi_y1
-                                    roi_w = roi_x2 - roi_x1
-                                    
-                                    # Sort by confidence and take top N only
-                                    confidences = boxes.conf.cpu().numpy()
-                                    top_indices = np.argsort(confidences)[::-1][:self.max_detections_to_process]
-                                    
-                                    for idx in top_indices:
-                                        if idx >= len(masks):  # Safety check
-                                            break
-                                        
-                                        mask = masks[idx]
-                                        box = boxes[idx]
-                                        conf = float(box.conf[0].cpu().numpy())
-                                        
-                                        # Resize mask to ROI size only (not full screen)
-                                        mask_resized = cv2.resize(mask, (roi_w, roi_h))
-                                        mask_binary = (mask_resized > 0.5).astype(np.uint8)
-                                        
-                                        # Store ROI mask with its bounds (avoid full-frame expansion)
-                                        detected_stitch_masks.append({
-                                            'mask': mask_binary,  # ROI-sized mask only
-                                            'confidence': conf,
-                                            'roi_bounds': (roi_x1, roi_y1, roi_x2, roi_y2)  # ROI position
-                                        })
-                        else:
-                            # FALLBACK: Use full frame detection if pattern not loaded
-                            print("⚠ Pattern not loaded, using full frame detection")
-                            results = self.stitch_model(
-                                cam_frame, 
-                                conf=self.confidence_threshold,
-                                iou=self.iou_threshold,
-                                imgsz=320,
-                                verbose=False
-                            )
-                            
-                            # Use YOLO's built-in plot method
-                            detection_overlay = results[0].plot(boxes=False, labels=False)
-                            
-                            # Extract masks (full frame fallback - keep at camera resolution)
-                            # OPTIMIZATION: Only process top 2 detections to reduce CPU load
-                            for result in results:
-                                if hasattr(result, 'masks') and result.masks is not None:
-                                    masks = result.masks.data.cpu().numpy()
-                                    boxes = result.boxes
-                                    orig_shape = result.orig_shape
-                                    
-                                    # Sort by confidence and take top N only
-                                    confidences = boxes.conf.cpu().numpy()
-                                    top_indices = np.argsort(confidences)[::-1][:self.max_detections_to_process]
-                                    
-                                    for idx in top_indices:
-                                        if idx >= len(masks):  # Safety check
-                                            break
-                                        
-                                        mask = masks[idx]
-                                        box = boxes[idx]
-                                        conf = float(box.conf[0].cpu().numpy())
-                                        mask_resized = cv2.resize(mask, (orig_shape[1], orig_shape[0]))
-                                        mask_binary = (mask_resized > 0.5).astype(np.uint8)
-                                        
-                                        detected_stitch_masks.append({
-                                            'mask': mask_binary,
-                                            'confidence': conf,
-                                            'roi_bounds': None  # No ROI for full-frame detection
-                                        })
+                        # DETECTING MODE: Run YOLO inference
+                        self.detection_mode = "DETECTING"
                         
-                        # Cache detection results for next frame
+                        # Resize ROI to 320x320 for YOLO
+                        roi_resized = cv2.resize(roi_frame, (320, 320))
+                        
+                        # Run YOLO detection on ROI
+                        results = self.stitch_model(
+                            roi_resized,
+                            conf=self.confidence_threshold,
+                            iou=self.iou_threshold,
+                            imgsz=320,
+                            verbose=False
+                        )
+                        
+                        # ========== STEP 3: MASK GENERATION (YOLO Segmentation) ==========
+                        detected_boxes = []
+                        
+                        # Extract masks from YOLO segmentation results
+                        for result in results:
+                            if hasattr(result, 'masks') and result.masks is not None:
+                                masks = result.masks.data.cpu().numpy()
+                                boxes = result.boxes
+                                roi_h = roi_y2 - roi_y1
+                                roi_w = roi_x2 - roi_x1
+                                
+                                # Sort by confidence and take top N
+                                confidences = boxes.conf.cpu().numpy()
+                                top_indices = np.argsort(confidences)[::-1][:self.max_detections_to_process]
+                                
+                                for idx in top_indices:
+                                    if idx >= len(masks):  # Safety check
+                                        break
+                                    
+                                    mask = masks[idx]
+                                    box = boxes[idx]
+                                    conf = float(box.conf[0].cpu().numpy())
+                                    
+                                    # Resize mask to ROI size
+                                    mask_resized = cv2.resize(mask, (roi_w, roi_h))
+                                    mask_binary = (mask_resized > 0.5).astype(np.uint8) * 255
+                                    
+                                    # Get box coordinates for tracking
+                                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                                    scale_x = roi_w / 320.0
+                                    scale_y = roi_h / 320.0
+                                    x1 = int(x1 * scale_x)
+                                    y1 = int(y1 * scale_y)
+                                    x2 = int(x2 * scale_x)
+                                    y2 = int(y2 * scale_y)
+                                    
+                                    detected_stitch_masks.append({
+                                        'mask': mask_binary,
+                                        'confidence': conf,
+                                        'roi_bounds': (roi_x1, roi_y1, roi_x2, roi_y2),
+                                        'box': (x1, y1, x2, y2)  # Box within ROI
+                                    })
+                                    
+                                    detected_boxes.append((x1, y1, x2, y2, conf))
+                        
+                        # Cache results for tracking
                         self.last_detected_masks = detected_stitch_masks
+                        self.last_detected_boxes = detected_boxes
                     
                 except Exception as e:
                     print(f"Stitch detection error: {e}")
@@ -539,57 +483,6 @@ class PatternMode:
             # If detection exists but pattern wasn't applied, use YOLO's visualization
             if not pattern_applied and detection_overlay is not None:
                 cam_frame = detection_overlay
-            
-            # Draw ROI detection box overlay (shows where detection is happening)
-            if roi_bounds is not None:
-                roi_x1, roi_y1, roi_x2, roi_y2 = roi_bounds
-                # Draw semi-transparent box
-                overlay_roi = cam_frame.copy()
-                cv2.rectangle(overlay_roi, (roi_x1, roi_y1), (roi_x2, roi_y2), 
-                             self.COLORS['cyan'], 2)
-                cv2.addWeighted(overlay_roi, 0.7, cam_frame, 0.3, 0, cam_frame)
-                
-                # Add corner markers for better visibility
-                corner_len = 15
-                corner_thick = 3
-                # Top-left
-                cv2.line(cam_frame, (roi_x1, roi_y1), (roi_x1 + corner_len, roi_y1), 
-                        self.COLORS['neon_blue'], corner_thick)
-                cv2.line(cam_frame, (roi_x1, roi_y1), (roi_x1, roi_y1 + corner_len), 
-                        self.COLORS['neon_blue'], corner_thick)
-                # Top-right
-                cv2.line(cam_frame, (roi_x2, roi_y1), (roi_x2 - corner_len, roi_y1), 
-                        self.COLORS['neon_blue'], corner_thick)
-                cv2.line(cam_frame, (roi_x2, roi_y1), (roi_x2, roi_y1 + corner_len), 
-                        self.COLORS['neon_blue'], corner_thick)
-                # Bottom-left
-                cv2.line(cam_frame, (roi_x1, roi_y2), (roi_x1 + corner_len, roi_y2), 
-                        self.COLORS['neon_blue'], corner_thick)
-                cv2.line(cam_frame, (roi_x1, roi_y2), (roi_x1, roi_y2 - corner_len), 
-                        self.COLORS['neon_blue'], corner_thick)
-                # Bottom-right
-                cv2.line(cam_frame, (roi_x2, roi_y2), (roi_x2 - corner_len, roi_y2), 
-                        self.COLORS['neon_blue'], corner_thick)
-                cv2.line(cam_frame, (roi_x2, roi_y2), (roi_x2, roi_y2 - corner_len), 
-                        self.COLORS['neon_blue'], corner_thick)
-                
-                # Add label "DETECTION ZONE"
-                label_text = "DETECTION ZONE"
-                font_scale = 0.4
-                thickness = 1
-                (text_w, text_h), _ = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_TRIPLEX, 
-                                                       font_scale, thickness)
-                label_x = roi_x1 + 5
-                label_y = roi_y1 - 5 if roi_y1 > 20 else roi_y1 + 15
-                
-                # Draw text background
-                cv2.rectangle(cam_frame, (label_x - 2, label_y - text_h - 2), 
-                            (label_x + text_w + 2, label_y + 2), 
-                            self.COLORS['dark_blue'], -1)
-                # Draw text
-                cv2.putText(cam_frame, label_text, (label_x, label_y), 
-                           cv2.FONT_HERSHEY_TRIPLEX, font_scale, 
-                           self.COLORS['neon_blue'], thickness)
             
             frame[self.camera_y:self.camera_y+self.camera_height, 
                   self.camera_x:self.camera_x+self.camera_width] = cam_frame
@@ -652,6 +545,36 @@ class PatternMode:
             # Draw label - larger font
             cv2.putText(frame, label, (item_x + box_size + 8, legend_y), 
                        cv2.FONT_HERSHEY_TRIPLEX, 0.65, self.COLORS['text_secondary'], 2)
+    
+    def draw_detection_status(self, frame):
+        """Draw detection status indicator (DETECTING or TRACKING)"""
+        # Position at top-right corner of camera view
+        status_x = self.camera_x + self.camera_width - 150
+        status_y = self.camera_y + 25
+        
+        # Choose color based on mode
+        if self.detection_mode == "DETECTING":
+            status_color = (0, 255, 0)  # Green - actively detecting
+            bg_color = (0, 100, 0)
+        else:  # TRACKING
+            status_color = (0, 255, 255)  # Yellow - using cached results
+            bg_color = (0, 100, 100)
+        
+        # Draw background box
+        (text_w, text_h), _ = cv2.getTextSize(self.detection_mode, cv2.FONT_HERSHEY_TRIPLEX, 0.5, 2)
+        padding = 8
+        cv2.rectangle(frame, 
+                     (status_x - padding, status_y - text_h - padding), 
+                     (status_x + text_w + padding, status_y + padding), 
+                     bg_color, -1)
+        cv2.rectangle(frame, 
+                     (status_x - padding, status_y - text_h - padding), 
+                     (status_x + text_w + padding, status_y + padding), 
+                     status_color, 2)
+        
+        # Draw status text
+        cv2.putText(frame, self.detection_mode, (status_x, status_y), 
+                   cv2.FONT_HERSHEY_TRIPLEX, 0.5, status_color, 2)
     
     def draw_guide_overlay(self, frame):
         """Draw game guide/tutorial overlay - multi-step"""
@@ -882,8 +805,22 @@ class PatternMode:
             self.completed_stitch_mask = np.maximum(self.completed_stitch_mask, 
                                                      (stitches_pattern_coords > 0).astype(np.uint8) * 255)
         
-        # No more segment-based warnings - all pattern area is valid now
-        self.out_of_segment_warning = False
+        # Check if stitches are going outside the pattern boundary
+        total_stitch_pixels = np.sum(roi_combined_mask > 0)
+        stitches_outside_pattern = np.sum(np.logical_and(roi_combined_mask > 0, pattern_mask_roi == 0))
+        
+        if total_stitch_pixels > 0:
+            outside_percentage = (stitches_outside_pattern / total_stitch_pixels) * 100.0
+            
+            # Trigger warning if more than 40% of stitches are outside pattern
+            if outside_percentage > 40:
+                self.out_of_segment_warning = True
+                self.warning_message = "⚠ STITCHING OUTSIDE PATTERN!"
+                self.warning_flash_phase += 0.2
+            else:
+                self.out_of_segment_warning = False
+        else:
+            self.out_of_segment_warning = False
         
         # Calculate overlap (intersection) and union (all in ROI coordinates)
         intersection = np.logical_and(roi_combined_mask > 0, pattern_mask_roi > 0)
@@ -995,37 +932,20 @@ class PatternMode:
         bar_height = 20
         segment_width = (bar_width - 4) // 4
         
-        # Draw 4 segment boxes
-        for seg in range(1, 5):
-            seg_x = content_x + 2 + (seg - 1) * segment_width
-            
-            # Determine segment color based on progress milestones
-            if self.pattern_progress >= seg * 25:
-                # Completed segment - cyan
-                seg_color = self.segment_colors['completed']
-            elif seg == self.current_segment:
-                # Current segment - yellow with pulse
-                pulse = 0.5 + 0.5 * abs(math.sin(self.glow_phase * 2))
-                seg_color = tuple(int(c * pulse) for c in self.segment_colors['current'])
-            else:
-                # Upcoming segment - gray
-                seg_color = self.segment_colors['upcoming']
-            
-            # Draw segment
-            overlay_bar = frame.copy()
-            cv2.rectangle(overlay_bar, (seg_x, bar_y + 2), 
-                        (seg_x + segment_width - 2, bar_y + bar_height - 2), 
-                        seg_color, -1)
-            cv2.addWeighted(overlay_bar, 0.7, frame, 0.3, 0, frame)
-            
-            # Draw segment border
-            cv2.rectangle(frame, (seg_x, bar_y + 2), 
-                        (seg_x + segment_width - 2, bar_y + bar_height - 2), 
-                        self.COLORS['medium_blue'], 1)
-        
         # Draw outer border
         cv2.rectangle(frame, (content_x, bar_y), (content_x + bar_width, bar_y + bar_height), 
                      self.COLORS['medium_blue'], 2)
+        
+        # Fill progress bar based on current progress
+        if self.pattern_progress > 0:
+            fill_width = int((bar_width - 4) * (self.pattern_progress / 100.0))
+            if fill_width > 0:
+                # Draw progress fill with gradient effect
+                bar_overlay = frame.copy()
+                cv2.rectangle(bar_overlay, (content_x + 2, bar_y + 2), 
+                            (content_x + 2 + fill_width, bar_y + bar_height - 2), 
+                            self.COLORS['glow_cyan'], -1)
+                cv2.addWeighted(bar_overlay, 0.7, frame, 0.3, 0, frame)
         
         # Progress percentage text
         progress_text = f"{self.pattern_progress:.0f}%"
@@ -1033,11 +953,6 @@ class PatternMode:
         cv2.putText(frame, progress_text, (content_x + (bar_width - prog_w) // 2, bar_y + 16), 
                    cv2.FONT_HERSHEY_TRIPLEX, 0.6, self.COLORS['text_primary'], 2)
         
-        # Segment indicator text
-        segment_text_y = bar_y + bar_height + 18
-        segment_label = f"SEGMENT {self.current_segment}/4"
-        cv2.putText(frame, segment_label, (content_x, segment_text_y), 
-                   cv2.FONT_HERSHEY_TRIPLEX, 0.5, self.COLORS['text_secondary'], 2)
     
     def draw_evaluate_button(self, frame):
         """Draw the evaluate button below stats panel"""
@@ -1260,6 +1175,7 @@ class PatternMode:
         bb = self.back_button
         if bb['x'] <= x <= bb['x'] + bb['w'] and bb['y'] <= y <= bb['y'] + bb['h']:
             self.play_button_click_sound()
+            self.reset_progress()  # Reset all progress when leaving level
             return 'back'
         
         # Check evaluate button (only if not evaluated yet)
