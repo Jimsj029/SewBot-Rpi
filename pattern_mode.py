@@ -2,6 +2,7 @@ import cv2
 import numpy as np
 import math
 import os
+import time
 from ultralytics import YOLO
 from music_manager import get_music_manager
 
@@ -82,6 +83,8 @@ class PatternMode:
         self.out_of_segment_warning = False
         self.warning_message = ""
         self.warning_flash_phase = 0
+        self.warning_timestamp = 0  # Track when warning was set
+        self.warning_duration = 3.0  # Auto-clear after 3 seconds
         # Combo and stitch tracking
         self.current_combo = 0
         self.max_combo = 0
@@ -99,6 +102,10 @@ class PatternMode:
         self.frame_skip = 2  # Process every 2nd frame (doubles FPS)
         self.frame_counter = 0
         self.last_detected_masks = []  # Cache last detection results
+        
+        # Progress print throttling (avoid spam)
+        self.last_progress_print_time = 0
+        self.progress_print_interval = 2.0  # Print every 2 seconds
         
         # Process only top N detections for mask computation (huge performance boost)
         self.max_detections_to_process = 2  # Only compute masks for top 2 detections
@@ -124,7 +131,7 @@ class PatternMode:
                 
                 # Test the model with dummy data
                 print("  Testing model inference...")
-                test_img = np.zeros((320, 320, 3), dtype=np.uint8)
+                test_img = np.zeros((256, 256, 3), dtype=np.uint8)
                 test_result = self.stitch_model(test_img, conf=self.confidence_threshold, verbose=False)
                 print("  ✓ Model test successful!")
             else:
@@ -201,18 +208,9 @@ class PatternMode:
         print(f"🔄 Progress reset for Level {self.current_level}")
     
     def create_realtime_pattern(self, overlay, alpha):
-        """Create real-time colored pattern overlay that progressively changes to cyan
-        as stitches are detected nearby
-        
-        Args:
-            overlay: Original pattern overlay (BGR)
-            alpha: Pattern alpha mask
-            
-        Returns:
-            Colored pattern overlay with progressive real-time coloring
-        """
+
         if overlay is None or alpha is None:
-            return None
+            return None, 0.0
         
         # Create colored overlay - start with yellow (uncompleted)
         colored_overlay = overlay.copy()
@@ -221,6 +219,10 @@ class PatternMode:
         # Default color: yellow (current/to-be-sewn)
         pattern_pixels = alpha > 0.1
         colored_overlay[pattern_pixels] = self.segment_colors['current']
+        
+        # Track cyan fill percentage
+        cyan_fill_percentage = 0.0
+        total_pattern_pixels = np.sum(pattern_pixels)
         
         # If we have completed stitches, color nearby pattern pixels cyan
         if self.completed_stitch_mask is not None:
@@ -235,8 +237,13 @@ class PatternMode:
             # Only color pattern pixels that are near completed stitches
             completed_pattern_pixels = np.logical_and(pattern_pixels, proximity_mask > 0)
             colored_overlay[completed_pattern_pixels] = self.segment_colors['completed']
+            
+            # Calculate cyan fill percentage
+            if total_pattern_pixels > 0:
+                cyan_pixels = np.sum(completed_pattern_pixels)
+                cyan_fill_percentage = min(100.0, (cyan_pixels / total_pattern_pixels) * 100.0)
         
-        return colored_overlay
+        return colored_overlay, cyan_fill_percentage
     
 
     def draw_glow_rect(self, img, x, y, w, h, color, glow_intensity):
@@ -356,8 +363,7 @@ class PatternMode:
                     # Use cached results if skipping this frame
                     if not process_detection:
                         detected_stitch_masks = self.last_detected_masks
-                    else:
-                        # ========== ROI METHOD FOR FPS BOOST ==========
+                    else:                        # ========== ROI METHOD FOR FPS BOOST ==========
                         # Use ROI only if pattern is loaded (otherwise use full frame)
                         if pattern_overlay is not None and pattern_alpha is not None:
                             # Calculate ROI based on pattern position (only detect where pattern is)
@@ -381,16 +387,16 @@ class PatternMode:
                             # Extract ROI from camera frame
                             roi_frame = cam_frame[roi_y1:roi_y2, roi_x1:roi_x2].copy()
                             
-                            # ONNX model requires 320x320 input (fixed size)
+                            # INT8 ONNX model requires 256x256 input (fixed size)
                             # Still faster than full frame since ROI is smaller area
-                            roi_resized = cv2.resize(roi_frame, (320, 320))
+                            roi_resized = cv2.resize(roi_frame, (256, 256))
                             
                             # Run inference ONLY on ROI (still faster due to smaller crop area)
                             results = self.stitch_model(
                                 roi_resized, 
                                 conf=self.confidence_threshold,
                                 iou=self.iou_threshold,
-                                imgsz=320,
+                                imgsz=256,
                                 verbose=False
                             )
                             
@@ -402,18 +408,10 @@ class PatternMode:
                                     conf = float(box.conf[0].cpu().numpy())
                                     print(f"  Detection {i+1}: confidence={conf:.3f}")
                             
-                            # Get detection visualization from YOLO
-                            roi_detection_overlay = results[0].plot(boxes=False, labels=False)
+                            # Skip YOLO visualization overlay to prevent black flickering
+                            # Pattern overlay will handle all visualization
+                            detection_overlay = None
                             
-                            # Resize detection overlay back to ROI size
-                            roi_detection_overlay = cv2.resize(roi_detection_overlay, (roi_x2 - roi_x1, roi_y2 - roi_y1))
-                            
-                            # Create full frame detection overlay and place ROI result
-                            detection_overlay = cam_frame.copy()
-                            detection_overlay[roi_y1:roi_y2, roi_x1:roi_x2] = roi_detection_overlay
-                            
-                            # Extract masks - keep at ROI resolution only (no full-frame expansion)
-                            # OPTIMIZATION: Only process top 2 detections to reduce CPU load
                             for result in results:
                                 if hasattr(result, 'masks') and result.masks is not None:
                                     masks = result.masks.data.cpu().numpy()
@@ -439,12 +437,41 @@ class PatternMode:
                                         mask_resized = cv2.resize(mask, (roi_w, roi_h))
                                         mask_binary = (mask_resized > 0.5).astype(np.uint8)
                                         
-                                        # Store ROI mask with its bounds (avoid full-frame expansion)
-                                        detected_stitch_masks.append({
-                                            'mask': mask_binary,  # ROI-sized mask only
-                                            'confidence': conf,
-                                            'roi_bounds': (roi_x1, roi_y1, roi_x2, roi_y2)  # ROI position
-                                        })
+                                        # Filter by pattern mask - only keep detections within pattern area
+                                        # Create ROI-sized pattern mask with pattern positioned correctly
+                                        pattern_mask_roi = np.zeros((roi_h, roi_w), dtype=np.uint8)
+                                        
+                                        # Calculate where pattern sits within the ROI
+                                        pattern_x_in_roi = x_offset - roi_x1
+                                        pattern_y_in_roi = y_offset - roi_y1
+                                        pattern_h, pattern_w = pattern_alpha.shape
+                                        
+                                        # Place pattern mask in the correct position within ROI mask
+                                        pattern_mask_roi[pattern_y_in_roi:pattern_y_in_roi+pattern_h, 
+                                                        pattern_x_in_roi:pattern_x_in_roi+pattern_w] = (pattern_alpha > 0.1).astype(np.uint8)
+                                        
+                                        # Calculate overlap between detection and pattern
+                                        overlap = np.sum(np.logical_and(mask_binary, pattern_mask_roi))
+                                        mask_area = np.sum(mask_binary)
+                                        overlap_percentage = (overlap / mask_area * 100) if mask_area > 0 else 0
+                                        
+                                        print(f"  Detection {idx+1}: overlap={overlap_percentage:.1f}%, mask_area={mask_area}, overlap_pixels={overlap}")
+                                        
+                                        # Check if stitch is within pattern area
+                                        if mask_area > 0 and overlap_percentage > 5:
+                                            # Good - stitch is within pattern
+                                            # Store ROI mask with its bounds (avoid full-frame expansion)
+                                            detected_stitch_masks.append({
+                                                'mask': mask_binary,  # ROI-sized mask only
+                                                'confidence': conf,
+                                                'roi_bounds': (roi_x1, roi_y1, roi_x2, roi_y2)  # ROI position
+                                            })
+                                        elif mask_area > 0:
+                                            # Warning - stitch detected outside pattern area
+                                            self.out_of_segment_warning = True
+                                            self.warning_message = "⚠ STITCH OUTSIDE PATTERN!"
+                                            self.warning_timestamp = time.time()
+                                            print(f"  ⚠ Warning: Stitch detected outside pattern area!")
                         else:
                             # FALLBACK: Use full frame detection if pattern not loaded
                             print("⚠ Pattern not loaded, using full frame detection")
@@ -452,7 +479,7 @@ class PatternMode:
                                 cam_frame, 
                                 conf=self.confidence_threshold,
                                 iou=self.iou_threshold,
-                                imgsz=320,
+                                imgsz=256,
                                 verbose=False
                             )
                             
@@ -513,12 +540,11 @@ class PatternMode:
                     actual_h = overlay_end_y - y_offset
                     
                     if actual_w > 0 and actual_h > 0:
-                        # If we have detection overlay, use that as base (YOLO rendered masks)
-                        if detection_overlay is not None:
-                            cam_frame = detection_overlay
-                        
                         # Create real-time colored pattern based on completed stitches
-                        realtime_pattern = self.create_realtime_pattern(pattern_overlay, pattern_alpha)
+                        realtime_pattern, cyan_fill_pct = self.create_realtime_pattern(pattern_overlay, pattern_alpha)
+                        
+                        # Update pattern progress based on cyan fill percentage
+                        self.pattern_progress = cyan_fill_pct
                         
                         # Apply pattern overlay on top
                         roi = cam_frame[y_offset:overlay_end_y, x_offset:overlay_end_x]
@@ -536,60 +562,7 @@ class PatternMode:
                         self.update_game_stats(detected_stitch_masks, pattern_alpha, 
                                              x_offset, y_offset, actual_w, actual_h)
             
-            # If detection exists but pattern wasn't applied, use YOLO's visualization
-            if not pattern_applied and detection_overlay is not None:
-                cam_frame = detection_overlay
-            
-            # Draw ROI detection box overlay (shows where detection is happening)
-            if roi_bounds is not None:
-                roi_x1, roi_y1, roi_x2, roi_y2 = roi_bounds
-                # Draw semi-transparent box
-                overlay_roi = cam_frame.copy()
-                cv2.rectangle(overlay_roi, (roi_x1, roi_y1), (roi_x2, roi_y2), 
-                             self.COLORS['cyan'], 2)
-                cv2.addWeighted(overlay_roi, 0.7, cam_frame, 0.3, 0, cam_frame)
-                
-                # Add corner markers for better visibility
-                corner_len = 15
-                corner_thick = 3
-                # Top-left
-                cv2.line(cam_frame, (roi_x1, roi_y1), (roi_x1 + corner_len, roi_y1), 
-                        self.COLORS['neon_blue'], corner_thick)
-                cv2.line(cam_frame, (roi_x1, roi_y1), (roi_x1, roi_y1 + corner_len), 
-                        self.COLORS['neon_blue'], corner_thick)
-                # Top-right
-                cv2.line(cam_frame, (roi_x2, roi_y1), (roi_x2 - corner_len, roi_y1), 
-                        self.COLORS['neon_blue'], corner_thick)
-                cv2.line(cam_frame, (roi_x2, roi_y1), (roi_x2, roi_y1 + corner_len), 
-                        self.COLORS['neon_blue'], corner_thick)
-                # Bottom-left
-                cv2.line(cam_frame, (roi_x1, roi_y2), (roi_x1 + corner_len, roi_y2), 
-                        self.COLORS['neon_blue'], corner_thick)
-                cv2.line(cam_frame, (roi_x1, roi_y2), (roi_x1, roi_y2 - corner_len), 
-                        self.COLORS['neon_blue'], corner_thick)
-                # Bottom-right
-                cv2.line(cam_frame, (roi_x2, roi_y2), (roi_x2 - corner_len, roi_y2), 
-                        self.COLORS['neon_blue'], corner_thick)
-                cv2.line(cam_frame, (roi_x2, roi_y2), (roi_x2, roi_y2 - corner_len), 
-                        self.COLORS['neon_blue'], corner_thick)
-                
-                # Add label "DETECTION ZONE"
-                label_text = "DETECTION ZONE"
-                font_scale = 0.4
-                thickness = 1
-                (text_w, text_h), _ = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_TRIPLEX, 
-                                                       font_scale, thickness)
-                label_x = roi_x1 + 5
-                label_y = roi_y1 - 5 if roi_y1 > 20 else roi_y1 + 15
-                
-                # Draw text background
-                cv2.rectangle(cam_frame, (label_x - 2, label_y - text_h - 2), 
-                            (label_x + text_w + 2, label_y + 2), 
-                            self.COLORS['dark_blue'], -1)
-                # Draw text
-                cv2.putText(cam_frame, label_text, (label_x, label_y), 
-                           cv2.FONT_HERSHEY_TRIPLEX, font_scale, 
-                           self.COLORS['neon_blue'], thickness)
+            # Detection zone visualization removed - pattern mask defines detection area
             
             frame[self.camera_y:self.camera_y+self.camera_height, 
                   self.camera_x:self.camera_x+self.camera_width] = cam_frame
@@ -792,8 +765,15 @@ class PatternMode:
     
     def draw_warning_overlay(self, frame):
         """Draw warning overlay when stitching outside current segment"""
+        # Auto-clear warning after duration
+        if self.out_of_segment_warning and (time.time() - self.warning_timestamp) > self.warning_duration:
+            self.out_of_segment_warning = False
+            self.warning_message = ""
+            return
+        
         # Flash effect
         flash_alpha = 0.3 + 0.3 * abs(math.sin(self.warning_flash_phase))
+        self.warning_flash_phase += 0.2
         
         # Warning banner at top of camera
         banner_y = self.camera_y + 30
@@ -900,47 +880,38 @@ class PatternMode:
             # Update score (1 point per % accuracy)
             self.total_score = int(self.current_accuracy)
             
-            # Calculate progress (how much of pattern is covered by stitches)
+            # Calculate raw progress for evaluation (how much of pattern is covered by stitches)
             pattern_pixels = np.sum(pattern_mask_roi > 0)
             if pattern_pixels > 0:
                 covered_pixels = np.sum(np.logical_and(roi_combined_mask > 0, pattern_mask_roi > 0))
                 raw_progress = min(100.0, (covered_pixels / pattern_pixels) * 100.0)
                 
-                # Store raw progress for evaluation
+                # Store raw progress for evaluation ONLY (not for display)
                 self.raw_progress = raw_progress
-                print(f"📊 Raw Progress: {raw_progress:.1f}%")  # Debug print
                 
-                # Determine segment based on raw progress (much lower thresholds)
+                # Throttle progress prints to every 2 seconds
+                current_time = time.time()
+                if current_time - self.last_progress_print_time >= self.progress_print_interval:
+                    print(f"📊 Raw Progress (for evaluation): {raw_progress:.1f}%")  # Debug print
+                    print(f"📊 Display Progress (cyan fill): {self.pattern_progress:.1f}%")  # Debug print
+                    self.last_progress_print_time = current_time
+                
+                # Update segment tracking based on raw progress for internal logic
                 if raw_progress >= 70:  # 70%+ completes everything
                     new_segment = 5  # Beyond segment 4, means fully complete
-                    new_progress = 100.0
                 elif raw_progress >= 45:  # 45%+ completes segment 3, working on segment 4
                     new_segment = 4
-                    new_progress = 75.0
                 elif raw_progress >= 25:  # 25%+ completes segment 2, working on segment 3
                     new_segment = 3
-                    new_progress = 50.0
                 elif raw_progress >= 12:  # 12%+ completes segment 1, working on segment 2
                     new_segment = 2
-                    new_progress = 25.0
                 else:  # < 12% still working on segment 1
                     new_segment = 1
-                    new_progress = 0.0
                 
-                # Only allow progress forward, never backwards (prevent flickering)
+                # Only allow segment progress forward, never backwards
                 if new_segment > self.highest_segment_reached:
                     self.highest_segment_reached = new_segment
                     self.current_segment = new_segment if new_segment <= 4 else 4
-                    self.pattern_progress = new_progress
-                # Keep the highest values reached
-                elif self.highest_segment_reached > 1:
-                    # Stay at the highest segment reached
-                    if self.highest_segment_reached == 5:
-                        self.current_segment = 4
-                        self.pattern_progress = 100.0
-                    else:
-                        self.current_segment = self.highest_segment_reached
-                        self.pattern_progress = (self.highest_segment_reached - 1) * 25.0
             
             # Update combo system
             if accuracy > 70:  # Good accuracy threshold
@@ -1260,6 +1231,8 @@ class PatternMode:
         bb = self.back_button
         if bb['x'] <= x <= bb['x'] + bb['w'] and bb['y'] <= y <= bb['y'] + bb['h']:
             self.play_button_click_sound()
+            # Reset all progress when backing out
+            self.reset_progress()
             return 'back'
         
         # Check evaluate button (only if not evaluated yet)
