@@ -91,7 +91,7 @@ class PatternMode:
         models_dir = os.path.join(os.path.dirname(__file__), 'models')
         
         # Detection settings
-        self.confidence_threshold = 0.3  # Lowered for INT8 model (produces lower confidence scores)
+        self.confidence_threshold = 0.5  # Confidence threshold for detection
         self.iou_threshold = 0.6  # Intersection over Union threshold
         
         # Performance optimization: Frame skipping for detection
@@ -100,17 +100,17 @@ class PatternMode:
         self.frame_counter = 0
         self.last_detected_masks = []  # Cache last detection results
         
-        # Process only top N detections for mask computation (huge performance boost)
-        self.max_detections_to_process = 2  # Only compute masks for top 2 detections
+        # Process only top N detections for box computation (huge performance boost)
+        self.max_detections_to_process = 2  # Only compute boxes for top 2 detections
         
         # Load stitch detection model (ONNX model)
         try:
             # Use ONNX model (best.onnx)
-            stitch_model_path = os.path.join(models_dir, 'best_int8.onnx')
+            stitch_model_path = os.path.join(models_dir, 'best.onnx')
             
             if os.path.exists(stitch_model_path):
                 print(f"Loading stitch detection model: {stitch_model_path}")
-                self.stitch_model = YOLO(stitch_model_path, task='segment')
+                self.stitch_model = YOLO(stitch_model_path, task='detect')
                 print(f"✓ Stitch detection model loaded successfully!")
                 print(f"  Model type: {self.stitch_model.task if hasattr(self.stitch_model, 'task') else 'unknown'}")
                 
@@ -124,9 +124,13 @@ class PatternMode:
                 
                 # Test the model with dummy data
                 print("  Testing model inference...")
-                test_img = np.zeros((320, 320, 3), dtype=np.uint8)
-                test_result = self.stitch_model(test_img, conf=self.confidence_threshold, verbose=False)
-                print("  ✓ Model test successful!")
+                try:
+                    test_img = np.zeros((256, 256, 3), dtype=np.uint8)
+                    test_result = self.stitch_model(test_img, conf=self.confidence_threshold, verbose=False)
+                    print("  ✓ Model test successful!")
+                except Exception as test_error:
+                    print(f"  ⚠ Model test failed (but model is loaded): {test_error}")
+                    print("  Model will still be used for real-time detection")
             else:
                 print(f"⚠ Stitch model not found: {stitch_model_path}")
                 self.stitch_model = None
@@ -342,7 +346,7 @@ class PatternMode:
             # Load pattern mask for comparison
             pattern_overlay, pattern_alpha = self.load_blueprint(self.current_level)
             
-            # Run stitch detection using ONNX segmentation model with ROI optimization
+            # Run stitch detection using ONNX detection model with ROI optimization
             detected_stitch_masks = []
             detection_overlay = None
             roi_bounds = None  # Store ROI boundaries for visualization
@@ -381,16 +385,16 @@ class PatternMode:
                             # Extract ROI from camera frame
                             roi_frame = cam_frame[roi_y1:roi_y2, roi_x1:roi_x2].copy()
                             
-                            # ONNX model requires 320x320 input (fixed size)
+                            # ONNX model requires 256x256 input (fixed size)
                             # Still faster than full frame since ROI is smaller area
-                            roi_resized = cv2.resize(roi_frame, (320, 320))
+                            roi_resized = cv2.resize(roi_frame, (256, 256))
                             
                             # Run inference ONLY on ROI (still faster due to smaller crop area)
                             results = self.stitch_model(
                                 roi_resized, 
                                 conf=self.confidence_threshold,
                                 iou=self.iou_threshold,
-                                imgsz=320,
+                                imgsz=256,
                                 verbose=False
                             )
                             
@@ -403,7 +407,7 @@ class PatternMode:
                                     print(f"  Detection {i+1}: confidence={conf:.3f}")
                             
                             # Get detection visualization from YOLO
-                            roi_detection_overlay = results[0].plot(boxes=False, labels=False)
+                            roi_detection_overlay = results[0].plot(boxes=True, labels=False)
                             
                             # Resize detection overlay back to ROI size
                             roi_detection_overlay = cv2.resize(roi_detection_overlay, (roi_x2 - roi_x1, roi_y2 - roi_y1))
@@ -412,11 +416,10 @@ class PatternMode:
                             detection_overlay = cam_frame.copy()
                             detection_overlay[roi_y1:roi_y2, roi_x1:roi_x2] = roi_detection_overlay
                             
-                            # Extract masks - keep at ROI resolution only (no full-frame expansion)
+                            # Extract bounding boxes and convert to masks
                             # OPTIMIZATION: Only process top 2 detections to reduce CPU load
                             for result in results:
-                                if hasattr(result, 'masks') and result.masks is not None:
-                                    masks = result.masks.data.cpu().numpy()
+                                if hasattr(result, 'boxes') and result.boxes is not None:
                                     boxes = result.boxes
                                     
                                     # ROI dimensions
@@ -428,16 +431,23 @@ class PatternMode:
                                     top_indices = np.argsort(confidences)[::-1][:self.max_detections_to_process]
                                     
                                     for idx in top_indices:
-                                        if idx >= len(masks):  # Safety check
+                                        if idx >= len(boxes):  # Safety check
                                             break
                                         
-                                        mask = masks[idx]
                                         box = boxes[idx]
                                         conf = float(box.conf[0].cpu().numpy())
                                         
-                                        # Resize mask to ROI size only (not full screen)
-                                        mask_resized = cv2.resize(mask, (roi_w, roi_h))
-                                        mask_binary = (mask_resized > 0.5).astype(np.uint8)
+                                        # Get box coordinates (in resized 256x256 space)
+                                        xyxy = box.xyxy[0].cpu().numpy()
+                                        x1, y1, x2, y2 = map(int, xyxy)
+                                        
+                                        # Create binary mask from bounding box
+                                        mask_resized = np.zeros((256, 256), dtype=np.uint8)
+                                        mask_resized[y1:y2, x1:x2] = 1
+                                        
+                                        # Resize mask to ROI size
+                                        mask_binary = cv2.resize(mask_resized, (roi_w, roi_h))
+                                        mask_binary = (mask_binary > 0.5).astype(np.uint8)
                                         
                                         # Store ROI mask with its bounds (avoid full-frame expansion)
                                         detected_stitch_masks.append({
@@ -452,18 +462,17 @@ class PatternMode:
                                 cam_frame, 
                                 conf=self.confidence_threshold,
                                 iou=self.iou_threshold,
-                                imgsz=320,
+                                imgsz=256,
                                 verbose=False
                             )
                             
                             # Use YOLO's built-in plot method
-                            detection_overlay = results[0].plot(boxes=False, labels=False)
+                            detection_overlay = results[0].plot(boxes=True, labels=False)
                             
-                            # Extract masks (full frame fallback - keep at camera resolution)
+                            # Extract boxes and convert to masks (full frame fallback)
                             # OPTIMIZATION: Only process top 2 detections to reduce CPU load
                             for result in results:
-                                if hasattr(result, 'masks') and result.masks is not None:
-                                    masks = result.masks.data.cpu().numpy()
+                                if hasattr(result, 'boxes') and result.boxes is not None:
                                     boxes = result.boxes
                                     orig_shape = result.orig_shape
                                     
@@ -472,14 +481,19 @@ class PatternMode:
                                     top_indices = np.argsort(confidences)[::-1][:self.max_detections_to_process]
                                     
                                     for idx in top_indices:
-                                        if idx >= len(masks):  # Safety check
+                                        if idx >= len(boxes):  # Safety check
                                             break
                                         
-                                        mask = masks[idx]
                                         box = boxes[idx]
                                         conf = float(box.conf[0].cpu().numpy())
-                                        mask_resized = cv2.resize(mask, (orig_shape[1], orig_shape[0]))
-                                        mask_binary = (mask_resized > 0.5).astype(np.uint8)
+                                        
+                                        # Get box coordinates
+                                        xyxy = box.xyxy[0].cpu().numpy()
+                                        x1, y1, x2, y2 = map(int, xyxy)
+                                        
+                                        # Create binary mask from bounding box
+                                        mask_binary = np.zeros((orig_shape[0], orig_shape[1]), dtype=np.uint8)
+                                        mask_binary[y1:y2, x1:x2] = 1
                                         
                                         detected_stitch_masks.append({
                                             'mask': mask_binary,
