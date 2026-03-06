@@ -36,12 +36,25 @@ class PatternMode:
         self.score_panel_width = 200
         self.score_panel_height = 250
         
-        # Manual ROI control (detection box) - independent of pattern position
+        # Manual ROI control (detection box) - 2-segment system
         # ROI coordinates are relative to camera_width x camera_height (560x420)
-        self.roi_x = 230  # X position (left edge)
-        self.roi_y = 120   # Y position (top edge)
-        self.roi_width = 50   # Width of ROI box
-        self.roi_height = 50  # Height of ROI box
+        # Segment positions
+        self.roi_top_x = 217
+        self.roi_top_y = 70
+        self.roi_bottom_x = 230
+
+        self.roi_bottom_y = 248  # Moved down to cover bottom half
+        self.roi_width = 128   # Width of ROI box
+        self.roi_height = 128  # Height of ROI box
+        
+        # Active ROI tracking
+        self.current_roi_segment = 1  # 1 = top half, 2 = bottom half
+        self.top_segment_complete = False
+        self.top_half_completion_threshold = 0.90  # 90% of top half pattern must be completed
+        
+        # Current ROI position (starts at top)
+        self.roi_x = self.roi_top_x
+        self.roi_y = self.roi_top_y
         
         # Back button (top left)
         self.back_button = {'x': 20, 'y': 20, 'w': 120, 'h': 50}
@@ -209,6 +222,11 @@ class PatternMode:
         self.level_completed = False
         # Clear accumulated stitch mask for real-time coloring
         self.completed_stitch_mask = None
+        # Reset ROI segment tracking
+        self.current_roi_segment = 1
+        self.top_segment_complete = False
+        self.roi_x = self.roi_top_x
+        self.roi_y = self.roi_top_y
         print(f"🔄 Progress reset for Level {self.current_level}")
     
     def create_realtime_pattern(self, overlay, alpha):
@@ -456,6 +474,40 @@ class PatternMode:
                         
                         # Cache detection results for next frame
                         self.last_detected_masks = detected_stitch_masks
+                        
+                        # Update ROI segment tracking (2-segment system based on pattern completion)
+                        if self.current_roi_segment == 1 and not self.top_segment_complete:
+                            # Check if top half of pattern is completed
+                            if pattern_overlay is not None and pattern_alpha is not None and self.completed_stitch_mask is not None:
+                                # Get pattern dimensions
+                                pattern_h, pattern_w = pattern_alpha.shape[:2]
+                                
+                                # Split pattern into top and bottom halves
+                                top_half_pattern = pattern_alpha[0:pattern_h//2, :]
+                                
+                                # Resize completed stitch mask to pattern size
+                                completed_resized = cv2.resize(self.completed_stitch_mask, (pattern_w, pattern_h))
+                                completed_resized = (completed_resized > 128).astype(np.uint8)
+                                
+                                # Get top half of completed mask
+                                top_half_completed = completed_resized[0:pattern_h//2, :]
+                                
+                                # Calculate completion percentage of top half
+                                top_pattern_pixels = np.sum(top_half_pattern > 0.1)
+                                if top_pattern_pixels > 0:
+                                    top_completed_pixels = np.sum(np.logical_and(top_half_pattern > 0.1, top_half_completed > 0))
+                                    top_completion = top_completed_pixels / top_pattern_pixels
+                                    
+                                    print(f"📍 Top half completion: {top_completion*100:.1f}%")
+                                    
+                                    # Check if top half is complete
+                                    if top_completion >= self.top_half_completion_threshold:
+                                        self.top_segment_complete = True
+                                        self.current_roi_segment = 2
+                                        # Move ROI to bottom segment
+                                        self.roi_x = self.roi_bottom_x
+                                        self.roi_y = self.roi_bottom_y
+                                        print(f"✅ Top half complete ({top_completion*100:.1f}%)! Moving ROI to bottom segment")
                     
                 except Exception as e:
                     print(f"Stitch detection error: {e}")
@@ -540,8 +592,14 @@ class PatternMode:
                 cv2.line(cam_frame, (roi_x2, roi_y2), (roi_x2, roi_y2 - corner_len), 
                         self.COLORS['neon_blue'], corner_thick)
                 
-                # Add label "DETECTION ZONE"
-                label_text = "DETECTION ZONE"
+                # Add label showing current ROI segment
+                if self.current_roi_segment == 1:
+                    label_text = "TOP SEGMENT"
+                    label_color = self.COLORS['neon_blue']
+                else:
+                    label_text = "BOTTOM SEGMENT"
+                    label_color = self.COLORS['glow_cyan']
+                
                 font_scale = 0.4
                 thickness = 1
                 (text_w, text_h), _ = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_TRIPLEX, 
@@ -556,7 +614,7 @@ class PatternMode:
                 # Draw text
                 cv2.putText(cam_frame, label_text, (label_x, label_y), 
                            cv2.FONT_HERSHEY_TRIPLEX, font_scale, 
-                           self.COLORS['neon_blue'], thickness)
+                           label_color, thickness)
             
             frame[self.camera_y:self.camera_y+self.camera_height, 
                   self.camera_x:self.camera_x+self.camera_width] = cam_frame
@@ -1253,6 +1311,12 @@ class PatternMode:
                 self.warning_message = ""
                 self.is_evaluated = False
                 self.level_completed = False
+                # Reset ROI segment tracking
+                self.current_roi_segment = 1
+                self.top_segment_complete = False
+                self.roi_x = self.roi_top_x
+                self.roi_y = self.roi_top_y
+                self.completed_stitch_mask = None
                 print(f"🔄 Progress reset - Try again!")
                 return None
         
