@@ -982,28 +982,30 @@ class PatternMode:
         # Flash effect
         flash_alpha = 0.3 + 0.3 * abs(math.sin(self.warning_flash_phase))
         
-        # Warning banner at top of camera
-        banner_y = self.camera_y + 30
-        banner_height = 70
+        # Small warning banner below camera area
+        banner_width = 400
+        banner_height = 45
+        banner_x = (self.width - banner_width) // 2  # Centered horizontally
+        banner_y = self.camera_y + self.camera_height + 20  # Below camera with 20px gap
         
         # Semi-transparent red background
         overlay = frame.copy()
         cv2.rectangle(overlay, 
-                     (self.camera_x, banner_y), 
-                     (self.camera_x + self.camera_width, banner_y + banner_height), 
+                     (banner_x, banner_y), 
+                     (banner_x + banner_width, banner_y + banner_height), 
                      (0, 0, 200), -1)  # Red in BGR
         cv2.addWeighted(overlay, flash_alpha, frame, 1 - flash_alpha, 0, frame)
         
-        # Warning text - larger and more readable
-        font_scale = 1.0
-        thickness = 4
+        # Warning text - smaller and more compact
+        font_scale = 0.6
+        thickness = 2
         (text_w, text_h), _ = cv2.getTextSize(self.warning_message, cv2.FONT_HERSHEY_TRIPLEX, font_scale, thickness)
-        text_x = self.camera_x + (self.camera_width - text_w) // 2
+        text_x = banner_x + (banner_width - text_w) // 2
         text_y = banner_y + (banner_height + text_h) // 2
         
         # Draw text with outline for visibility
         cv2.putText(frame, self.warning_message, (text_x, text_y), 
-                   cv2.FONT_HERSHEY_TRIPLEX, font_scale, (0, 0, 0), thickness + 3)  # Black outline
+                   cv2.FONT_HERSHEY_TRIPLEX, font_scale, (0, 0, 0), thickness + 2)  # Black outline
         cv2.putText(frame, self.warning_message, (text_x, text_y), 
                    cv2.FONT_HERSHEY_TRIPLEX, font_scale, (255, 255, 255), thickness)  # White text
     
