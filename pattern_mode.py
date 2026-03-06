@@ -927,7 +927,7 @@ class PatternMode:
                 ("Click the EVALUATE button when", self.COLORS['text_secondary'], 0.7, 2),
                 ("you finish sewing.", self.COLORS['text_secondary'], 0.7, 2),
                 "",
-                ("You need 80% or more progress", self.COLORS['text_secondary'], 0.7, 2),
+                ("You need 75% or more progress", self.COLORS['text_secondary'], 0.7, 2),
                 ("to complete the level.", self.COLORS['text_secondary'], 0.7, 2),
             ]
         
@@ -1420,7 +1420,7 @@ class PatternMode:
         
         # Requirement text
         content_y += 40
-        req_text = "(Need 80% to pass)"
+        req_text = "(Need 75% to pass)"
         (req_w, _), _ = cv2.getTextSize(req_text, cv2.FONT_HERSHEY_TRIPLEX, 0.6, 1)
         req_x = panel_x + (panel_w - req_w) // 2
         cv2.putText(frame, req_text, (req_x, content_y), 
@@ -1570,6 +1570,11 @@ class PatternMode:
                 self.warning_message = ""
                 self.is_evaluated = False
                 self.level_completed = False
+                # Clear accumulated stitch mask (remove cyan lines)
+                self.completed_stitch_mask = None
+                # Clear completed segments progress
+                self.completed_segments.clear()
+                self.deviation_segment = None
                 print(f"🔄 Progress reset - Try again!")
                 return None
         
@@ -1586,10 +1591,10 @@ class PatternMode:
         """Evaluate the current pattern and determine if level is completed"""
         self.is_evaluated = True
         
-        # Check if level is completed (80%+ raw progress)
-        if self.raw_progress >= 80:
+        # Check if level is completed (75%+ raw progress)
+        if self.raw_progress >= 75:
             self.level_completed = True
             print(f"✅ Level {self.current_level} completed! Progress: {self.raw_progress:.1f}%")
         else:
             self.level_completed = False
-            print(f"📊 Evaluation: {self.raw_progress:.1f}% progress. Need 80%+ to complete.")
+            print(f"📊 Evaluation: {self.raw_progress:.1f}% progress. Need 75%+ to complete.")
