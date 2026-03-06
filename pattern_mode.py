@@ -67,6 +67,8 @@ class PatternMode:
         
         # Real-time stitch tracking for progressive coloring
         self.completed_stitch_mask = None  # Accumulated mask of all detected stitches
+        self.previous_frame_mask = None  # Previous frame's stitch mask for detecting NEW stitches
+        self.new_stitches_mask = None  # NEW stitches detected this frame (frame-to-frame diff)
         self.proximity_radius = 30  # Pixels around completed stitches that turn cyan
         
         # Segment tracking (divide pattern into 10 regions)
@@ -206,6 +208,8 @@ class PatternMode:
         self.level_completed = False
         # Clear accumulated stitch mask for real-time coloring
         self.completed_stitch_mask = None
+        self.previous_frame_mask = None
+        self.new_stitches_mask = None
         print(f"🔄 Progress reset for Level {self.current_level}")
         print(f"📍 Starting at Segment {self.current_segment} (BOTTOM)")
         print(f"   Total segments: {self.num_segments}")
@@ -334,6 +338,15 @@ class PatternMode:
             
             # Show accumulated stitches in cyan (overrides pattern color)
             colored_overlay[stitch_pixels] = self.segment_colors['completed']  # Cyan
+        
+        # Overlay NEW stitches in bright white (shows fresh sewing activity)
+        if self.new_stitches_mask is not None:
+            # Resize new stitch mask to match pattern overlay size
+            new_stitches_resized = cv2.resize(self.new_stitches_mask, (width, height))
+            new_stitch_pixels = new_stitches_resized > 0
+            
+            # Show NEW stitches in bright white (highlights recent activity)
+            colored_overlay[new_stitch_pixels] = (255, 255, 255)  # Bright white
         
         # Highlight deviation if detected (flash red over wrong segment area)
         if self.deviation_detected and self.deviation_segment is not None:
@@ -818,6 +831,7 @@ class PatternMode:
         
         # Legend items - updated for real-time coloring
         legend_items = [
+            ("New", (255, 255, 255)),  # White for NEW stitches
             ("Completed", self.segment_colors['completed']),
             ("To Sew", self.segment_colors['current'])
         ]
@@ -904,11 +918,11 @@ class PatternMode:
             instructions = [
                 ("COLOR GUIDE", self.COLORS['text_primary'], 0.85, 2),
                 "",
+                ("WHITE = NEW stitches just detected", self.COLORS['text_secondary'], 0.7, 2),
+                "",
                 ("CYAN = Completed stitches", self.COLORS['text_secondary'], 0.7, 2),
                 "",
                 ("YELLOW = Pattern to sew", self.COLORS['text_secondary'], 0.7, 2),
-                "",
-                ("The pattern progressively turns cyan!", self.COLORS['text_secondary'], 0.7, 2),
             ]
         elif self.guide_step == 3:
             instructions = [
@@ -1133,6 +1147,26 @@ class PatternMode:
                 
                 self.warning_flash_phase += 0.2
                 print(f"⚠ DEVIATION: Stitching in segment {seg}, but current segment is {self.current_segment}")
+        
+        # ========== FRAME-TO-FRAME NEW STITCH DETECTION ==========
+        # Detect only NEW stitches added this frame (not accumulated old work)
+        current_frame_stitches = (stitches_pattern_coords > 0).astype(np.uint8) * 255
+        
+        if self.previous_frame_mask is not None:
+            # Calculate difference: new stitches = current - previous
+            self.new_stitches_mask = cv2.subtract(current_frame_stitches, self.previous_frame_mask)
+            
+            new_stitch_pixels = np.sum(self.new_stitches_mask > 0)
+            accumulated_pixels = np.sum(self.completed_stitch_mask > 0) if self.completed_stitch_mask is not None else 0
+            
+            if new_stitch_pixels > 0:
+                print(f"✨ NEW stitches: {new_stitch_pixels} pixels | Accumulated: {accumulated_pixels} pixels")
+        else:
+            # First frame - everything is "new"
+            self.new_stitches_mask = current_frame_stitches.copy()
+        
+        # Store current frame for next comparison
+        self.previous_frame_mask = current_frame_stitches.copy()
         
         # ========== SEGMENT PROGRESS TRACKING ==========
         # Accumulate stitches into completed mask (only for current segment area)
@@ -1574,6 +1608,8 @@ class PatternMode:
                 self.level_completed = False
                 # Clear accumulated stitch mask (remove cyan lines)
                 self.completed_stitch_mask = None
+                self.previous_frame_mask = None
+                self.new_stitches_mask = None
                 # Clear completed segments progress
                 self.completed_segments.clear()
                 self.deviation_segment = None
