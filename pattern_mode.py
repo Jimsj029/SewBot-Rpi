@@ -36,6 +36,13 @@ class PatternMode:
         self.score_panel_width = 200
         self.score_panel_height = 250
         
+        # Manual ROI control (detection box) - independent of pattern position
+        # ROI coordinates are relative to camera_width x camera_height (560x420)
+        self.roi_x = 230  # X position (left edge)
+        self.roi_y = 120   # Y position (top edge)
+        self.roi_width = 50   # Width of ROI box
+        self.roi_height = 50  # Height of ROI box
+        
         # Back button (top left)
         self.back_button = {'x': 20, 'y': 20, 'w': 120, 'h': 50}
         
@@ -361,145 +368,91 @@ class PatternMode:
                     if not process_detection:
                         detected_stitch_masks = self.last_detected_masks
                     else:
-                        # ========== ROI METHOD FOR FPS BOOST ==========
-                        # Use ROI only if pattern is loaded (otherwise use full frame)
-                        if pattern_overlay is not None and pattern_alpha is not None:
-                            # Calculate ROI based on pattern position (only detect where pattern is)
-                            overlay_h, overlay_w = pattern_overlay.shape[:2]
-                            x_offset = (self.camera_width - overlay_w) // 2
-                            y_offset = (self.camera_height - overlay_h) // 2
-                            
-                            # Reduced width padding for better FPS, keep height padding normal
-                            padding_x = int(overlay_w * 0.05)  # Minimal horizontal padding for FPS boost
-                            padding_y = int(overlay_h * 0.2)   # Normal vertical padding
-                            
-                            # Calculate ROI boundaries (ensure within frame bounds)
-                            roi_x1 = max(0, x_offset - padding_x)
-                            roi_y1 = max(0, y_offset - padding_y)
-                            roi_x2 = min(self.camera_width, x_offset + overlay_w + padding_x)
-                            roi_y2 = min(self.camera_height, y_offset + overlay_h + padding_y)
-                            
-                            # Store ROI bounds for visualization
-                            roi_bounds = (roi_x1, roi_y1, roi_x2, roi_y2)
-                            
-                            # Extract ROI from camera frame
-                            roi_frame = cam_frame[roi_y1:roi_y2, roi_x1:roi_x2].copy()
-                            
-                            # ONNX model requires 256x256 input (fixed size)
-                            # Still faster than full frame since ROI is smaller area
-                            roi_resized = cv2.resize(roi_frame, (256, 256))
-                            
-                            # Run inference ONLY on ROI (still faster due to smaller crop area)
-                            results = self.stitch_model(
-                                roi_resized, 
-                                conf=self.confidence_threshold,
-                                iou=self.iou_threshold,
-                                imgsz=256,
-                                verbose=False
-                            )
-                            
-                            # Debug: Check if detections found
-                            if len(results) > 0 and results[0].boxes is not None and len(results[0].boxes) > 0:
-                                num_detections = len(results[0].boxes)
-                                print(f"🎯 Detections found: {num_detections}")
-                                for i, box in enumerate(results[0].boxes):
+                        # ========== MANUAL ROI METHOD ==========
+                        # Use fixed ROI coordinates (user-controllable)
+                        
+                        # Calculate ROI boundaries (ensure within frame bounds)
+                        roi_x1 = max(0, self.roi_x)
+                        roi_y1 = max(0, self.roi_y)
+                        roi_x2 = min(self.camera_width, self.roi_x + self.roi_width)
+                        roi_y2 = min(self.camera_height, self.roi_y + self.roi_height)
+                        
+                        # Store ROI bounds for visualization
+                        roi_bounds = (roi_x1, roi_y1, roi_x2, roi_y2)
+                        
+                        # Extract ROI from camera frame
+                        roi_frame = cam_frame[roi_y1:roi_y2, roi_x1:roi_x2].copy()
+                        
+                        # ONNX model requires 256x256 input (fixed size)
+                        # Still faster than full frame since ROI is smaller area
+                        roi_resized = cv2.resize(roi_frame, (256, 256))
+                        
+                        # Run inference ONLY on ROI (still faster due to smaller crop area)
+                        results = self.stitch_model(
+                            roi_resized, 
+                            conf=self.confidence_threshold,
+                            iou=self.iou_threshold,
+                            imgsz=256,
+                            verbose=False
+                        )
+                        
+                        # Debug: Check if detections found
+                        if len(results) > 0 and results[0].boxes is not None and len(results[0].boxes) > 0:
+                            num_detections = len(results[0].boxes)
+                            print(f"🎯 Detections found: {num_detections}")
+                            for i, box in enumerate(results[0].boxes):
+                                conf = float(box.conf[0].cpu().numpy())
+                                print(f"  Detection {i+1}: confidence={conf:.3f}")
+                        
+                        # Get detection visualization from YOLO
+                        roi_detection_overlay = results[0].plot(boxes=True, labels=False)
+                        
+                        # Resize detection overlay back to ROI size
+                        roi_detection_overlay = cv2.resize(roi_detection_overlay, (roi_x2 - roi_x1, roi_y2 - roi_y1))
+                        
+                        # Create full frame detection overlay and place ROI result
+                        detection_overlay = cam_frame.copy()
+                        detection_overlay[roi_y1:roi_y2, roi_x1:roi_x2] = roi_detection_overlay
+                        
+                        # Extract bounding boxes and convert to masks
+                        # OPTIMIZATION: Only process top 2 detections to reduce CPU load
+                        for result in results:
+                            if hasattr(result, 'boxes') and result.boxes is not None:
+                                boxes = result.boxes
+                                
+                                # ROI dimensions
+                                roi_h = roi_y2 - roi_y1
+                                roi_w = roi_x2 - roi_x1
+                                
+                                # Sort by confidence and take top N only
+                                confidences = boxes.conf.cpu().numpy()
+                                top_indices = np.argsort(confidences)[::-1][:self.max_detections_to_process]
+                                
+                                for idx in top_indices:
+                                    if idx >= len(boxes):  # Safety check
+                                        break
+                                    
+                                    box = boxes[idx]
                                     conf = float(box.conf[0].cpu().numpy())
-                                    print(f"  Detection {i+1}: confidence={conf:.3f}")
-                            
-                            # Get detection visualization from YOLO
-                            roi_detection_overlay = results[0].plot(boxes=True, labels=False)
-                            
-                            # Resize detection overlay back to ROI size
-                            roi_detection_overlay = cv2.resize(roi_detection_overlay, (roi_x2 - roi_x1, roi_y2 - roi_y1))
-                            
-                            # Create full frame detection overlay and place ROI result
-                            detection_overlay = cam_frame.copy()
-                            detection_overlay[roi_y1:roi_y2, roi_x1:roi_x2] = roi_detection_overlay
-                            
-                            # Extract bounding boxes and convert to masks
-                            # OPTIMIZATION: Only process top 2 detections to reduce CPU load
-                            for result in results:
-                                if hasattr(result, 'boxes') and result.boxes is not None:
-                                    boxes = result.boxes
                                     
-                                    # ROI dimensions
-                                    roi_h = roi_y2 - roi_y1
-                                    roi_w = roi_x2 - roi_x1
+                                    # Get box coordinates (in resized 256x256 space)
+                                    xyxy = box.xyxy[0].cpu().numpy()
+                                    x1, y1, x2, y2 = map(int, xyxy)
                                     
-                                    # Sort by confidence and take top N only
-                                    confidences = boxes.conf.cpu().numpy()
-                                    top_indices = np.argsort(confidences)[::-1][:self.max_detections_to_process]
+                                    # Create binary mask from bounding box
+                                    mask_resized = np.zeros((256, 256), dtype=np.uint8)
+                                    mask_resized[y1:y2, x1:x2] = 1
                                     
-                                    for idx in top_indices:
-                                        if idx >= len(boxes):  # Safety check
-                                            break
-                                        
-                                        box = boxes[idx]
-                                        conf = float(box.conf[0].cpu().numpy())
-                                        
-                                        # Get box coordinates (in resized 256x256 space)
-                                        xyxy = box.xyxy[0].cpu().numpy()
-                                        x1, y1, x2, y2 = map(int, xyxy)
-                                        
-                                        # Create binary mask from bounding box
-                                        mask_resized = np.zeros((256, 256), dtype=np.uint8)
-                                        mask_resized[y1:y2, x1:x2] = 1
-                                        
-                                        # Resize mask to ROI size
-                                        mask_binary = cv2.resize(mask_resized, (roi_w, roi_h))
-                                        mask_binary = (mask_binary > 0.5).astype(np.uint8)
-                                        
-                                        # Store ROI mask with its bounds (avoid full-frame expansion)
-                                        detected_stitch_masks.append({
-                                            'mask': mask_binary,  # ROI-sized mask only
-                                            'confidence': conf,
-                                            'roi_bounds': (roi_x1, roi_y1, roi_x2, roi_y2)  # ROI position
-                                        })
-                        else:
-                            # FALLBACK: Use full frame detection if pattern not loaded
-                            print("⚠ Pattern not loaded, using full frame detection")
-                            results = self.stitch_model(
-                                cam_frame, 
-                                conf=self.confidence_threshold,
-                                iou=self.iou_threshold,
-                                imgsz=256,
-                                verbose=False
-                            )
-                            
-                            # Use YOLO's built-in plot method
-                            detection_overlay = results[0].plot(boxes=True, labels=False)
-                            
-                            # Extract boxes and convert to masks (full frame fallback)
-                            # OPTIMIZATION: Only process top 2 detections to reduce CPU load
-                            for result in results:
-                                if hasattr(result, 'boxes') and result.boxes is not None:
-                                    boxes = result.boxes
-                                    orig_shape = result.orig_shape
+                                    # Resize mask to ROI size
+                                    mask_binary = cv2.resize(mask_resized, (roi_w, roi_h))
+                                    mask_binary = (mask_binary > 0.5).astype(np.uint8)
                                     
-                                    # Sort by confidence and take top N only
-                                    confidences = boxes.conf.cpu().numpy()
-                                    top_indices = np.argsort(confidences)[::-1][:self.max_detections_to_process]
-                                    
-                                    for idx in top_indices:
-                                        if idx >= len(boxes):  # Safety check
-                                            break
-                                        
-                                        box = boxes[idx]
-                                        conf = float(box.conf[0].cpu().numpy())
-                                        
-                                        # Get box coordinates
-                                        xyxy = box.xyxy[0].cpu().numpy()
-                                        x1, y1, x2, y2 = map(int, xyxy)
-                                        
-                                        # Create binary mask from bounding box
-                                        mask_binary = np.zeros((orig_shape[0], orig_shape[1]), dtype=np.uint8)
-                                        mask_binary[y1:y2, x1:x2] = 1
-                                        
-                                        detected_stitch_masks.append({
-                                            'mask': mask_binary,
-                                            'confidence': conf,
-                                            'roi_bounds': None  # No ROI for full-frame detection
-                                        })
+                                    # Store ROI mask with its bounds (avoid full-frame expansion)
+                                    detected_stitch_masks.append({
+                                        'mask': mask_binary,  # ROI-sized mask only
+                                        'confidence': conf,
+                                        'roi_bounds': (roi_x1, roi_y1, roi_x2, roi_y2)  # ROI position
+                                    })
                         
                         # Cache detection results for next frame
                         self.last_detected_masks = detected_stitch_masks
