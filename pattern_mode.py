@@ -1022,191 +1022,138 @@ class PatternMode:
         if self.completed_stitch_mask is None:
             self.completed_stitch_mask = np.zeros((self.uniform_height, self.uniform_width), dtype=np.uint8)
         
-        # Create combined stitch mask in ROI coordinates only (avoid full-frame allocation)
-        # We'll work directly with ROI-sized masks
-        roi_combined_mask = None
-        roi_bounds = None
-        
+        # Process each detection individually and map to pattern coordinates
         for stitch_data in detected_stitch_masks:
-            if stitch_data.get('roi_bounds') is not None:
-                # ROI-based mask
-                roi_bounds = stitch_data['roi_bounds']
-                roi_x1, roi_y1, roi_x2, roi_y2 = roi_bounds
+            if stitch_data.get('roi_bounds') is None:
+                continue
                 
-                if roi_combined_mask is None:
-                    roi_combined_mask = np.zeros((roi_y2 - roi_y1, roi_x2 - roi_x1), dtype=np.uint8)
-                
-                roi_combined_mask = np.maximum(roi_combined_mask, stitch_data['mask'])
-            else:
-                # Full-frame fallback (shouldn't happen with ROI optimization)
-                # Convert to ROI for consistency
-                if roi_combined_mask is None:
-                    roi_combined_mask = np.zeros((actual_h, actual_w), dtype=np.uint8)
-                    roi_bounds = (x_offset, y_offset, x_offset + actual_w, y_offset + actual_h)
-                
-                roi_mask = stitch_data['mask'][y_offset:y_offset+actual_h, x_offset:x_offset+actual_w]
-                roi_combined_mask = np.maximum(roi_combined_mask, roi_mask)
-        
-        if roi_combined_mask is None:
-            return
-        
-        # Dilate the detected stitch mask more aggressively to help with corners and edges
-        kernel = np.ones((5, 5), np.uint8)
-        roi_combined_mask = cv2.dilate(roi_combined_mask, kernel, iterations=2)
-        
-        # Get pattern mask in ROI coordinates (not full camera frame)
-        pattern_crop = (pattern_alpha[0:actual_h, 0:actual_w] * 255).astype(np.uint8)
-        pattern_mask_roi = (pattern_crop > 128).astype(np.uint8)
-        
-        # Ensure masks are same size
-        if roi_combined_mask.shape != pattern_mask_roi.shape:
-            roi_combined_mask = cv2.resize(roi_combined_mask, (actual_w, actual_h))
-        
-        # Extract stitches that are within the pattern area (all in ROI coordinates)
-        stitches_in_pattern = np.logical_and(roi_combined_mask > 0, pattern_mask_roi > 0)
-        
-        # Convert detected stitches in pattern to pattern coordinates and accumulate
-        if np.sum(stitches_in_pattern) > 0:
-            # PROPER COORDINATE MAPPING:
-            # We need to map from ROI detection location to pattern coordinates
-            # roi_bounds gives us where the ROI is in camera frame
-            # x_offset, y_offset gives us where pattern starts in camera frame
+            # Get individual stitch mask and ROI bounds
+            stitch_mask = stitch_data['mask']  # Individual stitch mask in ROI coordinates
+            roi_x1, roi_y1, roi_x2, roi_y2 = stitch_data['roi_bounds']
+            roi_h = roi_y2 - roi_y1
+            roi_w = roi_x2 - roi_x1
             
-            # Variables for skeleton validation (defined in outer scope)
-            pattern_full_x1 = 0
-            pattern_full_y1 = 0
-            pattern_full_x2 = 0
-            pattern_full_y2 = 0
-            detection_added = False
+            # Dilate individual stitch for better coverage
+            kernel = np.ones((3, 3), np.uint8)
+            stitch_mask_dilated = cv2.dilate(stitch_mask, kernel, iterations=1)
             
-            if roi_bounds is not None:
-                roi_x1, roi_y1, roi_x2, roi_y2 = roi_bounds
-                
-                # Only process detections that overlap with the pattern area
-                # Calculate overlap between ROI and pattern area on camera frame
-                pattern_x1, pattern_y1 = x_offset, y_offset
-                pattern_x2, pattern_y2 = x_offset + actual_w, y_offset + actual_h
-                
-                # Find intersection between ROI and pattern on camera frame
-                intersect_x1 = max(roi_x1, pattern_x1)
-                intersect_y1 = max(roi_y1, pattern_y1)
-                intersect_x2 = min(roi_x2, pattern_x2)
-                intersect_y2 = min(roi_y2, pattern_y2)
-                
-                if intersect_x2 > intersect_x1 and intersect_y2 > intersect_y1:
-                    # Calculate coordinates relative to ROI
-                    roi_rel_x1 = max(0, intersect_x1 - roi_x1)
-                    roi_rel_y1 = max(0, intersect_y1 - roi_y1)
-                    roi_rel_x2 = min(roi_x2 - roi_x1, intersect_x2 - roi_x1)
-                    roi_rel_y2 = min(roi_y2 - roi_y1, intersect_y2 - roi_y1)
-                    
-                    # Calculate coordinates relative to pattern
-                    pattern_rel_x1 = max(0, intersect_x1 - pattern_x1)
-                    pattern_rel_y1 = max(0, intersect_y1 - pattern_y1)
-                    pattern_rel_x2 = min(actual_w, intersect_x2 - pattern_x1)
-                    pattern_rel_y2 = min(actual_h, intersect_y2 - pattern_y1)
-                    
-                    # Extract the detection from ROI mask
-                    roi_detection_crop = roi_combined_mask[roi_rel_y1:roi_rel_y2, roi_rel_x1:roi_rel_x2]
-                    
-                    if roi_detection_crop.size > 0:
-                        # Resize to match the pattern region size
-                        pattern_crop_w = pattern_rel_x2 - pattern_rel_x1
-                        pattern_crop_h = pattern_rel_y2 - pattern_rel_y1
-                        
-                        if pattern_crop_w > 0 and pattern_crop_h > 0:
-                            roi_detection_resized = cv2.resize(roi_detection_crop, (pattern_crop_w, pattern_crop_h))
-                            
-                            # Map to full pattern coordinates (200x300)
-                            # Scale from camera frame pattern crop to full pattern dimensions
-                            pattern_full_x1 = int((pattern_rel_x1 / actual_w) * self.uniform_width)
-                            pattern_full_y1 = int((pattern_rel_y1 / actual_h) * self.uniform_height)
-                            pattern_full_x2 = int((pattern_rel_x2 / actual_w) * self.uniform_width)
-                            pattern_full_y2 = int((pattern_rel_y2 / actual_h) * self.uniform_height)
-                            
-                            # Ensure bounds are valid
-                            pattern_full_x1 = max(0, min(pattern_full_x1, self.uniform_width))
-                            pattern_full_y1 = max(0, min(pattern_full_y1, self.uniform_height))
-                            pattern_full_x2 = max(0, min(pattern_full_x2, self.uniform_width))
-                            pattern_full_y2 = max(0, min(pattern_full_y2, self.uniform_height))
-                            
-                            if pattern_full_x2 > pattern_full_x1 and pattern_full_y2 > pattern_full_y1:
-                                # Resize detection to final pattern coordinates
-                                final_w = pattern_full_x2 - pattern_full_x1
-                                final_h = pattern_full_y2 - pattern_full_y1
-                                detection_final = cv2.resize(roi_detection_resized, (final_w, final_h))
-                                
-                                # Place detection at correct position in pattern mask
-                                self.completed_stitch_mask[pattern_full_y1:pattern_full_y2, 
-                                                           pattern_full_x1:pattern_full_x2] = np.maximum(
-                                    self.completed_stitch_mask[pattern_full_y1:pattern_full_y2, 
-                                                               pattern_full_x1:pattern_full_x2],
-                                    (detection_final > 0).astype(np.uint8) * 255
-                                )
-                                detection_added = True
+            # Find where this ROI overlaps with the pattern on camera frame
+            pattern_x1, pattern_y1 = x_offset, y_offset
+            pattern_x2, pattern_y2 = x_offset + actual_w, y_offset + actual_h
             
-            # STEP 11-13 — SKELETON-BASED VALIDATION & PROGRESS TRACKING
-            if detection_added and self.distance_map is not None and self.pattern_skeleton is not None:
-                # Only validate NEW stitch points (in the region just added)
-                if pattern_full_x2 > pattern_full_x1 and pattern_full_y2 > pattern_full_y1:
-                    # Get points only from the newly added region
-                    new_region = self.completed_stitch_mask[pattern_full_y1:pattern_full_y2, 
-                                                             pattern_full_x1:pattern_full_x2]
-                    new_points_local = np.argwhere(new_region > 0)
-                    
-                    good_stitches = 0
-                    outside_stitches = 0
-                    
-                    # Validate each new point
-                    for local_y, local_x in new_points_local:
-                        # Convert to full pattern coordinates
-                        y = pattern_full_y1 + local_y
-                        x = pattern_full_x1 + local_x
-                        
-                        # STEP 11 — DISTANCE CHECK
-                        if y < self.distance_map.shape[0] and x < self.distance_map.shape[1]:
-                            distance = self.distance_map[y, x]
-                            
-                            # STEP 6 — TOLERANCE CHECK
-                            if distance <= self.tolerance:
-                                good_stitches += 1
-                                # STEP 12 — TRACK VISITED SKELETON PIXELS
-                                self.visited_mask[y, x] = 255
-                            else:
-                                outside_stitches += 1
-                    
-                    # Skeleton validation complete
-                
-                # STEP 13 — LOCK COMPLETED SECTIONS
-                # Mark frequently visited areas as completed
-                if np.sum(self.visited_mask > 0) > 0:
-                    # Dilate visited areas to mark sections as complete
-                    kernel = np.ones((5, 5), np.uint8)
-                    self.completed_mask = cv2.dilate(self.visited_mask, kernel, iterations=1)
-                    self.completed_mask = np.logical_or(self.completed_mask > 0, self.completed_mask > 0).astype(np.uint8) * 255
+            # Calculate intersection between ROI and pattern area
+            intersect_x1 = max(roi_x1, pattern_x1)
+            intersect_y1 = max(roi_y1, pattern_y1)
+            intersect_x2 = min(roi_x2, pattern_x2)
+            intersect_y2 = min(roi_y2, pattern_y2)
             
-            # Store detected stitch positions to prevent re-detection
+            if intersect_x2 <= intersect_x1 or intersect_y2 <= intersect_y1:
+                continue  # No overlap with pattern
+            
+            # Get the stitch mask region that overlaps with pattern
+            # Convert camera intersection coords to ROI-relative coords
+            roi_rel_x1 = max(0, intersect_x1 - roi_x1)
+            roi_rel_y1 = max(0, intersect_y1 - roi_y1)
+            roi_rel_x2 = min(roi_w, intersect_x2 - roi_x1)
+            roi_rel_y2 = min(roi_h, intersect_y2 - roi_y1)
+            
+            # Extract the overlapping portion of the stitch mask
+            stitch_crop = stitch_mask_dilated[roi_rel_y1:roi_rel_y2, roi_rel_x1:roi_rel_x2]
+            
+            if stitch_crop.size == 0:
+                continue
+            
+            # Convert camera intersection coords to pattern-relative coords
+            pattern_rel_x1 = max(0, intersect_x1 - pattern_x1)
+            pattern_rel_y1 = max(0, intersect_y1 - pattern_y1)
+            pattern_rel_x2 = min(actual_w, intersect_x2 - pattern_x1)
+            pattern_rel_y2 = min(actual_h, intersect_y2 - pattern_y1)
+            
+            # Resize stitch to match pattern region size
+            pattern_crop_w = pattern_rel_x2 - pattern_rel_x1
+            pattern_crop_h = pattern_rel_y2 - pattern_rel_y1
+            
+            if pattern_crop_w <= 0 or pattern_crop_h <= 0:
+                continue
+            
+            stitch_resized = cv2.resize(stitch_crop, (pattern_crop_w, pattern_crop_h))
+            
+            # Map to full pattern coordinates (uniform_width x uniform_height)
+            pattern_full_x1 = int((pattern_rel_x1 / actual_w) * self.uniform_width)
+            pattern_full_y1 = int((pattern_rel_y1 / actual_h) * self.uniform_height)
+            pattern_full_x2 = int((pattern_rel_x2 / actual_w) * self.uniform_width)
+            pattern_full_y2 = int((pattern_rel_y2 / actual_h) * self.uniform_height)
+            
+            # Ensure bounds are valid
+            pattern_full_x1 = max(0, min(pattern_full_x1, self.uniform_width))
+            pattern_full_y1 = max(0, min(pattern_full_y1, self.uniform_height))
+            pattern_full_x2 = max(0, min(pattern_full_x2, self.uniform_width))
+            pattern_full_y2 = max(0, min(pattern_full_y2, self.uniform_height))
+            
+            if pattern_full_x2 <= pattern_full_x1 or pattern_full_y2 <= pattern_full_y1:
+                continue
+            
+            # Resize to final pattern coordinates
+            final_w = pattern_full_x2 - pattern_full_x1
+            final_h = pattern_full_y2 - pattern_full_y1
+            stitch_final = cv2.resize(stitch_resized, (final_w, final_h))
+            
+            # Add this stitch to the accumulated mask
+            self.completed_stitch_mask[pattern_full_y1:pattern_full_y2, 
+                                       pattern_full_x1:pattern_full_x2] = np.maximum(
+                self.completed_stitch_mask[pattern_full_y1:pattern_full_y2, 
+                                           pattern_full_x1:pattern_full_x2],
+                (stitch_final > 0).astype(np.uint8) * 255
+            )
+            
+            # Debug: Show individual stitch mapping every 60 frames
+            if self.frame_counter % 60 == 0:
+                print(f"  🧵 Stitch mapped: ({pattern_full_x1},{pattern_full_y1})-({pattern_full_x2},{pattern_full_y2}) size={final_w}x{final_h}")
+        
+        # Store detected stitch positions to prevent re-detection
+        for stitch_data in detected_stitch_masks:
+            if 'box_cam' in stitch_data:
+                box_x, box_y, box_w, box_h = stitch_data['box_cam']
+                self.detected_stitch_positions.append((box_x, box_y, box_w, box_h))
+                if self.frame_counter % 60 == 0:
+                    print(f"    📌 Stored position: ({box_x},{box_y},{box_w},{box_h})")
+        
+        # Calculate accuracy for the current frame detections (for display purposes)
+        if len(detected_stitch_masks) > 0:
+            # Build a temporary combined mask for accuracy calculation only
+            roi_combined_mask = None
+            roi_bounds = None
+            
             for stitch_data in detected_stitch_masks:
-                if 'box_cam' in stitch_data:
-                    box_x, box_y, box_w, box_h = stitch_data['box_cam']
-                    self.detected_stitch_positions.append((box_x, box_y, box_w, box_h))
-                    if self.frame_counter % 60 == 0:
-                        print(f"📌 Stored position: ({box_x},{box_y},{box_w},{box_h}) - Total tracked: {len(self.detected_stitch_positions)}")
-        
-        # Calculate overlap (intersection) and union (all in ROI coordinates)
-        intersection = np.logical_and(roi_combined_mask > 0, pattern_mask_roi > 0)
-        union = np.logical_or(roi_combined_mask > 0, pattern_mask_roi > 0)
-        
-        # Calculate IoU (Intersection over Union) as accuracy metric
-        intersection_pixels = np.sum(intersection)
-        union_pixels = np.sum(union)
-        
-        if union_pixels > 0:
-            accuracy = (intersection_pixels / union_pixels) * 100.0
-            self.current_accuracy = accuracy
+                if stitch_data.get('roi_bounds') is not None:
+                    roi_bounds = stitch_data['roi_bounds']
+                    roi_x1, roi_y1, roi_x2, roi_y2 = roi_bounds
+                    
+                    if roi_combined_mask is None:
+                        roi_combined_mask = np.zeros((roi_y2 - roi_y1, roi_x2 - roi_x1), dtype=np.uint8)
+                    
+                    roi_combined_mask = np.maximum(roi_combined_mask, stitch_data['mask'])
             
-            # Update score (1 point per % accuracy)
-            self.total_score = int(self.current_accuracy)
+            if roi_combined_mask is not None:
+                # Get pattern mask in ROI coordinates
+                pattern_crop = (pattern_alpha[0:actual_h, 0:actual_w] * 255).astype(np.uint8)
+                pattern_mask_roi = (pattern_crop > 128).astype(np.uint8)
+                
+                # Ensure masks are same size
+                if roi_combined_mask.shape != pattern_mask_roi.shape:
+                    roi_combined_mask = cv2.resize(roi_combined_mask, (actual_w, actual_h))
+                
+                # Calculate accuracy (intersection over union) for current frame
+                intersection = np.logical_and(roi_combined_mask > 0, pattern_mask_roi > 0)
+                union = np.logical_or(roi_combined_mask > 0, pattern_mask_roi > 0)
+                
+                intersection_pixels = np.sum(intersection)
+                union_pixels = np.sum(union)
+                
+                if union_pixels > 0:
+                    accuracy = (intersection_pixels / union_pixels) * 100.0
+                    self.current_accuracy = accuracy
+                    self.total_score = int(self.current_accuracy)
         
         # Calculate progress from ACCUMULATED cyan coverage (completed_stitch_mask)
         # This matches what the user sees visually - using raw mask for accurate pattern following
@@ -1223,6 +1170,10 @@ class PatternMode:
             if pattern_pixels > 0:
                 cyan_pixels = np.sum(np.logical_and(pattern_alpha > 0.1, completed_binary > 0))
                 raw_progress = min(100.0, (cyan_pixels / pattern_pixels) * 100.0)
+                
+                # Debug: Show detection accuracy every 60 frames
+                if self.frame_counter % 60 == 0 and cyan_pixels > 0:
+                    print(f"📊 PROGRESS: {cyan_pixels}/{pattern_pixels} pixels cyan = {raw_progress:.1f}%")
                 
                 # Store raw progress for evaluation
                 self.raw_progress = raw_progress
