@@ -67,6 +67,7 @@ class PatternMode:
         self.pattern_progress = 0.0  # 0-100%
         self.raw_progress = 0.0  # Raw actual progress for evaluation
         self.session_start_time = None
+        self.progress_pixel_count = 0  # Track progress pixels for faster calculation
         
         # Evaluation state
         self.is_evaluated = False
@@ -85,14 +86,34 @@ class PatternMode:
         # Track detected stitch positions to prevent re-detection
         self.detected_stitch_positions = []  # List of (x, y, w, h) tuples in camera frame coordinates
         self.stitch_overlap_threshold = 0.5  # IoU threshold for duplicate detection (0.5 = 50% overlap required)
+        self.max_stitch_history = 2000  # Limit stitch storage to prevent unbounded growth
+        self.stitch_history_trim = 1000  # Trim to this size when limit reached
+        
+        # Grid-based duplicate tracking (O(1) lookup instead of O(n))
+        self.stitch_grid = set()  # Set of (grid_x, grid_y) tuples for fast duplicate checking
+        self.grid_base_size = 16  # Base grid cell size (adaptive based on density)
+        self.grid_density = {}  # Track density per cell for adaptive sizing
+        self.grid_max_density = 5.0  # Max density factor for grid shrinking
+        
+        # Partial frame updates (ROI-based processing)
+        self.updated_regions = []  # Track regions that changed this frame
+        self.roi_margin = 10  # Margin around updated regions (pixels)
         
         # Skeleton-based pattern tracking (STEP 4-6 & 12-13)
         self.pattern_skeleton = None  # Skeletonized pattern path
         self.pattern_mask = None  # Full pattern mask for overlap checking
         self.distance_map = None  # Distance transform from skeleton
+        self.pattern_distance_map = None  # Distance transform from FULL pattern for fast validation
+        self.distance_tolerance = 10  # Pixels - RELAXED tolerance (6 was too strict, 10-15 is better for real stitches)
+        self.overlap_ratio_threshold = 0.1  # 10% overlap required (fallback if distance check is too strict)
         self.visited_mask = None  # Tracks which skeleton pixels have been visited
         self.completed_mask = None  # Marks completed sections
         self.tolerance = 15  # Increased - allow more deviation from skeleton (better for corners)
+        
+        # Cached pattern rendering (prevent reloading every frame!)
+        self.cached_pattern_overlay = None
+        self.cached_pattern_alpha = None
+        self.cached_pattern_level = None  # Track which level is cached
         
         # Segment tracking (divide pattern into 4 quarters)
         self.current_segment = 1  # 1=first 25%, 2=25-50%, 3=50-75%, 4=75-100%
@@ -121,7 +142,7 @@ class PatternMode:
         self.last_detected_masks = []  # Cache last detection results
         
         # Process only top N detections for box computation (huge performance boost)
-        self.max_detections_to_process = 5  # Process top 5 detections (helps with corners/turns)
+        self.max_detections_to_process = 3  # Process top 3 detections (reduced from 5 for better FPS)
         
         # Optical flow tracking for FPS optimization (Target: 20-25 FPS)
         # Reduces YOLO calls by tracking between detections using Lucas-Kanade optical flow
@@ -133,6 +154,9 @@ class PatternMode:
             maxLevel=2,
             criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03)
         )
+        
+        # Heavy operation frame skipping (reduce expensive processing)
+        self.heavy_ops_interval = 2  # Run expensive mapping operations every 2 frames
         
         # Confidence gating for stability (prevents drift)
         self.tracking_error_threshold = 50.0  # Re-run YOLO if tracking error exceeds this
@@ -202,7 +226,7 @@ class PatternMode:
         music_manager.play_sound_effect('button_click.mp3')
     
     def load_blueprint(self, level):
-        """Load binary mask for the pattern"""
+        """Load binary mask for the pattern (cached for performance)"""
         # Reset progress if level changed
         if level != self.current_level_tracking:
             self.reset_progress()
@@ -218,8 +242,19 @@ class PatternMode:
         
         mask = cv2.resize(mask, (self.uniform_width, self.uniform_height))
         
-        # Store full pattern mask for overlap checking
-        self.pattern_mask = mask.copy()
+        # OPTIMIZATION: Store pattern mask as binary (0 or 1) for fast distance checks
+        self.pattern_mask = (mask > 0).astype(np.uint8)
+        
+        # 🎯 STEP 1: COMPUTE DISTANCE MAP (for ultra-fast stitch validation)
+        # Distance transform gives distance to nearest pattern pixel at ANY point
+        # This allows forgiving validation: "is stitch within N pixels of pattern?"
+        inv_mask = 1 - self.pattern_mask  # Invert (distanceTransform expects background=0)
+        self.pattern_distance_map = cv2.distanceTransform(
+            inv_mask,
+            cv2.DIST_L2,
+            5
+        )
+        print(f"✓ Pattern distance map computed (shape: {self.pattern_distance_map.shape})")
         
         # STEP 4 — CREATE SKELETON PATH
         # Create skeleton from pattern for precise path tracking
@@ -245,11 +280,15 @@ class PatternMode:
             print(f"⚠ Warning: Could not create skeleton: {e}")
             self.pattern_skeleton = None
             self.distance_map = None
-            self.pattern_mask = mask.copy()  # Fallback to full mask
         
         # Convert mask to white overlay (pattern lines)
         overlay = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
         alpha = mask / 255.0
+        
+        # Cache the result to avoid reloading every frame!
+        self.cached_pattern_overlay = overlay
+        self.cached_pattern_alpha = alpha
+        self.cached_pattern_level = level
         
         return overlay, alpha
     
@@ -267,6 +306,9 @@ class PatternMode:
         self.completed_stitch_mask = None
         # Clear tracked stitch positions
         self.detected_stitch_positions = []
+        self.stitch_grid.clear()  # Clear grid-based tracking
+        self.grid_density.clear()  # Clear density tracking
+        self.updated_regions = []  # Clear region tracking
         # Reset ROI to first segment
         self.current_roi_segment = 1
         self.roi_y = 0
@@ -322,6 +364,13 @@ class PatternMode:
         Returns:
             True if this stitch was already detected (overlaps with existing), False otherwise
         """
+        # Limit stitch history to prevent unbounded growth
+        if len(self.detected_stitch_positions) > self.max_stitch_history:
+            # Keep only the most recent stitches
+            self.detected_stitch_positions = self.detected_stitch_positions[-self.stitch_history_trim:]
+            if self.frame_counter % 60 == 0:
+                print(f"🧹 Trimmed stitch history to {len(self.detected_stitch_positions)} (was >{self.max_stitch_history})")
+        
         # Debug: Show tracking count every 60 frames
         if self.frame_counter % 60 == 0 and len(self.detected_stitch_positions) > 0:
             print(f"📊 Currently tracking {len(self.detected_stitch_positions)} stitch positions")
@@ -329,56 +378,136 @@ class PatternMode:
         if len(self.detected_stitch_positions) == 0:
             return False
         
-        # Calculate IoU (Intersection over Union) with all existing stitches
-        new_box = (box_x, box_y, box_x + box_w, box_y + box_h)
-        new_center_x = box_x + box_w / 2
-        new_center_y = box_y + box_h / 2
+        # OPTIMIZATION: Quick center-distance check first (faster than IoU)
+        return self._quick_duplicate_check(box_x, box_y, box_w, box_h)
+    
+    def get_adaptive_grid_cell(self, x, y):
+        """Get grid cell with adaptive sizing based on local density.
         
-        for tracked_x, tracked_y, tracked_w, tracked_h in self.detected_stitch_positions:
-            # Quick check: Distance between centers (faster than IoU)
-            tracked_center_x = tracked_x + tracked_w / 2
-            tracked_center_y = tracked_y + tracked_h / 2
-            center_distance = np.sqrt((new_center_x - tracked_center_x)**2 + (new_center_y - tracked_center_y)**2)
+        Args:
+            x, y: Coordinates
             
-            # If centers are very close (within 20 pixels), consider it duplicate
-            if center_distance < 20:
-                if self.frame_counter % 60 == 0:
-                    print(f"  ✋ BLOCKED duplicate (center distance={center_distance:.1f}px)")
+        Returns:
+            (cell_x, cell_y): Grid cell coordinates
+        """
+        # First get base cell to check density
+        base_cell_x = int(x / self.grid_base_size)
+        base_cell_y = int(y / self.grid_base_size)
+        base_cell = (base_cell_x, base_cell_y)
+        
+        # Get density factor (higher density = smaller cells)
+        density = self.grid_density.get(base_cell, 0)
+        density_factor = max(1.0, min(density / 5.0, self.grid_max_density))
+        
+        # Calculate adaptive cell size
+        cell_size = max(8, int(self.grid_base_size / density_factor))
+        
+        # Return adaptive cell coordinates
+        cell_x = int(x / cell_size)
+        cell_y = int(y / cell_size)
+        return (cell_x, cell_y)
+    
+    def update_grid_density(self, x, y):
+        """Update density counter for a grid cell.
+        
+        Args:
+            x, y: Coordinates where stitch was detected
+        """
+        base_cell_x = int(x / self.grid_base_size)
+        base_cell_y = int(y / self.grid_base_size)
+        base_cell = (base_cell_x, base_cell_y)
+        
+        self.grid_density[base_cell] = self.grid_density.get(base_cell, 0) + 1
+    
+    def merge_overlapping_regions(self, regions):
+        """Merge overlapping bounding boxes.
+        
+        Args:
+            regions: List of (x1, y1, x2, y2) tuples
+            
+        Returns:
+            List of merged regions
+        """
+        if not regions:
+            return []
+        
+        # Sort by x1 coordinate
+        sorted_regions = sorted(regions, key=lambda r: r[0])
+        merged = [sorted_regions[0]]
+        
+        for current in sorted_regions[1:]:
+            last = merged[-1]
+            # Check if regions overlap or are close
+            if (current[0] <= last[2] + self.roi_margin and
+                current[1] <= last[3] + self.roi_margin and
+                current[2] >= last[0] - self.roi_margin and
+                current[3] >= last[1] - self.roi_margin):
+                # Merge
+                merged[-1] = (
+                    min(last[0], current[0]),
+                    min(last[1], current[1]),
+                    max(last[2], current[2]),
+                    max(last[3], current[3])
+                )
+            else:
+                merged.append(current)
+        
+        return merged
+    
+    def is_in_updated_region(self, x, y, w, h):
+        """Check if a stitch bounding box intersects any updated region.
+        
+        Args:
+            x, y, w, h: Stitch bounding box
+            
+        Returns:
+            True if stitch is in an updated region
+        """
+        if not self.updated_regions:
+            # No region tracking - process everything
+            return True
+        
+        stitch_x1, stitch_y1 = x, y
+        stitch_x2, stitch_y2 = x + w, y + h
+        
+        for region in self.updated_regions:
+            rx1, ry1, rx2, ry2 = region
+            # Check intersection
+            if (stitch_x2 >= rx1 and stitch_x1 <= rx2 and
+                stitch_y2 >= ry1 and stitch_y1 <= ry2):
                 return True
-            
-            # Convert tracked box to xyxy format
-            tracked_box = (tracked_x, tracked_y, tracked_x + tracked_w, tracked_y + tracked_h)
-            
-            # Calculate intersection
-            x1_inter = max(new_box[0], tracked_box[0])
-            y1_inter = max(new_box[1], tracked_box[1])
-            x2_inter = min(new_box[2], tracked_box[2])
-            y2_inter = min(new_box[3], tracked_box[3])
-            
-            if x2_inter > x1_inter and y2_inter > y1_inter:
-                # There is an intersection
-                intersection_area = (x2_inter - x1_inter) * (y2_inter - y1_inter)
-                
-                # Calculate union
-                new_area = box_w * box_h
-                tracked_area = tracked_w * tracked_h
-                union_area = new_area + tracked_area - intersection_area
-                
-                # Calculate IoU
-                if union_area > 0:
-                    iou = intersection_area / union_area
-                    
-                    # Debug: Show IoU calculations
-                    if self.frame_counter % 60 == 0 and iou > 0.1:
-                        print(f"  IoU: {iou:.3f} (threshold: {self.stitch_overlap_threshold}) - New:({box_x},{box_y},{box_w},{box_h}) vs Tracked:({tracked_x},{tracked_y},{tracked_w},{tracked_h})")
-                    
-                    # If IoU exceeds threshold, consider it as already detected
-                    if iou >= self.stitch_overlap_threshold:
-                        if self.frame_counter % 60 == 0:
-                            print(f"  ✋ BLOCKED duplicate (IoU={iou:.3f})")
-                        return True
         
         return False
+    
+    def _quick_duplicate_check(self, box_x, box_y, box_w, box_h, threshold=10):
+        """Fast duplicate detection using adaptive grid hashing.
+        
+        Args:
+            box_x, box_y, box_w, box_h: Bounding box coordinates
+            threshold: Distance threshold in pixels (default 10)
+            
+        Returns:
+            True if duplicate detected, False otherwise
+        """
+        cx = box_x + box_w // 2
+        cy = box_y + box_h // 2
+        
+        # Adaptive grid-based duplicate check (O(1) lookup!)
+        grid_cell = self.get_adaptive_grid_cell(cx, cy)
+        
+        if grid_cell in self.stitch_grid:
+            if self.frame_counter % 60 == 0:
+                print(f"  ✋ BLOCKED duplicate (adaptive grid cell {grid_cell} already tracked)")
+            return True
+        
+        # Not a duplicate - add to grid and update density
+        self.stitch_grid.add(grid_cell)
+        self.update_grid_density(cx, cy)
+        return False
+    
+    def _legacy_iou_check(self, box_x, box_y, box_w, box_h):
+        """Legacy IoU-based duplicate detection (kept for reference, not used by default)."""
+        return False  # Disabled - using faster center-based check now
 
     def draw_glow_rect(self, img, x, y, w, h, color, glow_intensity):
         """Draw rectangle with glow effect"""
@@ -498,13 +627,22 @@ class PatternMode:
         else:
             cam_frame = cv2.resize(camera_frame, (self.camera_width, self.camera_height))
             
-            # Load pattern mask for comparison
-            pattern_overlay, pattern_alpha = self.load_blueprint(self.current_level)
+            # Load pattern mask for comparison (CACHED - only reloads if level changed!)
+            if self.cached_pattern_level != self.current_level:
+                # Level changed, reload pattern
+                pattern_overlay, pattern_alpha = self.load_blueprint(self.current_level)
+            else:
+                # Use cached pattern (NO recomputation!)
+                pattern_overlay = self.cached_pattern_overlay
+                pattern_alpha = self.cached_pattern_alpha
             
             # Run stitch detection using ONNX detection model with ROI optimization
             detected_stitch_masks = []
             detection_overlay = None
             roi_bounds = None  # Store ROI boundaries for visualization
+            
+            # Clear updated regions for this frame (partial frame updates)
+            self.updated_regions = []
             
             # Frame skipping for performance optimization
             self.frame_counter += 1
@@ -561,6 +699,7 @@ class PatternMode:
                                 conf=self.confidence_threshold,
                                 iou=self.iou_threshold,
                                 imgsz=256,
+                                max_det=20,  # Limit max detections to reduce processing load
                                 verbose=False
                             )
                             
@@ -649,6 +788,15 @@ class PatternMode:
                                     if self.frame_counter % 30 == 0:
                                         print(f"✅ NEW detection at ({box_x1_cam},{box_y1_cam}) conf={conf:.2f}")
                                     
+                                    # Track region for partial updates (only process changed areas)
+                                    margin = self.roi_margin
+                                    self.updated_regions.append((
+                                        max(0, box_x1_cam - margin),
+                                        max(0, box_y1_cam - margin),
+                                        min(self.camera_width, box_x2_cam + margin),
+                                        min(self.camera_height, box_y2_cam + margin)
+                                    ))
+                                    
                                     # Save center point for optical flow tracking (use first valid detection)
                                     if best_detection_point is None:
                                         # Calculate center point in ROI coordinates
@@ -724,6 +872,17 @@ class PatternMode:
                                     else:
                                         # Tracking is good, continue with optical flow
                                         self.prev_point = new_point
+                                        
+                                        # Track region around optical flow point for partial updates
+                                        x_cam = int(x) + roi_x1
+                                        y_cam = int(y) + roi_y1
+                                        margin = self.roi_margin
+                                        self.updated_regions.append((
+                                            max(0, x_cam - margin),
+                                            max(0, y_cam - margin),
+                                            min(self.camera_width, x_cam + margin),
+                                            min(self.camera_height, y_cam + margin)
+                                        ))
                                         
                                         if self.frame_counter % 10 == 0:
                                             print(f"🔄 OPTICAL FLOW: Tracking at ({int(x)},{int(y)}) in ROI, error={tracking_error:.1f}")
@@ -1059,6 +1218,10 @@ class PatternMode:
                 print(f"⚠️ No detected stitches to map (empty list)")
             return
         
+        # OPTIMIZATION: Skip heavy mapping operations on alternate frames for FPS boost
+        if self.frame_counter % self.heavy_ops_interval != 0:
+            return
+        
         # Initialize completed stitch mask if needed (in pattern coordinates)
         if self.completed_stitch_mask is None:
             self.completed_stitch_mask = np.zeros((self.uniform_height, self.uniform_width), dtype=np.uint8)
@@ -1089,9 +1252,22 @@ class PatternMode:
         accepted_count = 0
         rejected_overlap = 0
         
+        # Merge overlapping regions to minimize checks (partial frame updates)
+        if self.updated_regions:
+            self.updated_regions = self.merge_overlapping_regions(self.updated_regions)
+            if self.frame_counter % 30 == 0:
+                print(f"📦 Merged to {len(self.updated_regions)} region(s) for processing")
+        
         for stitch_data in detected_stitch_masks:
             if 'box_cam' not in stitch_data or 'roi_bounds' not in stitch_data:
                 skipped_no_keys += 1
+                continue
+            
+            # Skip stitches outside updated regions (partial frame updates)
+            stitch_box = stitch_data['box_cam']
+            if not self.is_in_updated_region(*stitch_box):
+                if self.frame_counter % 30 == 0:
+                    print(f"  ⏭️ Skipped stitch outside updated regions")
                 continue
             
             processed_count += 1
@@ -1171,71 +1347,99 @@ class PatternMode:
                 skipped_invalid_bounds += 1
                 continue
             
-            # Resize stitch mask to final pattern coordinates
-            final_w = pattern_full_x2 - pattern_full_x1
-            final_h = pattern_full_y2 - pattern_full_y1
-            stitch_final = cv2.resize(stitch_crop, (final_w, final_h))
+            # 🚀 ULTRA-FAST DISTANCE TRANSFORM VALIDATION (single array lookup!)
+            # Replaces expensive mask operations with one distance check
             
-            # CHECK: Only add to completed mask if stitch overlaps with actual pattern line
-            if self.pattern_mask is not None:
+            # STEP 2: Calculate stitch center in camera coordinates (needle approximation)
+            cx_cam = stitch_x + stitch_w // 2
+            cy_cam = stitch_y + stitch_h // 2
+            
+            # STEP 3: Convert camera center to pattern coordinates
+            pattern_cx = int(((cx_cam - pattern_x1) / actual_w) * self.uniform_width)
+            pattern_cy = int(((cy_cam - pattern_y1) / actual_h) * self.uniform_height)
+            
+            # Clip to valid pattern bounds
+            pattern_cx = np.clip(pattern_cx, 0, self.uniform_width - 1)
+            pattern_cy = np.clip(pattern_cy, 0, self.uniform_height - 1)
+            
+            # CHECK: Only add if stitch is within tolerance distance of pattern
+            if self.pattern_distance_map is not None:
+                # STEP 4: ONE LOOKUP - get distance to nearest pattern pixel
+                dist = self.pattern_distance_map[pattern_cy, pattern_cx]
+                
+                # STEP 5: Distance validation with relaxed tolerance
+                stitch_is_valid = (dist < self.distance_tolerance)
+                
+                # FALLBACK: If distance check fails, try overlap ratio (more forgiving)
+                if not stitch_is_valid:
+                    # Calculate intersection area with pattern
+                    inter_x1 = max(intersect_x1, pattern_x1)
+                    inter_y1 = max(intersect_y1, pattern_y1)
+                    inter_x2 = min(intersect_x2, pattern_x2)
+                    inter_y2 = min(intersect_y2, pattern_y2)
+                    
+                    if inter_x2 > inter_x1 and inter_y2 > inter_y1:
+                        inter_area = (inter_x2 - inter_x1) * (inter_y2 - inter_y1)
+                        stitch_area = stitch_w * stitch_h
+                        overlap_ratio = inter_area / stitch_area if stitch_area > 0 else 0
+                        
+                        # Accept if at least 10% of stitch overlaps pattern area
+                        stitch_is_valid = (overlap_ratio >= self.overlap_ratio_threshold)
+                        
+                        if processed_count == 1 and self.frame_counter % 15 == 0:
+                            print(f"      📐 Fallback overlap check: {overlap_ratio:.1%} (need {self.overlap_ratio_threshold:.1%})")
+                
                 # Debug first stitch
                 if processed_count == 1 and self.frame_counter % 15 == 0:
-                    print(f"      Checking overlap with pattern mask...")
-                    
-                # Get the pattern region this stitch covers (use FULL mask, not thin skeleton)
-                pattern_region = self.pattern_mask[pattern_full_y1:pattern_full_y2, 
-                                                   pattern_full_x1:pattern_full_x2]
+                    print(f"      🎯 Distance check: center=({pattern_cx},{pattern_cy}), dist={dist:.2f}px, tolerance={self.distance_tolerance}px")
+                    print(f"      Valid: {stitch_is_valid}")
                 
-                # Check if ANY part of this stitch overlaps with the pattern
-                stitch_binary = (stitch_final > 0).astype(np.uint8)
-                overlap = np.logical_and(stitch_binary > 0, pattern_region > 0)
-                overlap_pixels = np.sum(overlap)
-                
-                # Calculate overlap percentage
-                stitch_pixels = np.sum(stitch_binary > 0)
-                overlap_ratio = (overlap_pixels / stitch_pixels * 100) if stitch_pixels > 0 else 0
-                
-                # Debug first stitch overlap
-                if processed_count == 1 and self.frame_counter % 15 == 0:
-                    print(f"      Pattern mask shape: {pattern_region.shape}, stitch shape: {stitch_binary.shape}")
-                    print(f"      Overlap: {overlap_pixels}/{stitch_pixels} pixels = {overlap_ratio:.1f}%")
-                
-                # Only turn cyan if there's sufficient overlap (at least 20% of stitch on pattern)
-                if overlap_ratio >= 20:
+                if stitch_is_valid:
                     accepted_count += 1
-                    # Add this stitch to the accumulated mask
-                    self.completed_stitch_mask[pattern_full_y1:pattern_full_y2, 
-                                               pattern_full_x1:pattern_full_x2] = np.maximum(
-                        self.completed_stitch_mask[pattern_full_y1:pattern_full_y2, 
-                                                   pattern_full_x1:pattern_full_x2],
-                        stitch_binary * 255
-                    )
+                    
+                    # STEP 6: Update progress mask with small region around stitch (fast!)
+                    radius = 5  # Increased from 4 to 5px for better coverage
+                    y1 = max(0, pattern_cy - radius)
+                    y2 = min(self.uniform_height, pattern_cy + radius)
+                    x1 = max(0, pattern_cx - radius)
+                    x2 = min(self.uniform_width, pattern_cx + radius)
+                    
+                    self.completed_stitch_mask[y1:y2, x1:x2] = 255
                     
                     # ONLY track successful stitches to prevent re-detection
                     if 'box_cam' in stitch_data:
                         box_x, box_y, box_w, box_h = stitch_data['box_cam']
                         self.detected_stitch_positions.append((box_x, box_y, box_w, box_h))
                     
-                    # Debug: Show individual stitch mapping more frequently
+                    # Debug: Show individual stitch mapping
                     if self.frame_counter % 15 == 0:
-                        print(f"  ✅ Stitch #{len(self.detected_stitch_positions)}: ({pattern_full_x1},{pattern_full_y1})-({pattern_full_x2},{pattern_full_y2}) size={final_w}x{final_h}, overlap={overlap_ratio:.0f}%")
+                        print(f"  ✅ Stitch #{len(self.detected_stitch_positions)}: center=({pattern_cx},{pattern_cy}) dist={dist:.2f}px")
                 else:
                     rejected_overlap += 1
-                    # Stitch doesn't match pattern line, skip it
+                    # Stitch too far from pattern line
                     if self.frame_counter % 15 == 0:
-                        print(f"  ❌ Stitch REJECTED ({overlap_ratio:.0f}% overlap, need 20%)")
+                        print(f"  ❌ Stitch REJECTED (dist={dist:.2f}px > {self.distance_tolerance}px)")
             else:
-                # No pattern mask loaded, add all stitches (fallback)
+                # No distance map loaded, fallback to accepting all stitches
                 if processed_count == 1 and self.frame_counter % 15 == 0:
-                    print(f"      ⚠️ NO PATTERN MASK - accepting all stitches")
-                    
+                    print(f"      ⚠️ NO DISTANCE MAP - accepting all stitches")
+                
                 accepted_count += 1
-                self.completed_stitch_mask[pattern_full_y1:pattern_full_y2, 
-                                           pattern_full_x1:pattern_full_x2] = np.maximum(
-                    self.completed_stitch_mask[pattern_full_y1:pattern_full_y2, 
-                                               pattern_full_x1:pattern_full_x2],
-                    (stitch_final > 0).astype(np.uint8) * 255
-                )
+                
+                # Calculate center for fallback
+                pattern_cx = int(((stitch_x + stitch_w // 2 - pattern_x1) / actual_w) * self.uniform_width)
+                pattern_cy = int(((stitch_y + stitch_h // 2 - pattern_y1) / actual_h) * self.uniform_height)
+                pattern_cx = np.clip(pattern_cx, 0, self.uniform_width - 1)
+                pattern_cy = np.clip(pattern_cy, 0, self.uniform_height - 1)
+                
+                # Fill small area
+                radius = 5
+                y1 = max(0, pattern_cy - radius)
+                y2 = min(self.uniform_height, pattern_cy + radius)
+                x1 = max(0, pattern_cx - radius)
+                x2 = min(self.uniform_width, pattern_cx + radius)
+                
+                self.completed_stitch_mask[y1:y2, x1:x2] = 255
                 
                 # Track position for fallback case too
                 if 'box_cam' in stitch_data:
@@ -1243,7 +1447,7 @@ class PatternMode:
                     self.detected_stitch_positions.append((box_x, box_y, box_w, box_h))
                 
                 if self.frame_counter % 15 == 0:
-                    print(f"  🧵 Stitch #{len(self.detected_stitch_positions)}: ({pattern_full_x1},{pattern_full_y1})-({pattern_full_x2},{pattern_full_y2}) size={final_w}x{final_h} [No mask check]")
+                    print(f"  🧵 Stitch #{len(self.detected_stitch_positions)}: center=({pattern_cx},{pattern_cy}) [No distance check]")
         
         # Debug summary
         if self.frame_counter % 15 == 0:
