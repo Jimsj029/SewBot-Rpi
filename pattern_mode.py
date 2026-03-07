@@ -100,8 +100,8 @@ class PatternMode:
         self.frame_counter = 0
         self.last_cloth_bbox = None  # Cache last cloth detection result
         self.smooth_cloth_bbox = None  # Smoothed bbox for stable overlay
-        self.bbox_smooth_alpha = 0.15  # EMA factor: lower = smoother/slower
-        self.bbox_move_threshold = 8   # Pixels: ignore tiny jitter movements
+        self.bbox_smooth_alpha = 0.1  # Lower smoothing factor for slower, smoother updates
+        self.bbox_move_threshold = 12  # Increased movement threshold to ignore smaller jitters
         
         # Load cloth detection model
         try:
@@ -170,7 +170,18 @@ class PatternMode:
         if mask is None:
             return None, None
         
+        # Resize the mask to the desired dimensions
         mask = cv2.resize(mask, (self.uniform_width, self.uniform_height))
+
+        # Cut the binary mask in half (keep top half)
+        mask = mask[:mask.shape[0] // 2, :]
+
+        # Move the pattern to the top of the cloth while keeping it centered horizontally
+        top_offset = 0
+        left_offset = (self.uniform_width - mask.shape[1]) // 2
+        centered_mask = np.zeros((self.uniform_height, self.uniform_width), dtype=mask.dtype)
+        centered_mask[top_offset:top_offset + mask.shape[0], left_offset:left_offset + mask.shape[1]] = mask
+        mask = centered_mask
         
         # Convert mask to white overlay (pattern lines)
         overlay = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
@@ -355,7 +366,7 @@ class PatternMode:
                             cam_frame,
                             conf=self.confidence_threshold,
                             iou=self.iou_threshold,
-                            imgsz=560,
+                            imgsz=576,
                             verbose=False
                         )
                         
