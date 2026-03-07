@@ -204,6 +204,21 @@ class WalletTutorialPlayer:
         self.guide_orientation_mode = 'vertical'
         self.current_orientation = 'vertical'
         self.current_edge_angle = 90.0
+
+        # Per-step guide line placement for "Your Turn".
+        # Key is self.current_step (wallet step index).
+        # Update offset_x/offset_y for each step to move the straight guide line.
+        self.step_line_config = {
+            1: {'orientation': 'vertical', 'offset_x': 0, 'offset_y': 0, 'length': 200},
+            2: {'orientation': 'vertical', 'offset_x': 0, 'offset_y': 0, 'length': 200},
+            3: {'orientation': 'vertical', 'offset_x': 0, 'offset_y': 0, 'length': 200},
+            4: {'orientation': 'vertical', 'offset_x': 0, 'offset_y': 0, 'length': 200},
+            5: {'orientation': 'vertical', 'offset_x': 0, 'offset_y': 0, 'length': 200},
+            6: {'orientation': 'vertical', 'offset_x': 0, 'offset_y': 0, 'length': 200},
+            7: {'orientation': 'vertical', 'offset_x': 0, 'offset_y': 0, 'length': 200},
+            8: {'orientation': 'vertical', 'offset_x': 0, 'offset_y': 0, 'length': 200},
+            9: {'orientation': 'vertical', 'offset_x': 0, 'offset_y': 0, 'length': 200},
+        }
         
         # Cloth edge detection state
         self.cloth_edge_detected = False
@@ -882,6 +897,9 @@ class WalletTutorialPlayer:
         
         # Draw sewing step instruction bar below camera
         self.draw_sewing_step_bar(img, camera_x, camera_y, camera_w, camera_h)
+
+        # Draw compact debug panel outside the camera view
+        self.draw_debug_panel(img, camera_x, camera_y, camera_w, camera_h)
         
         # Draw deviation warning above camera if needed
         if self.deviation_warning:
@@ -1120,7 +1138,8 @@ class WalletTutorialPlayer:
                     self.seam_points = self.seam_points[-self.max_seam_points:]
         
         # --- GUIDE LINE ---
-        # Guide line rendering is temporarily disabled.
+        if self.guide_line_visible and self.sewing_step >= 1:
+            self.draw_guide_line(cam_frame)
         
         # --- SEAM STRAIGHTNESS CHECK ---
         if self.sewing_step == 2 and len(self.seam_points) >= 5:
@@ -1146,43 +1165,78 @@ class WalletTutorialPlayer:
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1)
     
     def draw_cloth_status(self, cam_frame):
-        """Draw cloth detection status on camera frame"""
+        """Draw detection visuals on camera frame (text is rendered outside the camera)."""
         if self.cloth_detected:
-            if self.cloth_lost_frames > 0:
-                status = f"CLOTH TRACKING ({self.cloth_confidence:.0%})"
-            else:
-                status = f"CLOTH DETECTED ({self.cloth_confidence:.0%})"
             color = (0, 255, 0)
             if self.cloth_bbox is not None:
                 x1, y1, x2, y2 = self.cloth_bbox
                 cv2.rectangle(cam_frame, (x1, y1), (x2, y2), color, 2)
+
+    def draw_debug_panel(self, img, camera_x, camera_y, camera_w, camera_h):
+        """Draw compact sewing debug info outside the camera view."""
+        panel_margin = 12
+        panel_x = panel_margin
+        panel_y = camera_y
+        panel_w = max(180, camera_x - (panel_margin * 2) - 6)
+        panel_h = 92
+
+        # Subtle panel background so debug text stays readable.
+        overlay = img.copy()
+        cv2.rectangle(overlay, (panel_x, panel_y), (panel_x + panel_w, panel_y + panel_h), (25, 25, 25), -1)
+        cv2.addWeighted(overlay, 0.6, img, 0.4, 0, img)
+        cv2.rectangle(img, (panel_x, panel_y), (panel_x + panel_w, panel_y + panel_h), COLORS['medium_blue'], 1)
+
+        if self.cloth_detected:
+            if self.cloth_lost_frames > 0:
+                cloth_text = f"Cloth: tracking ({self.cloth_confidence:.0%})"
+            else:
+                cloth_text = f"Cloth: detected ({self.cloth_confidence:.0%})"
+            cloth_color = (0, 255, 0)
         else:
-            status = "WAITING FOR CLOTH..."
-            color = (0, 165, 255)  # Orange
-        cv2.putText(cam_frame, status, (10, 25),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+            cloth_text = "Cloth: waiting..."
+            cloth_color = (0, 165, 255)
 
+        edge_text = "Edge: --"
         if self.cloth_edge_detected:
-            orientation_text = f"EDGE: {self.current_orientation.upper()} ({self.current_edge_angle:.1f} deg)"
-            cv2.putText(cam_frame, orientation_text, (10, 50),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, self.guide_line_color, 2)
+            edge_text = f"Edge: {self.current_orientation.upper()} {self.current_edge_angle:.1f} deg"
 
-            motion_color = (0, 255, 0) if self.cloth_moving_up else (0, 165, 255)
-            top_color = (0, 255, 0) if self.top_line_at_needle else (0, 165, 255)
-            cv2.putText(cam_frame, f"MOVE UP: {'YES' if self.cloth_moving_up else 'NO'}", (10, 72),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, motion_color, 2)
-            cv2.putText(cam_frame, f"TOP AT NEEDLE: {'YES' if self.top_line_at_needle else 'NO'}", (10, 92),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, top_color, 2)
+        move_text = f"Move up: {'YES' if self.cloth_moving_up else 'NO'}"
+        top_text = f"Top@needle: {'YES' if self.top_line_at_needle else 'NO'}"
+
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        line_h = 20
+        start_x = panel_x + 8
+        start_y = panel_y + 20
+        cv2.putText(img, cloth_text, (start_x, start_y), font, 0.40, cloth_color, 1, cv2.LINE_AA)
+        cv2.putText(img, edge_text, (start_x, start_y + line_h), font, 0.40, self.guide_line_color, 1, cv2.LINE_AA)
+
+        move_color = (0, 255, 0) if self.cloth_moving_up else (0, 165, 255)
+        top_color = (0, 255, 0) if self.top_line_at_needle else (0, 165, 255)
+        cv2.putText(img, move_text, (start_x, start_y + line_h * 2), font, 0.40, move_color, 1, cv2.LINE_AA)
+        cv2.putText(img, top_text, (start_x, start_y + line_h * 3), font, 0.40, top_color, 1, cv2.LINE_AA)
     
     def draw_guide_line(self, cam_frame):
         """Draw dashed guide line from needle in current orientation."""
-        sx, sy = self.needle_x, self.needle_y
+        config = self.get_current_step_line_config()
+
+        sx = int(self.needle_x + config['offset_x'])
+        sy = int(self.needle_y + config['offset_y'])
+        sx = max(0, min(cam_frame.shape[1] - 1, sx))
+        sy = max(0, min(cam_frame.shape[0] - 1, sy))
+
+        orientation = config['orientation']
+        if orientation == 'auto':
+            orientation = self.current_orientation
+
+        line_length = int(config.get('length', self.guide_line_length))
+        line_length = max(40, line_length)
+
         dash_len = 10
         gap_len = 5
 
-        if self.current_orientation == 'vertical':
+        if orientation == 'vertical':
             # Dashed line down
-            end_y = min(sy + self.guide_line_length, cam_frame.shape[0] - 1)
+            end_y = min(sy + line_length, cam_frame.shape[0] - 1)
             y = sy
             while y < end_y:
                 y_end = min(y + dash_len, end_y)
@@ -1190,7 +1244,7 @@ class WalletTutorialPlayer:
                 y = y_end + gap_len
 
             # Dashed line up
-            top_y = max(sy - self.guide_line_length, 0)
+            top_y = max(sy - line_length, 0)
             y = sy
             while y > top_y:
                 y_end = max(y - dash_len, top_y)
@@ -1198,7 +1252,7 @@ class WalletTutorialPlayer:
                 y = y_end - gap_len
         else:
             # Dashed line right
-            end_x = min(sx + self.guide_line_length, cam_frame.shape[1] - 1)
+            end_x = min(sx + line_length, cam_frame.shape[1] - 1)
             x = sx
             while x < end_x:
                 x_end = min(x + dash_len, end_x)
@@ -1206,15 +1260,27 @@ class WalletTutorialPlayer:
                 x = x_end + gap_len
 
             # Dashed line left
-            left_end = max(sx - self.guide_line_length, 0)
+            left_end = max(sx - line_length, 0)
             x = sx
             while x > left_end:
                 x_end = max(x - dash_len, left_end)
                 cv2.line(cam_frame, (x, sy), (x_end, sy), self.guide_line_color, 2)
                 x = x_end - gap_len
 
-        cv2.putText(cam_frame, f"GUIDE: {self.current_orientation.upper()}", (sx + 10, sy - 12),
+        cv2.putText(cam_frame, f"GUIDE: {orientation.upper()}", (sx + 10, sy - 12),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, self.guide_line_color, 1)
+
+    def get_current_step_line_config(self):
+        """Return guide line config for current tutorial step with safe defaults."""
+        default_config = {
+            'orientation': self.current_orientation,
+            'offset_x': 0,
+            'offset_y': 0,
+            'length': self.guide_line_length,
+        }
+        step_config = self.step_line_config.get(self.current_step, {})
+        default_config.update(step_config)
+        return default_config
     
     def draw_sewing_step_bar(self, img, camera_x, camera_y, camera_w, camera_h):
         """Draw current sewing guidance step instruction below camera"""
