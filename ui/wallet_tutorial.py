@@ -246,6 +246,12 @@ class WalletTutorialPlayer:
             {"title": "POSITION EDGE", "instruction": "Align the cloth edge near the needle"},
             {"title": "SEW STRAIGHT", "instruction": "Follow the green guide line while sewing"},
         ]
+
+        # Cloth detection filters to reduce false positives (e.g., hands).
+        self.cloth_class_ids = None
+        self.min_cloth_area_ratio = 0.04
+        self.max_cloth_aspect_ratio = 5.0
+        self.needle_proximity_margin = 90
         
         # Load cloth detection model (cloth.pt)
         models_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'models')
@@ -259,6 +265,12 @@ class WalletTutorialPlayer:
                     print(f"  Cloth model classes:")
                     for idx, name in self.cloth_model.names.items():
                         print(f"    Class {idx}: {name}")
+
+                self.cloth_class_ids = self._infer_cloth_class_ids()
+                if self.cloth_class_ids is not None:
+                    print(f"  Using cloth class ids: {sorted(self.cloth_class_ids)}")
+                else:
+                    print("  Cloth class ids not inferred; using geometry filters only")
             else:
                 print(f"⚠ Cloth model not found: {cloth_model_path}")
                 self.cloth_model = None
@@ -267,6 +279,26 @@ class WalletTutorialPlayer:
             import traceback
             traceback.print_exc()
             self.cloth_model = None
+
+    def _infer_cloth_class_ids(self):
+        """Infer class ids that likely represent cloth/fabric from model names."""
+        if self.cloth_model is None or not hasattr(self.cloth_model, 'names'):
+            return None
+
+        names = self.cloth_model.names
+        if not isinstance(names, dict):
+            return None
+
+        keywords = (
+            'cloth', 'fabric', 'textile', 'garment', 'wallet', 'material'
+        )
+        class_ids = set()
+        for idx, name in names.items():
+            name_str = str(name).strip().lower()
+            if any(word in name_str for word in keywords):
+                class_ids.add(int(idx))
+
+        return class_ids if class_ids else None
     
     def load_video_list(self):
         """Load the list of wallet tutorial video files (Materials + Step 1-9 + Showcase)"""
@@ -924,15 +956,56 @@ class WalletTutorialPlayer:
             return False, None, 0.0
         try:
             results = self.cloth_model(
-                cam_frame, conf=0.3, imgsz=320, verbose=False
+                cam_frame, conf=0.35, imgsz=320, verbose=False
             )
             if len(results) > 0 and results[0].boxes is not None and len(results[0].boxes) > 0:
                 boxes = results[0].boxes
                 confidences = boxes.conf.cpu().numpy()
-                best_idx = int(np.argmax(confidences))
-                best_conf = float(confidences[best_idx])
-                best_box = boxes.xyxy[best_idx].cpu().numpy().astype(int)
-                return True, best_box, best_conf
+                xyxy = boxes.xyxy.cpu().numpy().astype(int)
+                cls_ids = boxes.cls.cpu().numpy().astype(int) if hasattr(boxes, 'cls') else None
+
+                frame_h, frame_w = cam_frame.shape[:2]
+                frame_area = float(frame_w * frame_h)
+
+                best_score = -1.0
+                best_box = None
+                best_conf = 0.0
+
+                for i, conf in enumerate(confidences):
+                    box = xyxy[i]
+                    x1, y1, x2, y2 = box
+                    bw = max(1, x2 - x1)
+                    bh = max(1, y2 - y1)
+                    area_ratio = (bw * bh) / frame_area
+                    aspect_ratio = max(bw / float(bh), bh / float(bw))
+
+                    # Class filter: keep only cloth-like classes when available.
+                    if cls_ids is not None and self.cloth_class_ids is not None:
+                        if int(cls_ids[i]) not in self.cloth_class_ids:
+                            continue
+
+                    # Geometry filters to reject small/elongated hand detections.
+                    if area_ratio < self.min_cloth_area_ratio:
+                        continue
+                    if aspect_ratio > self.max_cloth_aspect_ratio:
+                        continue
+
+                    # Cloth should be under/near the needle area.
+                    if not (
+                        x1 - self.needle_proximity_margin <= self.needle_x <= x2 + self.needle_proximity_margin
+                        and y1 - self.needle_proximity_margin <= self.needle_y <= y2 + self.needle_proximity_margin
+                    ):
+                        continue
+
+                    # Prefer confident and sufficiently large detections.
+                    score = float(conf) + min(area_ratio, 0.5) * 0.4
+                    if score > best_score:
+                        best_score = score
+                        best_conf = float(conf)
+                        best_box = box
+
+                if best_box is not None:
+                    return True, best_box, best_conf
             return False, None, 0.0
         except Exception as e:
             print(f"Cloth detection error: {e}")
