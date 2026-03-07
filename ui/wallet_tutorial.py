@@ -10,6 +10,7 @@ import time
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from music_manager import get_music_manager
+from ultralytics import YOLO
 
 # Try to import pygame for audio playback
 try:
@@ -168,6 +169,89 @@ class WalletTutorialPlayer:
             'h': 50,
             'text': '< BACK'
         }
+        
+        # ==========================================
+        # SEWING GUIDANCE SYSTEM
+        # ==========================================
+        
+        # Sewing step state: 0=detect cloth, 1=positioning, 2=sewing
+        self.sewing_step = 0
+        self.cloth_detected = False
+        self.cloth_bbox = None
+        self.cloth_confidence = 0.0
+        self.cloth_detect_frames = 0
+        self.cloth_detect_threshold = 5  # Consecutive frames to confirm cloth
+        self.cloth_locked = False
+        self.cloth_lost_frames = 0
+        # Keep cloth detection active for brief partial occlusions.
+        self.cloth_lost_tolerance = 12
+        
+        # Needle position (fixed reference point - center of camera view)
+        self.camera_w = 544
+        self.camera_h = 400
+        self.needle_x = self.camera_w // 2
+        self.needle_y = self.camera_h // 2
+        
+        # ROI around needle for edge detection
+        self.needle_roi_size = 120
+        self.needle_roi_half = self.needle_roi_size // 2
+        
+        # Guide line parameters
+        self.guide_line_visible = False
+        self.guide_line_length = 200
+        self.guide_line_color = (0, 255, 0)  # Green BGR
+        # Guide orientation: 'auto', 'vertical', or 'horizontal'
+        self.guide_orientation_mode = 'vertical'
+        self.current_orientation = 'vertical'
+        self.current_edge_angle = 90.0
+        
+        # Cloth edge detection state
+        self.cloth_edge_detected = False
+        self.cloth_edge_position = None
+        self.cloth_moving_up = False
+        self.top_line_at_needle = False
+        self.edge_history = []
+        self.max_edge_history = 12
+        
+        # Straight line tracking during sewing
+        self.seam_points = []
+        self.max_seam_points = 100
+        self.max_deviation = 15  # Max pixel deviation before warning
+        self.deviation_warning = False
+        self.deviation_amount = 0.0
+        self.seam_line_fit = None
+        
+        # Frame skipping for detection performance
+        self.detect_frame_counter = 0
+        self.detect_frame_skip = 2  # Process every 2nd frame
+        
+        # Sewing guidance step definitions
+        self.sewing_guidance_steps = [
+            {"title": "PLACE CLOTH", "instruction": "Place the cloth under the needle"},
+            {"title": "POSITION EDGE", "instruction": "Align the cloth edge near the needle"},
+            {"title": "SEW STRAIGHT", "instruction": "Follow the green guide line while sewing"},
+        ]
+        
+        # Load cloth detection model (cloth.pt)
+        models_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'models')
+        try:
+            cloth_model_path = os.path.join(models_dir, 'cloth.pt')
+            if os.path.exists(cloth_model_path):
+                print(f"Loading cloth detection model: {cloth_model_path}")
+                self.cloth_model = YOLO(cloth_model_path)
+                print(f"✓ Cloth detection model loaded!")
+                if hasattr(self.cloth_model, 'names'):
+                    print(f"  Cloth model classes:")
+                    for idx, name in self.cloth_model.names.items():
+                        print(f"    Class {idx}: {name}")
+            else:
+                print(f"⚠ Cloth model not found: {cloth_model_path}")
+                self.cloth_model = None
+        except Exception as e:
+            print(f"⚠ ERROR loading cloth model: {e}")
+            import traceback
+            traceback.print_exc()
+            self.cloth_model = None
     
     def load_video_list(self):
         """Load the list of wallet tutorial video files (Materials + Step 1-9 + Showcase)"""
@@ -373,6 +457,7 @@ class WalletTutorialPlayer:
                 self.play_button_click_sound()
                 # Exit your turn mode and go back to current step's video
                 self.your_turn_mode = False
+                self.reset_sewing_guidance()
                 self.replay_current_video()
                 return 'previous_from_your_turn'
         
@@ -383,6 +468,7 @@ class WalletTutorialPlayer:
                 self.play_button_click_sound()
                 # Exit your turn mode and go to next step
                 self.your_turn_mode = False
+                self.reset_sewing_guidance()
                 if self.next_step():
                     return 'your_turn_next'
                 else:
@@ -436,6 +522,7 @@ class WalletTutorialPlayer:
                 elif self.current_step >= 1 and self.current_step <= 9:
                     # Transition to your_turn mode
                     self.your_turn_mode = True
+                    self.reset_sewing_guidance()
                     return 'enter_your_turn'
                 else:
                     # Move to next step directly (for materials and showcase)
@@ -725,7 +812,7 @@ class WalletTutorialPlayer:
                    COLORS['text_accent'], thickness)
     
     def draw_your_turn(self, img, camera_frame):
-        """Draw the 'Your Turn' practice screen with webcam feed"""
+        """Draw the 'Your Turn' practice screen with webcam feed and sewing guidance"""
         font = cv2.FONT_HERSHEY_TRIPLEX
         
         # Title at top
@@ -756,52 +843,34 @@ class WalletTutorialPlayer:
         cv2.putText(img, title, (text_x, text_y), font, font_scale, 
                    COLORS['text_accent'], thickness)
         
-        # Instruction text
-        instruction = "Now it's your turn! Practice what you learned in the video."
-        font_scale_small = 0.7
-        thickness_small = 1
-        (inst_w, inst_h), _ = cv2.getTextSize(instruction, font, font_scale_small, thickness_small)
-        inst_x = (self.width - inst_w) // 2
-        inst_y = text_y + text_h + 40
-        cv2.putText(img, instruction, (inst_x, inst_y), font, font_scale_small, 
-                   COLORS['text_secondary'], thickness_small)
+        # Camera feed area
+        camera_w = self.camera_w
+        camera_h = self.camera_h
+        camera_x = (self.width - camera_w) // 2
+        camera_y = text_y + text_h + 25
         
-        # Second instruction line
-        instruction2 = "When you're ready, click NEXT to continue to the next step."
-        (inst2_w, inst2_h), _ = cv2.getTextSize(instruction2, font, font_scale_small, thickness_small)
-        inst2_x = (self.width - inst2_w) // 2
-        inst2_y = inst_y + 25
-        cv2.putText(img, instruction2, (inst2_x, inst2_y), font, font_scale_small, 
-                   COLORS['text_secondary'], thickness_small)
-        
-        # Camera feed area (same dimensions as pattern mode)
-        camera_w = 544
-        camera_h = 400
-        camera_x = (self.width - camera_w) // 2  # Center horizontally
-        camera_y = inst2_y + 30
-        
-        # Draw camera frame border with glow effect (similar to pattern mode)
+        # Draw camera frame border with glow effect
         border_color_intensity = 0.4 + 0.3 * abs(math.sin(self.glow_phase * 0.7))
         border_color_glow = tuple(int(c * border_color_intensity) for c in COLORS['bright_blue'])
-        
-        # Draw outer glow
         cv2.rectangle(img, (camera_x - 5, camera_y - 5), 
                      (camera_x + camera_w + 5, camera_y + camera_h + 5), 
                      border_color_glow, 3)
         
-        # Display camera feed or placeholder
+        # Display camera feed with sewing guidance
         if camera_frame is not None:
-            # Resize camera to fill the entire area (like pattern mode)
-            cam_frame_resized = cv2.resize(camera_frame, (camera_w, camera_h))
+            cam_frame = cv2.resize(camera_frame, (camera_w, camera_h))
             
-            # Copy frame to main image
-            img[camera_y:camera_y + camera_h, camera_x:camera_x + camera_w] = cam_frame_resized
+            # --- Run sewing guidance on the camera frame ---
+            self.detect_frame_counter += 1
+            process_this_frame = (self.detect_frame_counter % self.detect_frame_skip == 0)
+            self.process_sewing_guidance(cam_frame, process_this_frame)
+            
+            # Copy processed frame to main image
+            img[camera_y:camera_y + camera_h, camera_x:camera_x + camera_w] = cam_frame
         else:
             # Dark background for camera
             cv2.rectangle(img, (camera_x, camera_y), (camera_x + camera_w, camera_y + camera_h), 
                          COLORS['dark_blue'], -1)
-            
-            # Show "Opening camera..." message
             msg = "Opening camera..."
             font_scale_msg = 0.8
             thickness_msg = 2
@@ -811,6 +880,13 @@ class WalletTutorialPlayer:
             cv2.putText(img, msg, (msg_x, msg_y), font, font_scale_msg, 
                        COLORS['text_primary'], thickness_msg)
         
+        # Draw sewing step instruction bar below camera
+        self.draw_sewing_step_bar(img, camera_x, camera_y, camera_w, camera_h)
+        
+        # Draw deviation warning above camera if needed
+        if self.deviation_warning:
+            self.draw_deviation_feedback(img, camera_x, camera_y, camera_w)
+        
         # Draw back button (top left)
         self.draw_button(img, self.back_button, COLORS['button_hover'])
         
@@ -819,6 +895,393 @@ class WalletTutorialPlayer:
         
         # Draw NEXT button to continue to next step (bottom right)
         self.draw_button(img, self.your_turn_next_button, COLORS['button_hover'])
+    
+    # ==========================================
+    # SEWING GUIDANCE METHODS
+    # ==========================================
+    
+    def detect_cloth_in_frame(self, cam_frame):
+        """Detect cloth using cloth.pt model"""
+        if self.cloth_model is None:
+            return False, None, 0.0
+        try:
+            results = self.cloth_model(
+                cam_frame, conf=0.3, imgsz=320, verbose=False
+            )
+            if len(results) > 0 and results[0].boxes is not None and len(results[0].boxes) > 0:
+                boxes = results[0].boxes
+                confidences = boxes.conf.cpu().numpy()
+                best_idx = int(np.argmax(confidences))
+                best_conf = float(confidences[best_idx])
+                best_box = boxes.xyxy[best_idx].cpu().numpy().astype(int)
+                return True, best_box, best_conf
+            return False, None, 0.0
+        except Exception as e:
+            print(f"Cloth detection error: {e}")
+            return False, None, 0.0
+    
+    def get_needle_roi(self, cam_frame):
+        """Extract ROI region around the fixed needle position"""
+        h, w = cam_frame.shape[:2]
+        x1 = max(0, self.needle_x - self.needle_roi_half)
+        y1 = max(0, self.needle_y - self.needle_roi_half)
+        x2 = min(w, self.needle_x + self.needle_roi_half)
+        y2 = min(h, self.needle_y + self.needle_roi_half)
+        roi = cam_frame[y1:y2, x1:x2].copy()
+        return roi, (x1, y1, x2, y2)
+    
+    def detect_cloth_edge_in_roi(self, roi):
+        """Detect cloth edge and orientation in needle ROI."""
+        if roi is None or roi.size == 0:
+            return False, None, 'vertical', 90.0, None
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        edges = cv2.Canny(blurred, 50, 150)
+        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if len(contours) == 0:
+            return False, None, 'vertical', 90.0, None
+        longest_contour = max(contours, key=cv2.contourArea)
+        if cv2.contourArea(longest_contour) < 50:
+            return False, None, 'vertical', 90.0, None
+
+        # Estimate edge angle with fitLine to classify vertical/horizontal.
+        orientation = 'vertical'
+        angle_deg = 90.0
+        if len(longest_contour) >= 2:
+            vx, vy, _, _ = cv2.fitLine(longest_contour, cv2.DIST_L2, 0, 0.01, 0.01)
+            angle_deg = abs(math.degrees(math.atan2(float(vy), float(vx))))
+            if angle_deg > 90:
+                angle_deg = 180 - angle_deg
+            orientation = 'vertical' if angle_deg >= 45 else 'horizontal'
+
+        # Top-most point of the detected line/edge within ROI.
+        top_idx = np.argmin(longest_contour[:, 0, 1])
+        top_pt = tuple(longest_contour[top_idx, 0])
+
+        M = cv2.moments(longest_contour)
+        if M["m00"] > 0:
+            cx = int(M["m10"] / M["m00"])
+            cy = int(M["m01"] / M["m00"])
+            return True, (cx, cy), orientation, angle_deg, top_pt
+        return False, None, orientation, angle_deg, top_pt
+
+    def update_motion_and_top_alignment(self, abs_edge_x, abs_edge_y, abs_top_pt):
+        """Detect upward cloth motion and whether line top is at needle center."""
+        self.edge_history.append((abs_edge_x, abs_edge_y))
+        if len(self.edge_history) > self.max_edge_history:
+            self.edge_history = self.edge_history[-self.max_edge_history:]
+
+        # Moving up means y decreases over time in image coordinates.
+        self.cloth_moving_up = False
+        if len(self.edge_history) >= 5:
+            recent = self.edge_history[-6:]
+            deltas = [recent[i][1] - recent[i - 1][1] for i in range(1, len(recent))]
+            avg_delta_y = float(np.mean(deltas))
+            self.cloth_moving_up = avg_delta_y < -0.8
+
+        self.top_line_at_needle = False
+        if abs_top_pt is not None:
+            top_dx = abs(abs_top_pt[0] - self.needle_x)
+            top_dy = abs(abs_top_pt[1] - self.needle_y)
+            self.top_line_at_needle = top_dx <= 25 and top_dy <= 25
+    
+    def check_cloth_positioning(self, edge_pos, roi_bounds, orientation):
+        """Check if cloth edge is properly positioned near the needle by orientation."""
+        if edge_pos is None:
+            return False
+        roi_x1, roi_y1, roi_x2, roi_y2 = roi_bounds
+        roi_w = roi_x2 - roi_x1
+        roi_h = roi_y2 - roi_y1
+        center_x = roi_w // 2
+        center_y = roi_h // 2
+        dx = abs(edge_pos[0] - center_x)
+        dy = abs(edge_pos[1] - center_y)
+
+        # If guide is fixed vertical, accept cloth in any orientation as long as
+        # the edge is near the needle center zone.
+        if self.guide_orientation_mode == 'vertical':
+            return dx < 40 and dy < 40
+
+        # For other modes, keep orientation-aware checks.
+        if orientation == 'vertical':
+            return dx < 25 and dy < 55
+        return dy < 25 and dx < 55
+    
+    def detect_seam_straightness(self):
+        """Detect if the seam line is straight using tracked points"""
+        if len(self.seam_points) < 5:
+            return True, 0.0
+        points = np.array(self.seam_points[-20:], dtype=np.float32)
+        if len(points) < 5:
+            return True, 0.0
+        vx, vy, x0, y0 = cv2.fitLine(points, cv2.DIST_L2, 0, 0.01, 0.01)
+        line_dir = np.array([float(vx), float(vy)])
+        line_point = np.array([float(x0), float(y0)])
+        deviations = []
+        for pt in points:
+            v = pt - line_point
+            proj = np.dot(v, line_dir)
+            closest = line_point + proj * line_dir
+            dist = np.linalg.norm(pt - closest)
+            deviations.append(dist)
+        max_dev = float(np.max(deviations))
+        avg_dev = float(np.mean(deviations))
+        self.seam_line_fit = (vx, vy, x0, y0)
+        return max_dev < self.max_deviation, avg_dev
+    
+    def process_sewing_guidance(self, cam_frame, process_this_frame):
+        """Main sewing guidance: cloth detection, edge analysis, guide line, straightness"""
+        # Always draw needle marker
+        self.draw_needle_marker(cam_frame)
+        
+        # --- CLOTH DETECTION ---
+        if process_this_frame and self.cloth_model is not None:
+            detected, bbox, confidence = self.detect_cloth_in_frame(cam_frame)
+            if detected:
+                self.cloth_detect_frames = min(
+                    self.cloth_detect_frames + 1, self.cloth_detect_threshold + 5
+                )
+                self.cloth_bbox = bbox
+                self.cloth_confidence = confidence
+                self.cloth_lost_frames = 0
+
+                # Lock cloth state after stable confirmation.
+                if self.cloth_detect_frames >= self.cloth_detect_threshold:
+                    self.cloth_locked = True
+            else:
+                self.cloth_lost_frames += 1
+                self.cloth_detect_frames = max(0, self.cloth_detect_frames - 1)
+
+                # Unlock only after prolonged loss, not immediate miss.
+                if self.cloth_lost_frames > self.cloth_lost_tolerance:
+                    self.cloth_locked = False
+                    self.cloth_bbox = None
+                    self.cloth_confidence = 0.0
+        
+        self.cloth_detected = self.cloth_locked
+        self.draw_cloth_status(cam_frame)
+        
+        # --- STATE TRANSITIONS ---
+        if not self.cloth_detected:
+            self.sewing_step = 0
+            self.cloth_edge_detected = False
+            self.guide_line_visible = False
+            self.deviation_warning = False
+            return
+        
+        # Cloth detected -> at least step 1 (positioning)
+        if self.sewing_step == 0:
+            self.sewing_step = 1
+        
+        # --- EDGE DETECTION IN NEEDLE ROI ---
+        roi, roi_bounds = self.get_needle_roi(cam_frame)
+        self.draw_needle_roi(cam_frame, roi_bounds)
+        
+        if process_this_frame:
+            edge_found, edge_pos, edge_orientation, edge_angle, top_pt = self.detect_cloth_edge_in_roi(roi)
+            self.cloth_edge_detected = edge_found
+            self.cloth_edge_position = edge_pos
+            self.current_edge_angle = edge_angle
+            
+            if edge_found:
+                # Draw edge point on camera frame
+                abs_x = roi_bounds[0] + edge_pos[0]
+                abs_y = roi_bounds[1] + edge_pos[1]
+                cv2.circle(cam_frame, (abs_x, abs_y), 5, (255, 0, 255), -1)
+
+                abs_top_pt = None
+                if top_pt is not None:
+                    abs_top_pt = (roi_bounds[0] + int(top_pt[0]), roi_bounds[1] + int(top_pt[1]))
+                    cv2.circle(cam_frame, abs_top_pt, 4, (0, 255, 255), -1)
+
+                self.update_motion_and_top_alignment(abs_x, abs_y, abs_top_pt)
+                
+                if self.guide_orientation_mode == 'auto':
+                    self.current_orientation = edge_orientation
+                else:
+                    self.current_orientation = self.guide_orientation_mode
+
+                if self.check_cloth_positioning(edge_pos, roi_bounds, self.current_orientation):
+                    self.guide_line_visible = True
+                    if self.sewing_step == 1:
+                        self.sewing_step = 2
+            else:
+                if self.sewing_step == 1:
+                    self.guide_line_visible = False
+                self.cloth_moving_up = False
+                self.top_line_at_needle = False
+            
+            # Track edge positions for straightness during sewing
+            if self.sewing_step == 2 and edge_found:
+                abs_x = roi_bounds[0] + edge_pos[0]
+                abs_y = roi_bounds[1] + edge_pos[1]
+                self.seam_points.append((abs_x, abs_y))
+                if len(self.seam_points) > self.max_seam_points:
+                    self.seam_points = self.seam_points[-self.max_seam_points:]
+        
+        # --- GUIDE LINE ---
+        # Guide line rendering is temporarily disabled.
+        
+        # --- SEAM STRAIGHTNESS CHECK ---
+        if self.sewing_step == 2 and len(self.seam_points) >= 5:
+            is_straight, deviation = self.detect_seam_straightness()
+            self.deviation_warning = not is_straight
+            self.deviation_amount = deviation
+    
+    def draw_needle_marker(self, cam_frame):
+        """Draw crosshair at the fixed needle position"""
+        size = 15
+        color = (0, 0, 255)  # Red
+        cv2.line(cam_frame, (self.needle_x, self.needle_y - size),
+                 (self.needle_x, self.needle_y + size), color, 2)
+        cv2.line(cam_frame, (self.needle_x - size, self.needle_y),
+                 (self.needle_x + size, self.needle_y), color, 2)
+        cv2.circle(cam_frame, (self.needle_x, self.needle_y), 8, color, 1)
+    
+    def draw_needle_roi(self, cam_frame, roi_bounds):
+        """Draw ROI box around needle area"""
+        x1, y1, x2, y2 = roi_bounds
+        cv2.rectangle(cam_frame, (x1, y1), (x2, y2), (0, 255, 255), 2)
+        cv2.putText(cam_frame, "NEEDLE ROI", (x1, y1 - 8),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1)
+    
+    def draw_cloth_status(self, cam_frame):
+        """Draw cloth detection status on camera frame"""
+        if self.cloth_detected:
+            if self.cloth_lost_frames > 0:
+                status = f"CLOTH TRACKING ({self.cloth_confidence:.0%})"
+            else:
+                status = f"CLOTH DETECTED ({self.cloth_confidence:.0%})"
+            color = (0, 255, 0)
+            if self.cloth_bbox is not None:
+                x1, y1, x2, y2 = self.cloth_bbox
+                cv2.rectangle(cam_frame, (x1, y1), (x2, y2), color, 2)
+        else:
+            status = "WAITING FOR CLOTH..."
+            color = (0, 165, 255)  # Orange
+        cv2.putText(cam_frame, status, (10, 25),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+
+        if self.cloth_edge_detected:
+            orientation_text = f"EDGE: {self.current_orientation.upper()} ({self.current_edge_angle:.1f} deg)"
+            cv2.putText(cam_frame, orientation_text, (10, 50),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, self.guide_line_color, 2)
+
+            motion_color = (0, 255, 0) if self.cloth_moving_up else (0, 165, 255)
+            top_color = (0, 255, 0) if self.top_line_at_needle else (0, 165, 255)
+            cv2.putText(cam_frame, f"MOVE UP: {'YES' if self.cloth_moving_up else 'NO'}", (10, 72),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, motion_color, 2)
+            cv2.putText(cam_frame, f"TOP AT NEEDLE: {'YES' if self.top_line_at_needle else 'NO'}", (10, 92),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, top_color, 2)
+    
+    def draw_guide_line(self, cam_frame):
+        """Draw dashed guide line from needle in current orientation."""
+        sx, sy = self.needle_x, self.needle_y
+        dash_len = 10
+        gap_len = 5
+
+        if self.current_orientation == 'vertical':
+            # Dashed line down
+            end_y = min(sy + self.guide_line_length, cam_frame.shape[0] - 1)
+            y = sy
+            while y < end_y:
+                y_end = min(y + dash_len, end_y)
+                cv2.line(cam_frame, (sx, y), (sx, y_end), self.guide_line_color, 2)
+                y = y_end + gap_len
+
+            # Dashed line up
+            top_y = max(sy - self.guide_line_length, 0)
+            y = sy
+            while y > top_y:
+                y_end = max(y - dash_len, top_y)
+                cv2.line(cam_frame, (sx, y), (sx, y_end), self.guide_line_color, 2)
+                y = y_end - gap_len
+        else:
+            # Dashed line right
+            end_x = min(sx + self.guide_line_length, cam_frame.shape[1] - 1)
+            x = sx
+            while x < end_x:
+                x_end = min(x + dash_len, end_x)
+                cv2.line(cam_frame, (x, sy), (x_end, sy), self.guide_line_color, 2)
+                x = x_end + gap_len
+
+            # Dashed line left
+            left_end = max(sx - self.guide_line_length, 0)
+            x = sx
+            while x > left_end:
+                x_end = max(x - dash_len, left_end)
+                cv2.line(cam_frame, (x, sy), (x_end, sy), self.guide_line_color, 2)
+                x = x_end - gap_len
+
+        cv2.putText(cam_frame, f"GUIDE: {self.current_orientation.upper()}", (sx + 10, sy - 12),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, self.guide_line_color, 1)
+    
+    def draw_sewing_step_bar(self, img, camera_x, camera_y, camera_w, camera_h):
+        """Draw current sewing guidance step instruction below camera"""
+        if self.sewing_step >= len(self.sewing_guidance_steps):
+            return
+        step = self.sewing_guidance_steps[self.sewing_step]
+        bar_y = camera_y + camera_h + 8
+        bar_h = 42
+        # Background bar
+        overlay = img.copy()
+        cv2.rectangle(overlay,
+                      (camera_x, bar_y),
+                      (camera_x + camera_w, bar_y + bar_h),
+                      (0, 0, 0), -1)
+        cv2.addWeighted(overlay, 0.7, img, 0.3, 0, img)
+        # Border
+        glow = 0.5 + 0.5 * abs(math.sin(self.glow_phase * 1.2))
+        border_col = tuple(int(c * glow) for c in COLORS['cyan'])
+        cv2.rectangle(img, (camera_x, bar_y), (camera_x + camera_w, bar_y + bar_h), border_col, 2)
+        # Step title
+        step_text = f"STEP {self.sewing_step + 1}: {step['title']}"
+        cv2.putText(img, step_text, (camera_x + 10, bar_y + 18),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, COLORS['text_accent'], 2)
+        # Instruction
+        orientation_note = f" [{self.current_orientation.upper()}]" if self.sewing_step >= 1 else ""
+        cv2.putText(img, step['instruction'] + orientation_note, (camera_x + 10, bar_y + 36),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, COLORS['text_secondary'], 1)
+    
+    def draw_deviation_feedback(self, img, camera_x, camera_y, camera_w):
+        """Draw seam deviation warning overlay above camera"""
+        pulse = 0.5 + 0.5 * abs(math.sin(self.glow_phase * 3))
+        bar_y = camera_y + 5
+        bar_h = 35
+        overlay = img.copy()
+        cv2.rectangle(overlay,
+                      (camera_x + 5, bar_y),
+                      (camera_x + camera_w - 5, bar_y + bar_h),
+                      (0, 0, int(200 * pulse)), -1)
+        cv2.addWeighted(overlay, 0.6, img, 0.4, 0, img)
+        warning = f"SEAM DEVIATION: {self.deviation_amount:.1f}px - Straighten your line!"
+        (tw, _), _ = cv2.getTextSize(warning, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
+        tx = camera_x + (camera_w - tw) // 2
+        cv2.putText(img, warning, (tx, bar_y + 24),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
+    
+    def reset_sewing_guidance(self):
+        """Reset all sewing guidance state for a new your-turn session"""
+        self.sewing_step = 0
+        self.cloth_detected = False
+        self.cloth_bbox = None
+        self.cloth_confidence = 0.0
+        self.cloth_detect_frames = 0
+        self.cloth_locked = False
+        self.cloth_lost_frames = 0
+        self.cloth_edge_detected = False
+        self.cloth_edge_position = None
+        self.guide_line_visible = False
+        self.deviation_warning = False
+        self.deviation_amount = 0.0
+        self.seam_points = []
+        self.seam_line_fit = None
+        self.detect_frame_counter = 0
+        self.current_orientation = 'vertical'
+        self.current_edge_angle = 90.0
+        self.cloth_moving_up = False
+        self.top_line_at_needle = False
+        self.edge_history = []
     
     def cleanup(self):
         """Release video capture and audio resources"""
