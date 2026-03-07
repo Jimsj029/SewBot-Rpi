@@ -2,10 +2,8 @@ import cv2
 import numpy as np
 import math
 import os
-import time
 from ultralytics import YOLO
 from music_manager import get_music_manager
-from skimage.morphology import skeletonize
 
 
 class PatternMode:
@@ -38,21 +36,6 @@ class PatternMode:
         self.score_panel_width = 200
         self.score_panel_height = 250
         
-        # Manual ROI control (detection box) - 1 whole segment system
-        # ROI coordinates are relative to camera_width x camera_height (560x420)
-        self.num_roi_segments = 1
-        self.segment_height = self.camera_height // self.num_roi_segments  # 420 / 1 = 420 pixels (full height)
-        self.current_roi_segment = 1  # Always 1 since we have 1 segment
-        
-        self.roi_x = 205  # Fallback: centered horizontally
-        self.roi_width = 156  # Fallback: width of ROI box
-        self.roi_height = 300  # Fallback: height
-        self.roi_y = 0  # Fallback: Y position
-
-        # Auto ROI: bounding box of pattern pixels in mask coords (200x300), set by load_blueprint
-        self.pattern_bbox = None  # (x1, y1, x2, y2) in mask coordinate space
-        self.roi_padding = 10     # Padding in mask pixels around the pattern bounds
-        
         # Back button (top left)
         self.back_button = {'x': 20, 'y': 20, 'w': 120, 'h': 50}
         
@@ -71,7 +54,6 @@ class PatternMode:
         self.pattern_progress = 0.0  # 0-100%
         self.raw_progress = 0.0  # Raw actual progress for evaluation
         self.session_start_time = None
-        self.progress_pixel_count = 0  # Track progress pixels for faster calculation
         
         # Evaluation state
         self.is_evaluated = False
@@ -85,44 +67,7 @@ class PatternMode:
         
         # Real-time stitch tracking for progressive coloring
         self.completed_stitch_mask = None  # Accumulated mask of all detected stitches
-        self.proximity_radius = 45  # Increased - spreads cyan color further to cover corners better
-        
-        # Track detected stitch positions to prevent re-detection
-        self.detected_stitch_positions = []  # List of (x, y, w, h) tuples in camera frame coordinates
-        self.stitch_overlap_threshold = 0.5  # IoU threshold for duplicate detection (0.5 = 50% overlap required)
-        self.max_stitch_history = 2000  # Limit stitch storage to prevent unbounded growth
-        self.stitch_history_trim = 1000  # Trim to this size when limit reached
-        
-        # Grid-based duplicate tracking (O(1) lookup instead of O(n))
-        self.stitch_grid = set()  # Set of (grid_x, grid_y) tuples for fast duplicate checking
-        self.grid_base_size = 16  # Base grid cell size (adaptive based on density)
-        self.grid_density = {}  # Track density per cell for adaptive sizing
-        self.grid_max_density = 5.0  # Max density factor for grid shrinking
-        
-        # Partial frame updates (ROI-based processing)
-        self.updated_regions = []  # Track regions that changed this frame
-        self.roi_margin = 10  # Margin around updated regions (pixels)
-        
-        # Skeleton-based pattern tracking (STEP 4-6 & 12-13)
-        self.pattern_skeleton = None  # Skeletonized pattern path
-        self.pattern_mask = None  # Full pattern mask for overlap checking
-        self.distance_map = None  # Distance transform from skeleton
-        self.pattern_distance_map = None  # Distance transform from FULL pattern for fast validation
-        self.distance_tolerance = 20  # Pixels - tolerance for real stitch detection (wider = more forgiving)
-        self.overlap_ratio_threshold = 0.1  # 10% overlap required (fallback if distance check is too strict)
-        self.visited_mask = None  # Tracks which skeleton pixels have been visited
-        self.completed_mask = None  # Marks completed sections
-        self.tolerance = 15  # Increased - allow more deviation from skeleton (better for corners)
-        
-        # Cached pattern rendering (prevent reloading every frame!)
-        self.cached_pattern_overlay = None
-        self.cached_pattern_alpha = None
-        self.cached_pattern_level = None  # Track which level is cached
-
-        # Cached realtime pattern (only recompute when new stitches detected)
-        self.cached_realtime_pattern = None
-        self.realtime_pattern_dirty = True
-        self._cached_pattern_pixels = None  # Cache total pattern pixel count
+        self.proximity_radius = 30  # Pixels around completed stitches that turn cyan
         
         # Segment tracking (divide pattern into 4 quarters)
         self.current_segment = 1  # 1=first 25%, 2=25-50%, 3=50-75%, 4=75-100%
@@ -134,83 +79,59 @@ class PatternMode:
         }
         
         # Out-of-segment detection
-        # Removed: out_of_segment_warning, warning_flash_phase (dead code - warning never triggers)
-        # Removed: current_combo, max_combo, stitches_detected (tracked but never displayed)
+        self.out_of_segment_warning = False
+        self.warning_message = ""
+        self.warning_flash_phase = 0
+        # Combo and stitch tracking
+        self.current_combo = 0
+        self.max_combo = 0
+        self.stitches_detected = 0
         
         # Load models from models directory
         models_dir = os.path.join(os.path.dirname(__file__), 'models')
         
         # Detection settings
-        self.confidence_threshold = 0.2  # Lowered - model detects stitches but with lower confidence
+        self.confidence_threshold = 0.3  # Lowered for INT8 model (produces lower confidence scores)
         self.iou_threshold = 0.6  # Intersection over Union threshold
         
         # Performance optimization: Frame skipping for detection
         # Process detection every N frames to reduce CPU load
-        self.frame_skip = 1  # Process every frame for better corner detection (may reduce FPS slightly)
+        self.frame_skip = 2  # Process every 2nd frame (doubles FPS)
         self.frame_counter = 0
-        self.last_detected_masks = []  # Cache last detection results
+        self.last_cloth_bbox = None  # Cache last cloth detection result
+        self.smooth_cloth_bbox = None  # Smoothed bbox for stable overlay
+        self.bbox_smooth_alpha = 0.15  # EMA factor: lower = smoother/slower
+        self.bbox_move_threshold = 8   # Pixels: ignore tiny jitter movements
         
-        # Process only top N detections for box computation (huge performance boost)
-        self.max_detections_to_process = 3  # Process top 3 detections (reduced from 5 for better FPS)
-        
-        # Optical flow tracking for FPS optimization (Target: 20-25 FPS)
-        # Reduces YOLO calls by tracking between detections using Lucas-Kanade optical flow
-        self.YOLO_INTERVAL = 4  # Run YOLO every 4 frames, track in between
-        self.prev_gray = None  # Previous grayscale frame for optical flow
-        self.prev_point = None  # Previous tracked point (center of detection)
-        self.optical_flow_params = dict(
-            winSize=(15, 15),
-            maxLevel=2,
-            criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03)
-        )
-        
-        # Heavy operation frame skipping (reduce expensive processing)
-        self.heavy_ops_interval = 3  # Run expensive mapping operations every 3 frames
-        
-        # Confidence gating for stability (prevents drift)
-        self.tracking_error_threshold = 50.0  # Re-run YOLO if tracking error exceeds this
-        
-        # FPS tracking
-        self.fps_start_time = time.time()
-        self.fps_frame_count = 0
-        self.current_fps = 0.0
-        
-        # Load stitch detection model (ONNX model)
+        # Load cloth detection model
         try:
-            # Use ONNX model (best.onnx)
-            stitch_model_path = os.path.join(models_dir, 'best.onnx')
+            cloth_model_path = os.path.join(models_dir, 'cloth.onnx')
             
-            if os.path.exists(stitch_model_path):
-                print(f"Loading stitch detection model: {stitch_model_path}")
-                self.stitch_model = YOLO(stitch_model_path, task='detect')
-                print(f"✓ Stitch detection model loaded successfully!")
-                print(f"  Model type: {self.stitch_model.task if hasattr(self.stitch_model, 'task') else 'unknown'}")
+            if os.path.exists(cloth_model_path):
+                print(f"Loading cloth detection model: {cloth_model_path}")
+                self.cloth_model = YOLO(cloth_model_path, task='detect')
+                print(f"✓ Cloth detection model loaded successfully!")
                 
                 # Print available classes
-                if hasattr(self.stitch_model, 'names'):
+                if hasattr(self.cloth_model, 'names'):
                     print(f"  Detected classes:")
-                    for idx, name in self.stitch_model.names.items():
+                    for idx, name in self.cloth_model.names.items():
                         print(f"    Class {idx}: {name}")
                 print(f"  Confidence threshold: {self.confidence_threshold}")
-                print(f"  IOU threshold: {self.iou_threshold}")
                 
                 # Test the model with dummy data
-                print("  Testing model inference...")
-                try:
-                    test_img = np.zeros((256, 256, 3), dtype=np.uint8)
-                    test_result = self.stitch_model(test_img, conf=self.confidence_threshold, verbose=False)
-                    print("  ✓ Model test successful!")
-                except Exception as test_error:
-                    print(f"  ⚠ Model test failed (but model is loaded): {test_error}")
-                    print("  Model will still be used for real-time detection")
+                print("  Testing cloth model inference...")
+                test_img = np.zeros((560, 560, 3), dtype=np.uint8)
+                self.cloth_model(test_img, conf=self.confidence_threshold, verbose=False)
+                print("  ✓ Cloth model test successful!")
             else:
-                print(f"⚠ Stitch model not found: {stitch_model_path}")
-                self.stitch_model = None
+                print(f"⚠ Cloth model not found: {cloth_model_path}")
+                self.cloth_model = None
         except Exception as e:
-            print(f"⚠ ERROR loading stitch model: {e}")
+            print(f"⚠ ERROR loading cloth model: {e}")
             import traceback
             traceback.print_exc()
-            self.stitch_model = None
+            self.cloth_model = None
         
         # Music flag to track if music is playing
         self.music_playing = False
@@ -235,7 +156,7 @@ class PatternMode:
         music_manager.play_sound_effect('button_click.mp3')
     
     def load_blueprint(self, level):
-        """Load binary mask for the pattern (cached for performance)"""
+        """Load binary mask for the pattern"""
         # Reset progress if level changed
         if level != self.current_level_tracking:
             self.reset_progress()
@@ -251,65 +172,9 @@ class PatternMode:
         
         mask = cv2.resize(mask, (self.uniform_width, self.uniform_height))
         
-        # OPTIMIZATION: Store pattern mask as binary (0 or 1) for fast distance checks
-        self.pattern_mask = (mask > 0).astype(np.uint8)
-
-        # Compute tight bounding box of pattern pixels, padded by roi_padding
-        ys, xs = np.where(self.pattern_mask > 0)
-        if len(xs) > 0:
-            bx1 = max(0, int(xs.min()) - self.roi_padding)
-            by1 = max(0, int(ys.min()) - self.roi_padding)
-            bx2 = min(self.uniform_width,  int(xs.max()) + self.roi_padding + 1)
-            by2 = min(self.uniform_height, int(ys.max()) + self.roi_padding + 1)
-            self.pattern_bbox = (bx1, by1, bx2, by2)
-            print(f"✓ Pattern bbox (mask coords): ({bx1},{by1})-({bx2},{by2})")
-        else:
-            self.pattern_bbox = (0, 0, self.uniform_width, self.uniform_height)
-
-        # 🎯 STEP 1: COMPUTE DISTANCE MAP (for ultra-fast stitch validation)
-        # Distance transform gives distance to nearest pattern pixel at ANY point
-        # This allows forgiving validation: "is stitch within N pixels of pattern?"
-        inv_mask = 1 - self.pattern_mask  # Invert (distanceTransform expects background=0)
-        self.pattern_distance_map = cv2.distanceTransform(
-            inv_mask,
-            cv2.DIST_L2,
-            5
-        )
-        print(f"✓ Pattern distance map computed (shape: {self.pattern_distance_map.shape})")
-        
-        # STEP 4 — CREATE SKELETON PATH
-        # Create skeleton from pattern for precise path tracking
-        try:
-            binary = mask > 0
-            skeleton = skeletonize(binary)
-            self.pattern_skeleton = (skeleton * 255).astype(np.uint8)
-            
-            # STEP 5 — PRECOMPUTE DISTANCE MAP
-            # Distance map shows distance from skeleton at each pixel
-            self.distance_map = cv2.distanceTransform(
-                255 - self.pattern_skeleton,
-                cv2.DIST_L2,
-                5
-            )
-            
-            # Initialize visited and completed masks
-            self.visited_mask = np.zeros_like(self.pattern_skeleton)
-            self.completed_mask = np.zeros_like(self.pattern_skeleton)
-            
-    
-        except Exception as e:
-            print(f"⚠ Warning: Could not create skeleton: {e}")
-            self.pattern_skeleton = None
-            self.distance_map = None
-        
         # Convert mask to white overlay (pattern lines)
         overlay = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
         alpha = mask / 255.0
-        
-        # Cache the result to avoid reloading every frame!
-        self.cached_pattern_overlay = overlay
-        self.cached_pattern_alpha = alpha
-        self.cached_pattern_level = level
         
         return overlay, alpha
     
@@ -321,30 +186,15 @@ class PatternMode:
         self.highest_segment_reached = 1
         self.current_accuracy = 0.0
         self.total_score = 0
+        self.out_of_segment_warning = False
+        self.warning_message = ""
+        self.current_combo = 0
+        self.max_combo = 0
+        self.stitches_detected = 0
         self.is_evaluated = False
         self.level_completed = False
         # Clear accumulated stitch mask for real-time coloring
         self.completed_stitch_mask = None
-        # Clear tracked stitch positions
-        self.detected_stitch_positions = []
-        self.stitch_grid.clear()  # Clear grid-based tracking
-        self.grid_density.clear()  # Clear density tracking
-        self.updated_regions = []  # Clear region tracking
-        # Reset ROI to first segment
-        self.current_roi_segment = 1
-        self.roi_y = 0
-        # Clear skeleton tracking masks
-        if self.pattern_skeleton is not None:
-            self.visited_mask = np.zeros_like(self.pattern_skeleton)
-            self.completed_mask = np.zeros_like(self.pattern_skeleton)
-        # Reset optical flow tracking
-        self.prev_gray = None
-        self.prev_point = None
-        # Clear realtime pattern cache
-        self.cached_realtime_pattern = None
-        self.realtime_pattern_dirty = True
-        self._cached_pattern_pixels = None
-        # pattern_bbox is tied to the loaded mask, not progress — keep it as-is
         print(f"🔄 Progress reset for Level {self.current_level}")
     
     def create_realtime_pattern(self, overlay, alpha):
@@ -361,10 +211,6 @@ class PatternMode:
         if overlay is None or alpha is None:
             return None
         
-        # Return cached result when nothing has changed (avoids resize + boolean ops every frame)
-        if not self.realtime_pattern_dirty and self.cached_realtime_pattern is not None:
-            return self.cached_realtime_pattern
-        
         # Create colored overlay - start with yellow (uncompleted)
         colored_overlay = overlay.copy()
         height, width = overlay.shape[:2]
@@ -373,169 +219,22 @@ class PatternMode:
         pattern_pixels = alpha > 0.1
         colored_overlay[pattern_pixels] = self.segment_colors['current']
         
-        # If we have completed stitches, color those pattern pixels cyan
+        # If we have completed stitches, color nearby pattern pixels cyan
         if self.completed_stitch_mask is not None:
             # Resize completed mask to match pattern size
             completed_mask_resized = cv2.resize(self.completed_stitch_mask, (width, height))
-            completed_binary = (completed_mask_resized > 128)
             
-            # Only color pattern pixels that have completed stitches (no dilation)
-            colored_overlay[pattern_pixels & completed_binary] = self.segment_colors['completed']
+            # Dilate the completed stitch mask to affect nearby pattern areas
+            kernel_size = self.proximity_radius
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+            proximity_mask = cv2.dilate(completed_mask_resized, kernel, iterations=1)
+            
+            # Only color pattern pixels that are near completed stitches
+            completed_pattern_pixels = np.logical_and(pattern_pixels, proximity_mask > 0)
+            colored_overlay[completed_pattern_pixels] = self.segment_colors['completed']
         
-        self.cached_realtime_pattern = colored_overlay
-        self.realtime_pattern_dirty = False
         return colored_overlay
     
-    def is_stitch_already_detected(self, box_x, box_y, box_w, box_h):
-        """Check if a detected stitch overlaps significantly with any already tracked stitch.
-        
-        Args:
-            box_x, box_y, box_w, box_h: Bounding box of new detection in camera frame coordinates
-            
-        Returns:
-            True if this stitch was already detected (overlaps with existing), False otherwise
-        """
-        # Limit stitch history to prevent unbounded growth
-        if len(self.detected_stitch_positions) > self.max_stitch_history:
-            # Keep only the most recent stitches
-            self.detected_stitch_positions = self.detected_stitch_positions[-self.stitch_history_trim:]
-            if self.frame_counter % 60 == 0:
-                print(f"🧹 Trimmed stitch history to {len(self.detected_stitch_positions)} (was >{self.max_stitch_history})")
-        
-        # Debug: Show tracking count every 60 frames
-        if self.frame_counter % 60 == 0 and len(self.detected_stitch_positions) > 0:
-            print(f"📊 Currently tracking {len(self.detected_stitch_positions)} stitch positions")
-        
-        if len(self.detected_stitch_positions) == 0:
-            return False
-        
-        # OPTIMIZATION: Quick center-distance check first (faster than IoU)
-        return self._quick_duplicate_check(box_x, box_y, box_w, box_h)
-    
-    def get_adaptive_grid_cell(self, x, y):
-        """Get grid cell with adaptive sizing based on local density.
-        
-        Args:
-            x, y: Coordinates
-            
-        Returns:
-            (cell_x, cell_y): Grid cell coordinates
-        """
-        # First get base cell to check density
-        base_cell_x = int(x / self.grid_base_size)
-        base_cell_y = int(y / self.grid_base_size)
-        base_cell = (base_cell_x, base_cell_y)
-        
-        # Get density factor (higher density = smaller cells)
-        density = self.grid_density.get(base_cell, 0)
-        density_factor = max(1.0, min(density / 5.0, self.grid_max_density))
-        
-        # Calculate adaptive cell size
-        cell_size = max(8, int(self.grid_base_size / density_factor))
-        
-        # Return adaptive cell coordinates
-        cell_x = int(x / cell_size)
-        cell_y = int(y / cell_size)
-        return (cell_x, cell_y)
-    
-    def update_grid_density(self, x, y):
-        """Update density counter for a grid cell.
-        
-        Args:
-            x, y: Coordinates where stitch was detected
-        """
-        base_cell_x = int(x / self.grid_base_size)
-        base_cell_y = int(y / self.grid_base_size)
-        base_cell = (base_cell_x, base_cell_y)
-        
-        self.grid_density[base_cell] = self.grid_density.get(base_cell, 0) + 1
-    
-    def merge_overlapping_regions(self, regions):
-        """Merge overlapping bounding boxes.
-        
-        Args:
-            regions: List of (x1, y1, x2, y2) tuples
-            
-        Returns:
-            List of merged regions
-        """
-        if not regions:
-            return []
-        
-        # Sort by x1 coordinate
-        sorted_regions = sorted(regions, key=lambda r: r[0])
-        merged = [sorted_regions[0]]
-        
-        for current in sorted_regions[1:]:
-            last = merged[-1]
-            # Check if regions overlap or are close
-            if (current[0] <= last[2] + self.roi_margin and
-                current[1] <= last[3] + self.roi_margin and
-                current[2] >= last[0] - self.roi_margin and
-                current[3] >= last[1] - self.roi_margin):
-                # Merge
-                merged[-1] = (
-                    min(last[0], current[0]),
-                    min(last[1], current[1]),
-                    max(last[2], current[2]),
-                    max(last[3], current[3])
-                )
-            else:
-                merged.append(current)
-        
-        return merged
-    
-    def is_in_updated_region(self, x, y, w, h):
-        """Check if a stitch bounding box intersects any updated region.
-        
-        Args:
-            x, y, w, h: Stitch bounding box
-            
-        Returns:
-            True if stitch is in an updated region
-        """
-        if not self.updated_regions:
-            # No region tracking - process everything
-            return True
-        
-        stitch_x1, stitch_y1 = x, y
-        stitch_x2, stitch_y2 = x + w, y + h
-        
-        for region in self.updated_regions:
-            rx1, ry1, rx2, ry2 = region
-            # Check intersection
-            if (stitch_x2 >= rx1 and stitch_x1 <= rx2 and
-                stitch_y2 >= ry1 and stitch_y1 <= ry2):
-                return True
-        
-        return False
-    
-    def _quick_duplicate_check(self, box_x, box_y, box_w, box_h, threshold=10):
-        """Fast duplicate detection using adaptive grid hashing.
-        
-        Args:
-            box_x, box_y, box_w, box_h: Bounding box coordinates
-            threshold: Distance threshold in pixels (default 10)
-            
-        Returns:
-            True if duplicate detected, False otherwise
-        """
-        cx = box_x + box_w // 2
-        cy = box_y + box_h // 2
-        
-        # Adaptive grid-based duplicate check (O(1) lookup!)
-        grid_cell = self.get_adaptive_grid_cell(cx, cy)
-        
-        if grid_cell in self.stitch_grid:
-            if self.frame_counter % 60 == 0:
-                print(f"  ✋ BLOCKED duplicate (already accepted at grid cell {grid_cell})")
-            return True
-        
-        return False  # Not yet accepted — let update_game_stats validate and add to grid
-    
-    def _legacy_iou_check(self, box_x, box_y, box_w, box_h):
-        """Legacy IoU-based duplicate detection (kept for reference, not used by default)."""
-        return False  # Disabled - using faster center-based check now
 
     def draw_glow_rect(self, img, x, y, w, h, color, glow_intensity):
         """Draw rectangle with glow effect"""
@@ -584,24 +283,6 @@ class PatternMode:
         
         # Draw back button (top left)
         self.draw_back_button(frame)
-        
-        # Draw FPS counter (top right)
-        if self.current_fps > 0:
-            fps_text = f"FPS: {self.current_fps:.1f}"
-            font_scale = 0.5
-            thickness = 1
-            (text_w, text_h), _ = cv2.getTextSize(fps_text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)
-            fps_x = self.width - text_w - 20
-            fps_y = 30
-            # Color based on FPS (green if good, yellow if okay, red if low)
-            if self.current_fps >= 20:
-                fps_color = (0, 255, 0)  # Green
-            elif self.current_fps >= 15:
-                fps_color = (0, 255, 255)  # Yellow
-            else:
-                fps_color = (0, 100, 255)  # Red
-            cv2.putText(frame, fps_text, (fps_x, fps_y), cv2.FONT_HERSHEY_SIMPLEX, 
-                       font_scale, fps_color, thickness)
         
         # Draw camera feed
         self.draw_camera_feed(frame, camera_frame)
@@ -655,431 +336,121 @@ class PatternMode:
         else:
             cam_frame = cv2.resize(camera_frame, (self.camera_width, self.camera_height))
             
-            # Load pattern mask for comparison (CACHED - only reloads if level changed!)
-            if self.cached_pattern_level != self.current_level:
-                # Level changed, reload pattern
-                pattern_overlay, pattern_alpha = self.load_blueprint(self.current_level)
-            else:
-                # Use cached pattern (NO recomputation!)
-                pattern_overlay = self.cached_pattern_overlay
-                pattern_alpha = self.cached_pattern_alpha
+            # Load pattern mask
+            pattern_overlay, pattern_alpha = self.load_blueprint(self.current_level)
             
-            # Run stitch detection using ONNX detection model with ROI optimization
-            detected_stitch_masks = []
-            detection_overlay = None
-            roi_bounds = None  # Store ROI boundaries for visualization
-            
-            # Clear updated regions for this frame (partial frame updates)
-            self.updated_regions = []
-            
-            # Frame skipping for performance optimization
+            # Run cloth detection to find where to position the pattern
+            cloth_bbox = None
             self.frame_counter += 1
-            self.fps_frame_count += 1
-            
-            # Calculate FPS every 30 frames
-            if self.fps_frame_count >= 30:
-                elapsed = time.time() - self.fps_start_time
-                self.current_fps = self.fps_frame_count / elapsed if elapsed > 0 else 0
-                self.fps_frame_count = 0
-                self.fps_start_time = time.time()
-                print(f"⚡ FPS: {self.current_fps:.1f}")
-            
             process_detection = (self.frame_counter % self.frame_skip == 0)
             
-            if self.stitch_model is not None:
+            if self.cloth_model is not None:
                 try:
-                    # Calculate ROI Y position based on current segment (top-to-bottom)
-                    self.roi_y = (self.current_roi_segment - 1) * self.segment_height
-                    
-                    # Use cached results if skipping this frame
                     if not process_detection:
-                        detected_stitch_masks = self.last_detected_masks
+                        cloth_bbox = self.last_cloth_bbox
                     else:
-                        # ========== PATTERN-FITTED ROI (auto from binary mask bbox) ==========
-
-                        # Translate pattern bounding box from mask coords to camera frame coords
-                        # Pattern overlay is centered: offset = (camera_size - uniform_size) // 2
-                        _px_off = (self.camera_width  - self.uniform_width)  // 2  # 180
-                        _py_off = (self.camera_height - self.uniform_height) // 2  # 60
-
-                        # Minimum ROI dimensions so YOLO always gets enough context.
-                        # Most level patterns are only ~60px wide — without a minimum the
-                        # 256×256 resize would distort them beyond recognition.
-                        _min_roi_w = 200
-                        _min_roi_h = 240
-
-                        if self.pattern_bbox is not None:
-                            bx1, by1, bx2, by2 = self.pattern_bbox
-                            roi_x1 = bx1 + _px_off
-                            roi_y1 = by1 + _py_off
-                            roi_x2 = bx2 + _px_off
-                            roi_y2 = by2 + _py_off
-
-                            # Expand symmetrically if narrower/shorter than minimum
-                            roi_cx = (roi_x1 + roi_x2) // 2
-                            roi_cy = (roi_y1 + roi_y2) // 2
-                            if roi_x2 - roi_x1 < _min_roi_w:
-                                roi_x1 = roi_cx - _min_roi_w // 2
-                                roi_x2 = roi_cx + _min_roi_w // 2
-                            if roi_y2 - roi_y1 < _min_roi_h:
-                                roi_y1 = roi_cy - _min_roi_h // 2
-                                roi_y2 = roi_cy + _min_roi_h // 2
-
-                            roi_x1 = max(0, roi_x1)
-                            roi_y1 = max(0, roi_y1)
-                            roi_x2 = min(self.camera_width,  roi_x2)
-                            roi_y2 = min(self.camera_height, roi_y2)
-                        else:
-                            # Fallback to manual values if mask not loaded yet
-                            roi_x1 = max(0, self.roi_x)
-                            roi_y1 = max(0, self.roi_y)
-                            roi_x2 = min(self.camera_width,  self.roi_x + self.roi_width)
-                            roi_y2 = min(self.camera_height, self.roi_y + self.roi_height)
+                        # Pass cam_frame directly — YOLO letterboxes internally and
+                        # returns xyxy already in cam_frame coordinate space
+                        results = self.cloth_model(
+                            cam_frame,
+                            conf=self.confidence_threshold,
+                            iou=self.iou_threshold,
+                            imgsz=560,
+                            verbose=False
+                        )
                         
-                        # Store ROI bounds for visualization
-                        roi_bounds = (roi_x1, roi_y1, roi_x2, roi_y2)
+                        if len(results) > 0 and results[0].boxes is not None and len(results[0].boxes) > 0:
+                            boxes = results[0].boxes
+                            confs = boxes.conf.cpu().numpy()
+                            best_idx = int(np.argmax(confs))
+                            xyxy = boxes[best_idx].xyxy[0].cpu().numpy()
+                            
+                            x1 = int(xyxy[0])
+                            y1 = int(xyxy[1])
+                            x2 = int(xyxy[2])
+                            y2 = int(xyxy[3])
+                            cloth_bbox = (x1, y1, x2, y2)
+                            print(f"👕 Cloth detected: conf={float(confs[best_idx]):.2f}")
                         
-                        # Extract ROI from camera frame
-                        roi_frame = cam_frame[roi_y1:roi_y2, roi_x1:roi_x2].copy()
-                        
-                        # Convert ROI to grayscale for optical flow
-                        gray_roi = cv2.cvtColor(roi_frame, cv2.COLOR_BGR2GRAY)
-                        
-                        # OPTIMIZATION: Run YOLO every N frames, track with optical flow in between
-                        run_yolo = (self.frame_counter % self.YOLO_INTERVAL == 0) or (self.prev_point is None)
-                        
-                        if run_yolo:
-                            # YOLO DETECTION PHASE
-                            # ONNX model requires 256x256 input (fixed size)
-                            roi_resized = cv2.resize(roi_frame, (256, 256))
-                            
-                            # Run inference ONLY on ROI
-                            results = self.stitch_model(
-                                roi_resized, 
-                                conf=self.confidence_threshold,
-                                iou=self.iou_threshold,
-                                imgsz=256,
-                                max_det=10,  # Limit max detections to reduce processing load
-                                verbose=False
-                            )
-                            
-                            # Debug: Show detection count
-                            if len(results) > 0 and results[0].boxes is not None:
-                                num_raw_detections = len(results[0].boxes)
-                                if num_raw_detections > 0 and self.frame_counter % 10 == 0:
-                                    print(f"🔍 YOLO: {num_raw_detections} detections in ROI at ({roi_x1},{roi_y1})")
-                            
-                            # Get detection visualization from YOLO
-                            roi_detection_overlay = results[0].plot(boxes=True, labels=False)
-                            
-                            # Resize detection overlay back to ROI size
-                            roi_detection_overlay = cv2.resize(roi_detection_overlay, (roi_x2 - roi_x1, roi_y2 - roi_y1))
-                            
-                            # Create full frame detection overlay and place ROI result
-                            detection_overlay = cam_frame.copy()
-                            detection_overlay[roi_y1:roi_y2, roi_x1:roi_x2] = roi_detection_overlay
-                            
-                            # Extract best detection for optical flow tracking
-                            best_detection_point = None
-                            
-                            # Extract bounding boxes and convert to masks
-                            # OPTIMIZATION: Only process top detections to reduce CPU load
-                            for result in results:
-                                if hasattr(result, 'boxes') and result.boxes is not None:
-                                    boxes = result.boxes
-                                
-                                # ROI dimensions
-                                roi_h = roi_y2 - roi_y1
-                                roi_w = roi_x2 - roi_x1
-                                
-                                # Sort by confidence and take top N only
-                                confidences = boxes.conf.cpu().numpy()
-                                
-                                # Filter by confidence threshold first
-                                valid_indices = [i for i, conf in enumerate(confidences) if conf >= self.confidence_threshold]
-                                
-                                if len(valid_indices) == 0:
-                                    continue
-                                
-                                # Sort valid detections by Y position (top to bottom) instead of confidence
-                                # This makes detection follow the natural sewing order
-                                boxes_data = []
-                                for i in valid_indices:
-                                    box = boxes[i]
-                                    xyxy = box.xyxy[0].cpu().numpy()
-                                    y1 = xyxy[1]  # Get Y coordinate
-                                    boxes_data.append((i, y1))
-                                
-                                # Sort by Y position (top to bottom)
-                                sorted_valid = sorted(boxes_data, key=lambda x: x[1])
-                                top_indices = [idx for idx, y in sorted_valid[:self.max_detections_to_process]]
-                                
-                                for idx in top_indices:
-                                    if idx >= len(boxes):  # Safety check
-                                        break
-                                    
-                                    box = boxes[idx]
-                                    conf = float(box.conf[0].cpu().numpy())
-                                    
-                                    # Get box coordinates (in resized 256x256 space)
-                                    xyxy = box.xyxy[0].cpu().numpy()
-                                    x1, y1, x2, y2 = map(int, xyxy)
-                                    
-                                    # Convert box coordinates to camera frame coordinates for tracking
-                                    # Scale from 256x256 back to ROI size, then add ROI offset
-                                    box_x1_cam = int((x1 / 256.0) * roi_w) + roi_x1
-                                    box_y1_cam = int((y1 / 256.0) * roi_h) + roi_y1
-                                    box_x2_cam = int((x2 / 256.0) * roi_w) + roi_x1
-                                    box_y2_cam = int((y2 / 256.0) * roi_h) + roi_y1
-                                    box_w_cam = box_x2_cam - box_x1_cam
-                                    box_h_cam = box_y2_cam - box_y1_cam
-                                    
-                                    # Check if this stitch was already detected
-                                    is_already_detected = self.is_stitch_already_detected(
-                                        box_x1_cam, box_y1_cam, box_w_cam, box_h_cam
-                                    )
-                                    
-                                    if is_already_detected:
-                                        if self.frame_counter % 30 == 0:
-                                            print(f"⏭️  Skipped duplicate at ({box_x1_cam},{box_y1_cam})")
-                                        continue
-                                    
-                                    # Debug: Track new detections
-                                    if self.frame_counter % 30 == 0:
-                                        print(f"✅ NEW detection at ({box_x1_cam},{box_y1_cam}) conf={conf:.2f}")
-                                    
-                                    # Track region for partial updates (only process changed areas)
-                                    margin = self.roi_margin
-                                    self.updated_regions.append((
-                                        max(0, box_x1_cam - margin),
-                                        max(0, box_y1_cam - margin),
-                                        min(self.camera_width, box_x2_cam + margin),
-                                        min(self.camera_height, box_y2_cam + margin)
-                                    ))
-                                    
-                                    # Save center point for optical flow tracking (use first valid detection)
-                                    if best_detection_point is None:
-                                        # Calculate center point in ROI coordinates
-                                        cx_roi = (x1 + x2) // 2
-                                        cy_roi = (y1 + y2) // 2
-                                        best_detection_point = (cx_roi, cy_roi)
-                                    
-                                    # Create binary mask from bounding box
-                                    mask_resized = np.zeros((256, 256), dtype=np.uint8)
-                                    mask_resized[y1:y2, x1:x2] = 1
-                                    
-                                    # Resize mask to ROI size
-                                    mask_binary = cv2.resize(mask_resized, (roi_w, roi_h))
-                                    mask_binary = (mask_binary > 0.5).astype(np.uint8)
-                                    
-                                    # Store ROI mask with its bounds (avoid full-frame expansion)
-                                    detected_stitch_masks.append({
-                                        'mask': mask_binary,  # ROI-sized mask only
-                                        'confidence': conf,
-                                        'roi_bounds': (roi_x1, roi_y1, roi_x2, roi_y2),  # ROI position
-                                        'box_cam': (box_x1_cam, box_y1_cam, box_w_cam, box_h_cam)  # Box in camera coords
-                                    })
-                            
-                            # After YOLO detection, save the best point for optical flow tracking
-                            if best_detection_point is not None:
-                                # Convert to numpy array format required by optical flow
-                                # Point is in 256x256 space, need to scale to ROI coordinates
-                                roi_h = roi_y2 - roi_y1
-                                roi_w = roi_x2 - roi_x1
-                                cx_scaled = int((best_detection_point[0] / 256.0) * roi_w)
-                                cy_scaled = int((best_detection_point[1] / 256.0) * roi_h)
-                                self.prev_point = np.array([[cx_scaled, cy_scaled]], dtype=np.float32)
-                                if self.frame_counter % 10 == 0:
-                                    print(f"🎯 YOLO: Tracking point set at ({cx_scaled},{cy_scaled}) in ROI")
-                            
-                            # Cache detection results for next frame
-                            self.last_detected_masks = detected_stitch_masks
-                        
-                        else:
-                            # OPTICAL FLOW TRACKING PHASE
-                            # Track previous point using Lucas-Kanade optical flow
-                            if self.prev_gray is not None and self.prev_point is not None:
-                                new_point, status, err = cv2.calcOpticalFlowPyrLK(
-                                    self.prev_gray,
-                                    gray_roi,
-                                    self.prev_point,
-                                    None,
-                                    **self.optical_flow_params
-                                )
-                                
-                                # Check if tracking succeeded
-                                if status is not None and status[0] == 1:
-                                    # Get tracked point coordinates
-                                    x, y = new_point.ravel()
-                                    
-                                    # CONFIDENCE GATING: Check for drift conditions
-                                    tracking_error = err[0][0] if err is not None else 0
-                                    roi_h = roi_y2 - roi_y1
-                                    roi_w = roi_x2 - roi_x1
-                                    point_out_of_roi = (x < 0 or x >= roi_w or y < 0 or y >= roi_h)
-                                    
-                                    # Force YOLO re-detection if drift detected
-                                    if tracking_error > self.tracking_error_threshold:
-                                        if self.frame_counter % 10 == 0:
-                                            print(f"⚠️ OPTICAL FLOW: High tracking error ({tracking_error:.1f}), forcing YOLO re-detection")
-                                        self.prev_point = None
-                                        detected_stitch_masks = self.last_detected_masks
-                                    elif point_out_of_roi:
-                                        if self.frame_counter % 10 == 0:
-                                            print(f"⚠️ OPTICAL FLOW: Point left ROI ({int(x)},{int(y)}), forcing YOLO re-detection")
-                                        self.prev_point = None
-                                        detected_stitch_masks = self.last_detected_masks
-                                    else:
-                                        # Tracking is good, continue with optical flow
-                                        self.prev_point = new_point
-                                        
-                                        # Track region around optical flow point for partial updates
-                                        x_cam = int(x) + roi_x1
-                                        y_cam = int(y) + roi_y1
-                                        margin = self.roi_margin
-                                        self.updated_regions.append((
-                                            max(0, x_cam - margin),
-                                            max(0, y_cam - margin),
-                                            min(self.camera_width, x_cam + margin),
-                                            min(self.camera_height, y_cam + margin)
-                                        ))
-                                        
-                                        if self.frame_counter % 10 == 0:
-                                            print(f"🔄 OPTICAL FLOW: Tracking at ({int(x)},{int(y)}) in ROI, error={tracking_error:.1f}")
-                                        
-                                        # Draw tracked point on ROI for visualization
-                                        roi_with_tracking = roi_frame.copy()
-                                        cv2.circle(roi_with_tracking, (int(x), int(y)), 5, (0, 255, 0), -1)
-                                        cv2.circle(roi_with_tracking, (int(x), int(y)), 10, (0, 255, 0), 2)
-                                        
-                                        # Create detection overlay with tracked point
-                                        detection_overlay = cam_frame.copy()
-                                        detection_overlay[roi_y1:roi_y2, roi_x1:roi_x2] = roi_with_tracking
-                                        
-                                        # Use cached detection masks from last YOLO run
-                                        detected_stitch_masks = self.last_detected_masks
-                                else:
-                                    # Tracking failed, will run YOLO next frame
-                                    if self.frame_counter % 10 == 0:
-                                        print("⚠️ OPTICAL FLOW: Tracking lost, will re-detect with YOLO next frame")
-                                    self.prev_point = None
-                                    detected_stitch_masks = self.last_detected_masks
-                            else:
-                                # No previous frame to track from, use cached results
-                                detected_stitch_masks = self.last_detected_masks
-                        
-                        # Update previous grayscale frame for next optical flow iteration
-                        self.prev_gray = gray_roi.copy()
-                        
-                        # Removed: Segment auto-moving logic (dead code with 1 segment)
-                    
+                        self.last_cloth_bbox = cloth_bbox
                 except Exception as e:
-                    print(f"Stitch detection error: {e}")
-                    import traceback
-                    traceback.print_exc()
+                    print(f"Cloth detection error: {e}")
             
-            # First, overlay pattern mask (draw pattern first, detection on top)
-            pattern_applied = False
+            # Apply EMA smoothing to stabilize the bounding box
+            raw_bbox = self.last_cloth_bbox
+            if raw_bbox is not None:
+                if self.smooth_cloth_bbox is None:
+                    self.smooth_cloth_bbox = tuple(float(v) for v in raw_bbox)
+                else:
+                    a = self.bbox_smooth_alpha
+                    sx1, sy1, sx2, sy2 = self.smooth_cloth_bbox
+                    rx1, ry1, rx2, ry2 = raw_bbox
+                    # Only pull toward new detection if it moved more than threshold
+                    if (abs(rx1 - sx1) > self.bbox_move_threshold or
+                        abs(ry1 - sy1) > self.bbox_move_threshold or
+                        abs(rx2 - sx2) > self.bbox_move_threshold or
+                        abs(ry2 - sy2) > self.bbox_move_threshold):
+                        self.smooth_cloth_bbox = (
+                            sx1 + a * (rx1 - sx1),
+                            sy1 + a * (ry1 - sy1),
+                            sx2 + a * (rx2 - sx2),
+                            sy2 + a * (ry2 - sy2),
+                        )
+            cloth_bbox = (tuple(int(v) for v in self.smooth_cloth_bbox)
+                          if self.smooth_cloth_bbox is not None else None)
+            
+            # Overlay pattern centered inside detected cloth region
             if pattern_overlay is not None and pattern_alpha is not None:
                 overlay_h, overlay_w = pattern_overlay.shape[:2]
                 
-                # Center pattern on camera frame
-                x_offset = (self.camera_width - overlay_w) // 2
-                y_offset = (self.camera_height - overlay_h) // 2
+                if cloth_bbox is not None:
+                    # Center pattern inside the detected cloth bounding box
+                    cx = (cloth_bbox[0] + cloth_bbox[2]) // 2
+                    cy = (cloth_bbox[1] + cloth_bbox[3]) // 2
+                    x_offset = cx - overlay_w // 2
+                    y_offset = cy - overlay_h // 2
+                    # Clamp to frame bounds
+                    x_offset = max(0, min(x_offset, self.camera_width - overlay_w))
+                    y_offset = max(0, min(y_offset, self.camera_height - overlay_h))
+                else:
+                    # No cloth detected: center on camera frame
+                    x_offset = (self.camera_width - overlay_w) // 2
+                    y_offset = (self.camera_height - overlay_h) // 2
                 
-                # Ensure we don't go out of bounds
-                if x_offset >= 0 and y_offset >= 0:
-                    # Calculate actual overlay dimensions considering bounds
-                    overlay_end_x = min(x_offset + overlay_w, self.camera_width)
-                    overlay_end_y = min(y_offset + overlay_h, self.camera_height)
-                    actual_w = overlay_end_x - x_offset
-                    actual_h = overlay_end_y - y_offset
+                overlay_end_x = min(x_offset + overlay_w, self.camera_width)
+                overlay_end_y = min(y_offset + overlay_h, self.camera_height)
+                actual_w = overlay_end_x - x_offset
+                actual_h = overlay_end_y - y_offset
+                
+                if actual_w > 0 and actual_h > 0:
+                    realtime_pattern = self.create_realtime_pattern(pattern_overlay, pattern_alpha)
                     
-                    if actual_w > 0 and actual_h > 0:
-                        # If we have detection overlay, use that as base (YOLO rendered masks)
-                        if detection_overlay is not None:
-                            cam_frame = detection_overlay
-                        
-                        # *** UPDATE GAME STATS FIRST (before coloring pattern) ***
-                        self.update_game_stats(detected_stitch_masks, pattern_alpha, 
-                                             x_offset, y_offset, actual_w, actual_h)
-                        
-                        # Create real-time colored pattern based on completed stitches
-                        realtime_pattern = self.create_realtime_pattern(pattern_overlay, pattern_alpha)
-                        
-                        # Apply pattern overlay on top
-                        roi = cam_frame[y_offset:overlay_end_y, x_offset:overlay_end_x]
-                        pattern_crop = realtime_pattern[0:actual_h, 0:actual_w] if realtime_pattern is not None else pattern_overlay[0:actual_h, 0:actual_w]
-                        alpha_crop = pattern_alpha[0:actual_h, 0:actual_w]
-                        
-                        # Apply with higher opacity for better visibility (vectorized, ~3x faster than loop)
-                        alpha_3d = (alpha_crop[:, :, np.newaxis] * 0.7).astype(np.float32)
-                        cam_frame[y_offset:overlay_end_y, x_offset:overlay_end_x] = np.clip(
-                            alpha_3d * pattern_crop[0:actual_h, 0:actual_w].astype(np.float32) +
-                            (1.0 - alpha_3d) * roi.astype(np.float32),
-                            0, 255
-                        ).astype(np.uint8)
-                        pattern_applied = True
+                    roi = cam_frame[y_offset:overlay_end_y, x_offset:overlay_end_x]
+                    pattern_crop = realtime_pattern[0:actual_h, 0:actual_w] if realtime_pattern is not None else pattern_overlay[0:actual_h, 0:actual_w]
+                    alpha_crop = pattern_alpha[0:actual_h, 0:actual_w]
+                    
+                    for c in range(3):
+                        roi[:, :, c] = (alpha_crop * pattern_crop[:, :, c] * 0.7 +
+                                      (1 - alpha_crop * 0.7) * roi[:, :, c])
+                    cam_frame[y_offset:overlay_end_y, x_offset:overlay_end_x] = roi
+                    
+                    self.update_game_stats([], pattern_alpha, x_offset, y_offset, actual_w, actual_h)
             
-            # If detection exists but pattern wasn't applied, use YOLO's visualization
-            if not pattern_applied and detection_overlay is not None:
-                cam_frame = detection_overlay
-            
-            # Draw ROI detection box overlay (shows where detection is happening)
-            if roi_bounds is not None:
-                roi_x1, roi_y1, roi_x2, roi_y2 = roi_bounds
-                # Draw semi-transparent box
-                overlay_roi = cam_frame.copy()
-                cv2.rectangle(overlay_roi, (roi_x1, roi_y1), (roi_x2, roi_y2), 
-                             self.COLORS['cyan'], 2)
-                cv2.addWeighted(overlay_roi, 0.7, cam_frame, 0.3, 0, cam_frame)
-                
-                # Add corner markers for better visibility
-                corner_len = 15
-                corner_thick = 3
-                # Top-left
-                cv2.line(cam_frame, (roi_x1, roi_y1), (roi_x1 + corner_len, roi_y1), 
-                        self.COLORS['neon_blue'], corner_thick)
-                cv2.line(cam_frame, (roi_x1, roi_y1), (roi_x1, roi_y1 + corner_len), 
-                        self.COLORS['neon_blue'], corner_thick)
-                # Top-right
-                cv2.line(cam_frame, (roi_x2, roi_y1), (roi_x2 - corner_len, roi_y1), 
-                        self.COLORS['neon_blue'], corner_thick)
-                cv2.line(cam_frame, (roi_x2, roi_y1), (roi_x2, roi_y1 + corner_len), 
-                        self.COLORS['neon_blue'], corner_thick)
-                # Bottom-left
-                cv2.line(cam_frame, (roi_x1, roi_y2), (roi_x1 + corner_len, roi_y2), 
-                        self.COLORS['neon_blue'], corner_thick)
-                cv2.line(cam_frame, (roi_x1, roi_y2), (roi_x1, roi_y2 - corner_len), 
-                        self.COLORS['neon_blue'], corner_thick)
-                # Bottom-right
-                cv2.line(cam_frame, (roi_x2, roi_y2), (roi_x2 - corner_len, roi_y2), 
-                        self.COLORS['neon_blue'], corner_thick)
-                cv2.line(cam_frame, (roi_x2, roi_y2), (roi_x2, roi_y2 - corner_len), 
-                        self.COLORS['neon_blue'], corner_thick)
-                
-                # Add label showing ROI segment
-                label_text = f"SEGMENT {self.current_roi_segment}/{self.num_roi_segments}"
-                label_color = self.COLORS['neon_blue']
-                
-                font_scale = 0.4
-                thickness = 1
-                (text_w, text_h), _ = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_TRIPLEX, 
-                                                       font_scale, thickness)
-                label_x = roi_x1 + 5
-                label_y = roi_y1 - 5 if roi_y1 > 20 else roi_y1 + 15
-                
-                # Draw text background
-                cv2.rectangle(cam_frame, (label_x - 2, label_y - text_h - 2), 
-                            (label_x + text_w + 2, label_y + 2), 
-                            self.COLORS['dark_blue'], -1)
-                # Draw text
-                cv2.putText(cam_frame, label_text, (label_x, label_y), 
-                           cv2.FONT_HERSHEY_TRIPLEX, font_scale, 
-                           label_color, thickness)
+            # Draw cloth detection bounding box
+            if cloth_bbox is not None:
+                x1, y1, x2, y2 = cloth_bbox
+                cv2.rectangle(cam_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                label = "Cloth"
+                (lw, lh), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+                cv2.rectangle(cam_frame, (x1, y1 - lh - 8), (x1 + lw + 6, y1), (0, 255, 0), -1)
+                cv2.putText(cam_frame, label, (x1 + 3, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
             
             frame[self.camera_y:self.camera_y+self.camera_height, 
                   self.camera_x:self.camera_x+self.camera_width] = cam_frame
+            
+            # Draw warning overlay if out of segment
+            if self.out_of_segment_warning:
+                self.draw_warning_overlay(frame)
             
             # Draw color legend below camera view
             self.draw_pattern_legend(frame)
@@ -1273,323 +644,167 @@ class PatternMode:
         cv2.putText(frame, button_text, (btn_text_x, btn_text_y), 
                    cv2.FONT_HERSHEY_TRIPLEX, 0.8, self.COLORS['bright_blue'], 2)
     
+    def draw_warning_overlay(self, frame):
+        """Draw warning overlay when stitching outside current segment"""
+        # Flash effect
+        flash_alpha = 0.3 + 0.3 * abs(math.sin(self.warning_flash_phase))
+        
+        # Warning banner at top of camera
+        banner_y = self.camera_y + 30
+        banner_height = 70
+        
+        # Semi-transparent red background
+        overlay = frame.copy()
+        cv2.rectangle(overlay, 
+                     (self.camera_x, banner_y), 
+                     (self.camera_x + self.camera_width, banner_y + banner_height), 
+                     (0, 0, 200), -1)  # Red in BGR
+        cv2.addWeighted(overlay, flash_alpha, frame, 1 - flash_alpha, 0, frame)
+        
+        # Warning text - larger and more readable
+        font_scale = 1.0
+        thickness = 4
+        (text_w, text_h), _ = cv2.getTextSize(self.warning_message, cv2.FONT_HERSHEY_TRIPLEX, font_scale, thickness)
+        text_x = self.camera_x + (self.camera_width - text_w) // 2
+        text_y = banner_y + (banner_height + text_h) // 2
+        
+        # Draw text with outline for visibility
+        cv2.putText(frame, self.warning_message, (text_x, text_y), 
+                   cv2.FONT_HERSHEY_TRIPLEX, font_scale, (0, 0, 0), thickness + 3)  # Black outline
+        cv2.putText(frame, self.warning_message, (text_x, text_y), 
+                   cv2.FONT_HERSHEY_TRIPLEX, font_scale, (255, 255, 255), thickness)  # White text
+    
     def update_game_stats(self, detected_stitch_masks, pattern_alpha, x_offset, y_offset, actual_w, actual_h):
         """Update game statistics based on detected stitches vs pattern (ROI-optimized)"""
         if len(detected_stitch_masks) == 0:
-            if self.frame_counter % 30 == 0:
-                print(f"⚠️ No detected stitches to map (empty list)")
+            self.out_of_segment_warning = False
             return
         
         # Initialize completed stitch mask if needed (in pattern coordinates)
         if self.completed_stitch_mask is None:
             self.completed_stitch_mask = np.zeros((self.uniform_height, self.uniform_width), dtype=np.uint8)
         
-        # Debug: Check if we have detections to process
-        if self.frame_counter % 15 == 0:
-            print(f"🔍 Processing {len(detected_stitch_masks)} detected stitches for mapping...")
-            print(f"   Pattern mask loaded: {'✅ YES' if self.pattern_mask is not None else '❌ NO'}")
-            print(f"   Pattern area: x={x_offset}, y={y_offset}, w={actual_w}, h={actual_h}")
-            # Check first stitch data structure
-            if len(detected_stitch_masks) > 0:
-                first_stitch = detected_stitch_masks[0]
-                print(f"   First stitch keys: {first_stitch.keys()}")
-                if 'box_cam' in first_stitch:
-                    print(f"   box_cam: {first_stitch['box_cam']}")
-                else:
-                    print(f"   ❌ Missing 'box_cam' key!")
-                if 'roi_bounds' in first_stitch:
-                    print(f"   roi_bounds: {first_stitch['roi_bounds']}")
-                else:
-                    print(f"   ❌ Missing 'roi_bounds' key!")
-        
-        # Process each detection individually and map to pattern coordinates
-        processed_count = 0
-        skipped_no_keys = 0
-        skipped_no_intersection = 0
-        skipped_invalid_bounds = 0
-        accepted_count = 0
-        rejected_overlap = 0
+        # Create combined stitch mask in ROI coordinates only (avoid full-frame allocation)
+        # We'll work directly with ROI-sized masks
+        roi_combined_mask = None
+        roi_bounds = None
         
         for stitch_data in detected_stitch_masks:
-            if 'box_cam' not in stitch_data or 'roi_bounds' not in stitch_data:
-                skipped_no_keys += 1
-                continue
-            
-            # Skip stitches already permanently accepted (fast O(1) check)
-            stitch_box = stitch_data['box_cam']
-            _sx, _sy, _sw, _sh = stitch_box
-            if self.get_adaptive_grid_cell(_sx + _sw // 2, _sy + _sh // 2) in self.stitch_grid:
-                continue
-            
-            processed_count += 1
-            
-            # Debug first stitch coordinates
-            if processed_count == 1 and self.frame_counter % 15 == 0:
-                print(f"   🔬 FIRST STITCH DEBUG:")
+            if stitch_data.get('roi_bounds') is not None:
+                # ROI-based mask
+                roi_bounds = stitch_data['roi_bounds']
+                roi_x1, roi_y1, roi_x2, roi_y2 = roi_bounds
                 
-            # Get INDIVIDUAL stitch box in camera coordinates (not ROI!)
-            stitch_x, stitch_y, stitch_w, stitch_h = stitch_data['box_cam']
-            stitch_x1_cam = stitch_x
-            stitch_y1_cam = stitch_y
-            stitch_x2_cam = stitch_x + stitch_w
-            stitch_y2_cam = stitch_y + stitch_h
-            
-            if processed_count == 1 and self.frame_counter % 15 == 0:
-                print(f"      Stitch in camera: ({stitch_x1_cam},{stitch_y1_cam})-({stitch_x2_cam},{stitch_y2_cam})")
-            
-            # Get ROI position to extract from mask
-            roi_x1, roi_y1, roi_x2, roi_y2 = stitch_data['roi_bounds']
-            stitch_mask = stitch_data['mask']  # ROI-sized mask with stitch area set to 1
-            
-            # Pattern bounds in camera coordinates
-            pattern_x1, pattern_y1 = x_offset, y_offset
-            pattern_x2, pattern_y2 = x_offset + actual_w, y_offset + actual_h
-            
-            if processed_count == 1 and self.frame_counter % 15 == 0:
-                print(f"      Pattern in camera: ({pattern_x1},{pattern_y1})-({pattern_x2},{pattern_y2})")
-            
-            # Calculate intersection between INDIVIDUAL STITCH and pattern
-            intersect_x1 = max(stitch_x1_cam, pattern_x1)
-            intersect_y1 = max(stitch_y1_cam, pattern_y1)
-            intersect_x2 = min(stitch_x2_cam, pattern_x2)
-            intersect_y2 = min(stitch_y2_cam, pattern_y2)
-            
-            if processed_count == 1 and self.frame_counter % 15 == 0:
-                print(f"      Intersection: ({intersect_x1},{intersect_y1})-({intersect_x2},{intersect_y2})")
-            
-            if intersect_x2 <= intersect_x1 or intersect_y2 <= intersect_y1:
-                if processed_count == 1 and self.frame_counter % 15 == 0:
-                    print(f"      ❌ NO INTERSECTION - stitch outside pattern area!")
-                skipped_no_intersection += 1
-                continue  # No overlap with pattern
-            
-            # Extract the overlapping portion from the stitch mask
-            # Convert intersection coords to ROI-relative coords
-            mask_x1 = max(0, intersect_x1 - roi_x1)
-            mask_y1 = max(0, intersect_y1 - roi_y1)
-            mask_x2 = min(roi_x2 - roi_x1, intersect_x2 - roi_x1)
-            mask_y2 = min(roi_y2 - roi_y1, intersect_y2 - roi_y1)
-            
-            # Extract the overlapping region from stitch mask (raw, no dilation)
-            stitch_crop = stitch_mask[mask_y1:mask_y2, mask_x1:mask_x2]
-            
-            if stitch_crop.size == 0:
-                continue
-            
-            # Convert intersection to pattern-relative coords
-            pattern_rel_x1 = intersect_x1 - pattern_x1
-            pattern_rel_y1 = intersect_y1 - pattern_y1
-            pattern_rel_x2 = intersect_x2 - pattern_x1
-            pattern_rel_y2 = intersect_y2 - pattern_y1
-            
-            # Scale to uniform pattern coordinates (200x300)
-            pattern_full_x1 = int((pattern_rel_x1 / actual_w) * self.uniform_width)
-            pattern_full_y1 = int((pattern_rel_y1 / actual_h) * self.uniform_height)
-            pattern_full_x2 = int((pattern_rel_x2 / actual_w) * self.uniform_width)
-            pattern_full_y2 = int((pattern_rel_y2 / actual_h) * self.uniform_height)
-            
-            # Ensure bounds are valid
-            pattern_full_x1 = max(0, min(pattern_full_x1, self.uniform_width))
-            pattern_full_y1 = max(0, min(pattern_full_y1, self.uniform_height))
-            pattern_full_x2 = max(0, min(pattern_full_x2, self.uniform_width))
-            pattern_full_y2 = max(0, min(pattern_full_y2, self.uniform_height))
-            
-            if pattern_full_x2 <= pattern_full_x1 or pattern_full_y2 <= pattern_full_y1:
-                skipped_invalid_bounds += 1
-                continue
-            
-            # 🚀 ULTRA-FAST DISTANCE TRANSFORM VALIDATION (single array lookup!)
-            # Replaces expensive mask operations with one distance check
-            
-            # STEP 2: Calculate stitch center in camera coordinates (needle approximation)
-            cx_cam = stitch_x + stitch_w // 2
-            cy_cam = stitch_y + stitch_h // 2
-            
-            # STEP 3: Convert camera center to pattern coordinates
-            pattern_cx = int(((cx_cam - pattern_x1) / actual_w) * self.uniform_width)
-            pattern_cy = int(((cy_cam - pattern_y1) / actual_h) * self.uniform_height)
-            
-            # Clip to valid pattern bounds
-            pattern_cx = np.clip(pattern_cx, 0, self.uniform_width - 1)
-            pattern_cy = np.clip(pattern_cy, 0, self.uniform_height - 1)
-            
-            # CHECK: Only add if stitch is within tolerance distance of pattern
-            if self.pattern_distance_map is not None:
-                # STEP 4: ONE LOOKUP - get distance to nearest pattern pixel
-                dist = self.pattern_distance_map[pattern_cy, pattern_cx]
+                if roi_combined_mask is None:
+                    roi_combined_mask = np.zeros((roi_y2 - roi_y1, roi_x2 - roi_x1), dtype=np.uint8)
                 
-                # STEP 5: Distance validation with relaxed tolerance
-                stitch_is_valid = (dist < self.distance_tolerance)
-                
-                # FALLBACK: If distance check fails, try overlap ratio (more forgiving)
-                if not stitch_is_valid:
-                    # Calculate intersection area with pattern
-                    inter_x1 = max(intersect_x1, pattern_x1)
-                    inter_y1 = max(intersect_y1, pattern_y1)
-                    inter_x2 = min(intersect_x2, pattern_x2)
-                    inter_y2 = min(intersect_y2, pattern_y2)
-                    
-                    if inter_x2 > inter_x1 and inter_y2 > inter_y1:
-                        inter_area = (inter_x2 - inter_x1) * (inter_y2 - inter_y1)
-                        stitch_area = stitch_w * stitch_h
-                        overlap_ratio = inter_area / stitch_area if stitch_area > 0 else 0
-                        
-                        # Accept if at least 10% of stitch overlaps pattern area
-                        stitch_is_valid = (overlap_ratio >= self.overlap_ratio_threshold)
-                        
-                        if processed_count == 1 and self.frame_counter % 15 == 0:
-                            print(f"      📐 Fallback overlap check: {overlap_ratio:.1%} (need {self.overlap_ratio_threshold:.1%})")
-                
-                # Debug first stitch
-                if processed_count == 1 and self.frame_counter % 15 == 0:
-                    print(f"      🎯 Distance check: center=({pattern_cx},{pattern_cy}), dist={dist:.2f}px, tolerance={self.distance_tolerance}px")
-                    print(f"      Valid: {stitch_is_valid}")
-                
-                if stitch_is_valid:
-                    accepted_count += 1
-                    
-                    # STEP 6: Update progress mask with small region around stitch (fast!)
-                    radius = 5  # Increased from 4 to 5px for better coverage
-                    y1 = max(0, pattern_cy - radius)
-                    y2 = min(self.uniform_height, pattern_cy + radius)
-                    x1 = max(0, pattern_cx - radius)
-                    x2 = min(self.uniform_width, pattern_cx + radius)
-                    
-                    self.completed_stitch_mask[y1:y2, x1:x2] = 255
-                    self.realtime_pattern_dirty = True  # Invalidate cached realtime pattern
-                    
-                    # Permanently mark position as accepted (NOW we add to grid, after validation)
-                    accept_cell = self.get_adaptive_grid_cell(stitch_x + stitch_w // 2, stitch_y + stitch_h // 2)
-                    self.stitch_grid.add(accept_cell)
-                    self.update_grid_density(stitch_x + stitch_w // 2, stitch_y + stitch_h // 2)
-                    self.detected_stitch_positions.append((stitch_x, stitch_y, stitch_w, stitch_h))
-                    
-                    # Debug: Show individual stitch mapping
-                    if self.frame_counter % 15 == 0:
-                        print(f"  ✅ Stitch #{len(self.detected_stitch_positions)}: center=({pattern_cx},{pattern_cy}) dist={dist:.2f}px")
-                else:
-                    rejected_overlap += 1
-                    # Stitch too far from pattern line
-                    if self.frame_counter % 15 == 0:
-                        print(f"  ❌ Stitch REJECTED (dist={dist:.2f}px > {self.distance_tolerance}px)")
+                roi_combined_mask = np.maximum(roi_combined_mask, stitch_data['mask'])
             else:
-                # No distance map loaded, fallback to accepting all stitches
-                if processed_count == 1 and self.frame_counter % 15 == 0:
-                    print(f"      ⚠️ NO DISTANCE MAP - accepting all stitches")
+                # Full-frame fallback (shouldn't happen with ROI optimization)
+                # Convert to ROI for consistency
+                if roi_combined_mask is None:
+                    roi_combined_mask = np.zeros((actual_h, actual_w), dtype=np.uint8)
+                    roi_bounds = (x_offset, y_offset, x_offset + actual_w, y_offset + actual_h)
                 
-                accepted_count += 1
-                
-                # Calculate center for fallback
-                pattern_cx = int(((stitch_x + stitch_w // 2 - pattern_x1) / actual_w) * self.uniform_width)
-                pattern_cy = int(((stitch_y + stitch_h // 2 - pattern_y1) / actual_h) * self.uniform_height)
-                pattern_cx = np.clip(pattern_cx, 0, self.uniform_width - 1)
-                pattern_cy = np.clip(pattern_cy, 0, self.uniform_height - 1)
-                
-                # Fill small area
-                radius = 5
-                y1 = max(0, pattern_cy - radius)
-                y2 = min(self.uniform_height, pattern_cy + radius)
-                x1 = max(0, pattern_cx - radius)
-                x2 = min(self.uniform_width, pattern_cx + radius)
-                
-                self.completed_stitch_mask[y1:y2, x1:x2] = 255
-                self.realtime_pattern_dirty = True
-                
-                # Permanently mark position as accepted
-                accept_cell_fb = self.get_adaptive_grid_cell(stitch_x + stitch_w // 2, stitch_y + stitch_h // 2)
-                self.stitch_grid.add(accept_cell_fb)
-                self.update_grid_density(stitch_x + stitch_w // 2, stitch_y + stitch_h // 2)
-                self.detected_stitch_positions.append((stitch_x, stitch_y, stitch_w, stitch_h))
-                
-                if self.frame_counter % 15 == 0:
-                    print(f"  🧵 Stitch #{len(self.detected_stitch_positions)}: center=({pattern_cx},{pattern_cy}) [No distance check]")
+                roi_mask = stitch_data['mask'][y_offset:y_offset+actual_h, x_offset:x_offset+actual_w]
+                roi_combined_mask = np.maximum(roi_combined_mask, roi_mask)
         
-        # Debug summary
-        if self.frame_counter % 15 == 0:
-            print(f"📊 MAPPING SUMMARY: {len(detected_stitch_masks)} total → {processed_count} processed → {accepted_count} ACCEPTED ✅")
-            print(f"   🎯 Now tracking {len(self.detected_stitch_positions)} successful stitches")
-            if skipped_no_keys > 0:
-                print(f"   ⚠️ Skipped {skipped_no_keys} (missing keys)")
-            if skipped_no_intersection > 0:
-                print(f"   ⚠️ Skipped {skipped_no_intersection} (no pattern intersection)")
-            if skipped_invalid_bounds > 0:
-                print(f"   ⚠️ Skipped {skipped_invalid_bounds} (invalid bounds)")
-            if rejected_overlap > 0:
-                print(f"   ❌ Rejected {rejected_overlap} (insufficient overlap <20%) - Can retry!")
+        if roi_combined_mask is None:
+            return
         
-        # NO LONGER storing all detected stitches - only successful ones are tracked above
-        # This allows failed stitches to be re-detected when camera/fabric moves
-                if self.frame_counter % 15 == 0:
-                    print(f"    📌 Position stored")
+        # Dilate the detected stitch mask to be more forgiving (smaller dilation)
+        kernel = np.ones((3, 3), np.uint8)
+        roi_combined_mask = cv2.dilate(roi_combined_mask, kernel, iterations=1)
         
-        # Calculate accuracy for the current frame detections (for display purposes)
-        if len(detected_stitch_masks) > 0:
-            # Build a temporary combined mask for accuracy calculation only
-            roi_combined_mask = None
-            roi_bounds = None
-            
-            for stitch_data in detected_stitch_masks:
-                if stitch_data.get('roi_bounds') is not None:
-                    roi_bounds = stitch_data['roi_bounds']
-                    roi_x1, roi_y1, roi_x2, roi_y2 = roi_bounds
-                    
-                    if roi_combined_mask is None:
-                        roi_combined_mask = np.zeros((roi_y2 - roi_y1, roi_x2 - roi_x1), dtype=np.uint8)
-                    
-                    roi_combined_mask = np.maximum(roi_combined_mask, stitch_data['mask'])
-            
-            if roi_combined_mask is not None:
-                # Get pattern mask in ROI coordinates
-                pattern_crop = (pattern_alpha[0:actual_h, 0:actual_w] * 255).astype(np.uint8)
-                pattern_mask_roi = (pattern_crop > 128).astype(np.uint8)
-                
-                # Ensure masks are same size
-                if roi_combined_mask.shape != pattern_mask_roi.shape:
-                    roi_combined_mask = cv2.resize(roi_combined_mask, (actual_w, actual_h))
-                
-                # Calculate accuracy (intersection over union) for current frame
-                intersection = np.logical_and(roi_combined_mask > 0, pattern_mask_roi > 0)
-                union = np.logical_or(roi_combined_mask > 0, pattern_mask_roi > 0)
-                
-                intersection_pixels = np.sum(intersection)
-                union_pixels = np.sum(union)
-                
-                if union_pixels > 0:
-                    accuracy = (intersection_pixels / union_pixels) * 100.0
-                    self.current_accuracy = accuracy
-                    self.total_score = int(self.current_accuracy)
+        # Get pattern mask in ROI coordinates (not full camera frame)
+        pattern_crop = (pattern_alpha[0:actual_h, 0:actual_w] * 255).astype(np.uint8)
+        pattern_mask_roi = (pattern_crop > 128).astype(np.uint8)
         
-        # Calculate progress from ACCUMULATED cyan coverage (completed_stitch_mask)
-        # Only recalculate when new stitches were accepted (mask unchanged otherwise)
-        if accepted_count > 0 and self.completed_stitch_mask is not None and pattern_alpha is not None:
-            # Get full pattern size
-            pattern_h, pattern_w = pattern_alpha.shape[:2]
+        # Ensure masks are same size
+        if roi_combined_mask.shape != pattern_mask_roi.shape:
+            roi_combined_mask = cv2.resize(roi_combined_mask, (actual_w, actual_h))
+        
+        # Extract stitches that are within the pattern area (all in ROI coordinates)
+        stitches_in_pattern = np.logical_and(roi_combined_mask > 0, pattern_mask_roi > 0)
+        
+        # Convert detected stitches in pattern to pattern coordinates and accumulate
+        if np.sum(stitches_in_pattern) > 0:
+            # Resize to pattern dimensions (from ROI to pattern coords)
+            stitches_pattern_coords = cv2.resize(roi_combined_mask, (self.uniform_width, self.uniform_height))
             
-            # Resize completed mask to match pattern size
-            completed_resized = cv2.resize(self.completed_stitch_mask, (pattern_w, pattern_h))
-            completed_binary = completed_resized > 128
+            # Accumulate into completed mask (using maximum to not lose previous stitches)
+            self.completed_stitch_mask = np.maximum(self.completed_stitch_mask, 
+                                                     (stitches_pattern_coords > 0).astype(np.uint8) * 255)
+        
+        # No more segment-based warnings - all pattern area is valid now
+        self.out_of_segment_warning = False
+        
+        # Calculate overlap (intersection) and union (all in ROI coordinates)
+        intersection = np.logical_and(roi_combined_mask > 0, pattern_mask_roi > 0)
+        union = np.logical_or(roi_combined_mask > 0, pattern_mask_roi > 0)
+        
+        # Calculate IoU (Intersection over Union) as accuracy metric
+        intersection_pixels = np.sum(intersection)
+        union_pixels = np.sum(union)
+        
+        if union_pixels > 0:
+            accuracy = (intersection_pixels / union_pixels) * 100.0
+            self.current_accuracy = accuracy
             
-            # Cache total pattern pixel count (constant for a given level)
-            if self._cached_pattern_pixels is None:
-                self._cached_pattern_pixels = int(np.sum(pattern_alpha > 0.1))
-            pattern_pixels = self._cached_pattern_pixels
+            # Update score (1 point per % accuracy)
+            self.total_score = int(self.current_accuracy)
             
+            # Calculate progress (how much of pattern is covered by stitches)
+            pattern_pixels = np.sum(pattern_mask_roi > 0)
             if pattern_pixels > 0:
-                pattern_mask = pattern_alpha > 0.1
-                cyan_pixels = int(np.count_nonzero(pattern_mask & completed_binary))
-                raw_progress = min(100.0, (cyan_pixels / pattern_pixels) * 100.0)
-                
-                # Debug: Show detection accuracy every 60 frames
-                if self.frame_counter % 60 == 0 and cyan_pixels > 0:
-                    print(f"📊 PROGRESS: {cyan_pixels}/{pattern_pixels} pixels cyan = {raw_progress:.1f}%")
+                covered_pixels = np.sum(np.logical_and(roi_combined_mask > 0, pattern_mask_roi > 0))
+                raw_progress = min(100.0, (covered_pixels / pattern_pixels) * 100.0)
                 
                 # Store raw progress for evaluation
                 self.raw_progress = raw_progress
+                print(f"📊 Raw Progress: {raw_progress:.1f}%")  # Debug print
                 
-                # Direct progress calculation: 100% cyan = 100% progress
+                # Determine segment based on raw progress (much lower thresholds)
+                if raw_progress >= 70:  # 70%+ completes everything
+                    new_segment = 5  # Beyond segment 4, means fully complete
+                    new_progress = 100.0
+                elif raw_progress >= 45:  # 45%+ completes segment 3, working on segment 4
+                    new_segment = 4
+                    new_progress = 75.0
+                elif raw_progress >= 25:  # 25%+ completes segment 2, working on segment 3
+                    new_segment = 3
+                    new_progress = 50.0
+                elif raw_progress >= 12:  # 12%+ completes segment 1, working on segment 2
+                    new_segment = 2
+                    new_progress = 25.0
+                else:  # < 12% still working on segment 1
+                    new_segment = 1
+                    new_progress = 0.0
+                
                 # Only allow progress forward, never backwards (prevent flickering)
-                if raw_progress > self.pattern_progress:
-                    self.pattern_progress = raw_progress
+                if new_segment > self.highest_segment_reached:
+                    self.highest_segment_reached = new_segment
+                    self.current_segment = new_segment if new_segment <= 4 else 4
+                    self.pattern_progress = new_progress
+                # Keep the highest values reached
+                elif self.highest_segment_reached > 1:
+                    # Stay at the highest segment reached
+                    if self.highest_segment_reached == 5:
+                        self.current_segment = 4
+                        self.pattern_progress = 100.0
+                    else:
+                        self.current_segment = self.highest_segment_reached
+                        self.pattern_progress = (self.highest_segment_reached - 1) * 25.0
+            
+            # Update combo system
+            if accuracy > 70:  # Good accuracy threshold
+                self.current_combo += 1
+                self.max_combo = max(self.max_combo, self.current_combo)
+            else:
+                self.current_combo = 0
+        
+        # Update stitch count
+        self.stitches_detected = len(detected_stitch_masks)
     
     def draw_score_panel(self, frame):
         """Draw the score/stats panel on the right side"""
@@ -1628,33 +843,55 @@ class PatternMode:
         cv2.putText(frame, "PROGRESS", (content_x, progress_y), cv2.FONT_HERSHEY_TRIPLEX, 
                    0.6, self.COLORS['text_secondary'], 2)
         
-        # Progress bar (smooth, reflects actual cyan coverage)
+        # Progress bar background (divided into 4 segments)
         bar_y = progress_y + 15
         bar_width = w - 40
         bar_height = 20
+        segment_width = (bar_width - 4) // 4
         
-        # Draw bar background
-        cv2.rectangle(frame, (content_x, bar_y), (content_x + bar_width, bar_y + bar_height), 
-                     self.COLORS['dark_blue'], -1)
-        
-        # Draw filled progress bar (cyan)
-        fill_width = int((self.pattern_progress / 100.0) * bar_width)
-        if fill_width > 0:
+        # Draw 4 segment boxes
+        for seg in range(1, 5):
+            seg_x = content_x + 2 + (seg - 1) * segment_width
+            
+            # Determine segment color based on progress milestones
+            if self.pattern_progress >= seg * 25:
+                # Completed segment - cyan
+                seg_color = self.segment_colors['completed']
+            elif seg == self.current_segment:
+                # Current segment - yellow with pulse
+                pulse = 0.5 + 0.5 * abs(math.sin(self.glow_phase * 2))
+                seg_color = tuple(int(c * pulse) for c in self.segment_colors['current'])
+            else:
+                # Upcoming segment - gray
+                seg_color = self.segment_colors['upcoming']
+            
+            # Draw segment
             overlay_bar = frame.copy()
-            cv2.rectangle(overlay_bar, (content_x, bar_y), 
-                        (content_x + fill_width, bar_y + bar_height), 
-                        self.segment_colors['completed'], -1)
+            cv2.rectangle(overlay_bar, (seg_x, bar_y + 2), 
+                        (seg_x + segment_width - 2, bar_y + bar_height - 2), 
+                        seg_color, -1)
             cv2.addWeighted(overlay_bar, 0.7, frame, 0.3, 0, frame)
+            
+            # Draw segment border
+            cv2.rectangle(frame, (seg_x, bar_y + 2), 
+                        (seg_x + segment_width - 2, bar_y + bar_height - 2), 
+                        self.COLORS['medium_blue'], 1)
         
         # Draw outer border
         cv2.rectangle(frame, (content_x, bar_y), (content_x + bar_width, bar_y + bar_height), 
                      self.COLORS['medium_blue'], 2)
         
-        # Progress percentage text (centered on bar)
-        progress_text = f"{self.pattern_progress:.1f}%"
+        # Progress percentage text
+        progress_text = f"{self.pattern_progress:.0f}%"
         (prog_w, prog_h), _ = cv2.getTextSize(progress_text, cv2.FONT_HERSHEY_TRIPLEX, 0.6, 2)
         cv2.putText(frame, progress_text, (content_x + (bar_width - prog_w) // 2, bar_y + 16), 
                    cv2.FONT_HERSHEY_TRIPLEX, 0.6, self.COLORS['text_primary'], 2)
+        
+        # Segment indicator text
+        segment_text_y = bar_y + bar_height + 18
+        segment_label = f"SEGMENT {self.current_segment}/4"
+        cv2.putText(frame, segment_label, (content_x, segment_text_y), 
+                   cv2.FONT_HERSHEY_TRIPLEX, 0.5, self.COLORS['text_secondary'], 2)
     
     def draw_evaluate_button(self, frame):
         """Draw the evaluate button below stats panel"""
@@ -1877,7 +1114,6 @@ class PatternMode:
         bb = self.back_button
         if bb['x'] <= x <= bb['x'] + bb['w'] and bb['y'] <= y <= bb['y'] + bb['h']:
             self.play_button_click_sound()
-            self.reset_progress()  # Clear all progress when leaving level
             return 'back'
         
         # Check evaluate button (only if not evaluated yet)
@@ -1893,7 +1129,18 @@ class PatternMode:
             tb = self.try_again_button
             if tb['x'] <= x <= tb['x'] + tb['w'] and tb['y'] <= y <= tb['y'] + tb['h']:
                 self.play_button_click_sound()
-                self.reset_progress()  # Use centralized reset function
+                # Reset all progress to try again
+                self.pattern_progress = 0.0
+                self.raw_progress = 0.0
+                self.current_segment = 1
+                self.highest_segment_reached = 1
+                self.current_accuracy = 0.0
+                self.total_score = 0
+                self.out_of_segment_warning = False
+                self.warning_message = ""
+                self.is_evaluated = False
+                self.level_completed = False
+                print(f"🔄 Progress reset - Try again!")
                 return None
         
         # Check next level button (only if evaluated and passed)
@@ -1901,7 +1148,6 @@ class PatternMode:
             nb = self.next_level_button
             if nb['x'] <= x <= nb['x'] + nb['w'] and nb['y'] <= y <= nb['y'] + nb['h']:
                 self.play_button_click_sound()
-                self.reset_progress()  # Clear current level progress before moving to next
                 return 'next_level'
         
         return None
