@@ -9,7 +9,6 @@ import math
 import os
 import sys
 import threading
-import pygame
 
 # Add ui directory to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'ui'))
@@ -30,8 +29,6 @@ class SewBotApp:
         self.glow_phase = 0
         self.running = True
         self.fullscreen = False  # Fullscreen state
-        self.screen = None
-        self.clock = None
         
         # Theme colors
         self.COLORS = {
@@ -120,15 +117,11 @@ class SewBotApp:
         # Pre-render grid background (performance optimization)
         self.grid_background = self.create_grid_background()
         
-        # Create app window with pygame (does not depend on OpenCV highgui)
         try:
-            pygame.init()
-            self.screen = pygame.display.set_mode((self.width, self.height), pygame.DOUBLEBUF)
-            pygame.display.set_caption(self.window_name)
-            self.clock = pygame.time.Clock()
-            print("✓ Pygame window initialized")
-        except Exception as e:
-            print(f"Failed to create pygame window: {e}")
+            cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
+            cv2.setMouseCallback(self.window_name, self.mouse_callback)
+        except:
+            print("Failed to create window")
             self.running = False
         
         # Detect camera at startup
@@ -158,13 +151,13 @@ class SewBotApp:
     
     def toggle_fullscreen(self):
         """Toggle between fullscreen and windowed mode"""
-        if self.screen is None:
-            return
-
         self.fullscreen = not self.fullscreen
-        flags = pygame.DOUBLEBUF | (pygame.FULLSCREEN if self.fullscreen else 0)
-        self.screen = pygame.display.set_mode((self.width, self.height), flags)
-        print("Fullscreen mode enabled" if self.fullscreen else "Fullscreen mode disabled")
+        if self.fullscreen:
+            cv2.setWindowProperty(self.window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+            print("Fullscreen mode enabled")
+        else:
+            cv2.setWindowProperty(self.window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_NORMAL)
+            print("Fullscreen mode disabled")
     
     def create_grid_background(self):
         """Pre-render grid background once for better performance"""
@@ -799,50 +792,44 @@ class SewBotApp:
                     self.draw_mute_button(frame)
                 
                 self.glow_phase += 0.05
-                # Present frame through pygame
-                if self.screen is None:
-                    print("Display not initialized - Exiting...")
-                    self.running = False
-                    break
-
-                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                surface = pygame.surfarray.make_surface(np.transpose(frame_rgb, (1, 0, 2)))
-                self.screen.blit(surface, (0, 0))
-                pygame.display.flip()
-
-                # Handle input and window events
-                for event in pygame.event.get():
-                    if event.type == pygame.QUIT:
+                cv2.imshow(self.window_name, frame)
+                
+                # Check if window was closed (X button clicked)
+                # This needs to be checked after imshow
+                key = cv2.waitKey(30) & 0xFF
+                
+                # Handle keyboard shortcuts
+                if key == ord('f') or key == ord('F'):  # F key to toggle fullscreen
+                    self.toggle_fullscreen()
+                elif key == 27:  # ESC key to exit fullscreen or quit
+                    if self.fullscreen:
+                        self.toggle_fullscreen()
+                    else:
+                        print("ESC pressed - Exiting...")
+                        self.running = False
+                        break
+                
+                # Pattern mode specific controls
+                elif self.state == 'pattern':
+                    if key == ord('+') or key == ord('='):  # Increase confidence threshold
+                        self.pattern_mode.confidence_threshold = min(0.9, self.pattern_mode.confidence_threshold + 0.05)
+                        print(f"Confidence threshold: {self.pattern_mode.confidence_threshold:.2f}")
+                    elif key == ord('-') or key == ord('_'):  # Decrease confidence threshold
+                        self.pattern_mode.confidence_threshold = max(0.1, self.pattern_mode.confidence_threshold - 0.05)
+                        print(f"Confidence threshold: {self.pattern_mode.confidence_threshold:.2f}")
+                
+                # Check window property to detect X button click
+                try:
+                    if cv2.getWindowProperty(self.window_name, cv2.WND_PROP_VISIBLE) < 1:
                         print("Window closed - Exiting...")
                         self.running = False
                         break
-
-                    if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                        self.mouse_callback(cv2.EVENT_LBUTTONDOWN, event.pos[0], event.pos[1], None, None)
-
-                    if event.type == pygame.KEYDOWN:
-                        if event.key == pygame.K_f:  # F key to toggle fullscreen
-                            self.toggle_fullscreen()
-                        elif event.key == pygame.K_ESCAPE:  # ESC key to exit fullscreen or quit
-                            if self.fullscreen:
-                                self.toggle_fullscreen()
-                            else:
-                                print("ESC pressed - Exiting...")
-                                self.running = False
-                                break
-                        elif self.state == 'pattern':
-                            # Pattern mode specific controls
-                            if event.key in (pygame.K_PLUS, pygame.K_EQUALS, pygame.K_KP_PLUS):
-                                self.pattern_mode.confidence_threshold = min(0.9, self.pattern_mode.confidence_threshold + 0.05)
-                                print(f"Confidence threshold: {self.pattern_mode.confidence_threshold:.2f}")
-                            elif event.key in (pygame.K_MINUS, pygame.K_UNDERSCORE, pygame.K_KP_MINUS):
-                                self.pattern_mode.confidence_threshold = max(0.1, self.pattern_mode.confidence_threshold - 0.05)
-                                print(f"Confidence threshold: {self.pattern_mode.confidence_threshold:.2f}")
-
-                if self.clock is not None:
-                    self.clock.tick(30)
+                except:
+                    print("Window closed - Exiting...")
+                    self.running = False
+                    break
                     
-            except (cv2.error, pygame.error, Exception) as e:
+            except (cv2.error, Exception) as e:
                 print(f"Window closed: {e}")
                 self.running = False
                 break
@@ -854,19 +841,8 @@ class SewBotApp:
         # Cleanup music system
         music_manager = get_music_manager()
         music_manager.cleanup()
-
-        # Cleanup pygame
-        try:
-            pygame.quit()
-        except:
-            pass
         
-        # Try to destroy windows, but ignore error if OpenCV GUI isn't available
-        try:
-            cv2.destroyAllWindows()
-        except:
-            pass  # OpenCV highgui not available on this system, skip cleanup
-        
+        cv2.destroyAllWindows()
         print("Program closed.")
 
 
