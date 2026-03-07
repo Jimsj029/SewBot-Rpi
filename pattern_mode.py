@@ -68,7 +68,19 @@ class PatternMode:
         # Real-time stitch tracking for progressive coloring
         self.completed_stitch_mask = None  # Accumulated mask of all detected stitches
         self.proximity_radius = 30  # Pixels around completed stitches that turn cyan
-        
+
+        # ── Needle ROI – change these two values to reposition the detection window ──
+        self.NEEDLE_ROI_SIZE = 64   # Side-length of the square ROI (camera-frame pixels)
+        self.NEEDLE_ROI_X    = 280  # ROI centre X in camera-frame pixels  ← adjust freely
+        self.NEEDLE_ROI_Y    = 210  # ROI centre Y in camera-frame pixels  ← adjust freely
+        # ─────────────────────────────────────────────────────────────────────────────
+
+        # Needle optical-flow tracking (updates pos between YOLO calls)
+        self.needle_pos_x = float(self.NEEDLE_ROI_X)
+        self.needle_pos_y = float(self.NEEDLE_ROI_Y)
+        self.prev_gray    = None   # Grayscale previous frame
+        self.of_points    = None   # Lucas-Kanade tracking points
+
         # Segment tracking (divide pattern into 4 quarters)
         self.current_segment = 1  # 1=first 25%, 2=25-50%, 3=50-75%, 4=75-100%
         self.highest_segment_reached = 1  # Track highest segment to prevent going backwards
@@ -132,7 +144,27 @@ class PatternMode:
             import traceback
             traceback.print_exc()
             self.cloth_model = None
-        
+
+        # Load needle detection model (used for single-stitch ROI pipeline)
+        try:
+            needle_model_path = os.path.join(models_dir, 'stitch.onnx')
+            if os.path.exists(needle_model_path):
+                print(f"Loading needle detection model: {needle_model_path}")
+                self.needle_model = YOLO(needle_model_path, task='detect')
+                print(f"✓ Needle detection model loaded successfully!")
+                if hasattr(self.needle_model, 'names'):
+                    for idx, name in self.needle_model.names.items():
+                        print(f"    Class {idx}: {name}")
+                test_img = np.zeros((64, 64, 3), dtype=np.uint8)
+                self.needle_model(test_img, conf=self.confidence_threshold, verbose=False)
+                print("  ✓ Needle model test successful!")
+            else:
+                print(f"⚠ Needle model not found: {needle_model_path}")
+                self.needle_model = None
+        except Exception as e:
+            print(f"⚠ ERROR loading needle model: {e}")
+            self.needle_model = None
+
         # Music flag to track if music is playing
         self.music_playing = False
     
@@ -246,6 +278,175 @@ class PatternMode:
         
         return colored_overlay
     
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Needle ROI pipeline
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _update_needle_optical_flow(self, gray_frame):
+        """No-op: ROI is fixed at NEEDLE_ROI_X/Y — optical flow intentionally disabled."""
+        pass
+
+    def run_needle_pipeline(self, cam_frame, pattern_alpha,
+                            x_offset, y_offset, actual_w, actual_h,
+                            run_detection=True):
+        """
+        Single-needle detection pipeline (replaces multi-stitch update_game_stats).
+
+        Pipeline:
+          Camera frame
+            → optical flow tracks needle between YOLO calls
+            → 64×64 ROI cropped around needle_pos
+            → needle.onnx detects needle / stitch
+            → stitch centre mapped to pattern coordinates
+            → pattern overlap check
+            → completed_stitch_mask updated
+            → progress recalculated
+        """
+        if pattern_alpha is None:
+            return
+
+        gray = cv2.cvtColor(cam_frame, cv2.COLOR_BGR2GRAY)
+
+        # Always try to refine position via optical flow
+        self._update_needle_optical_flow(gray)
+
+        # Only run heavy YOLO inference on scheduled frames
+        if not run_detection or self.needle_model is None:
+            return
+
+        half = self.NEEDLE_ROI_SIZE // 2
+        rx1 = max(0, int(self.needle_pos_x) - half)
+        ry1 = max(0, int(self.needle_pos_y) - half)
+        rx2 = min(self.camera_width,  rx1 + self.NEEDLE_ROI_SIZE)
+        ry2 = min(self.camera_height, ry1 + self.NEEDLE_ROI_SIZE)
+
+        roi = cam_frame[ry1:ry2, rx1:rx2]
+        if roi.size == 0:
+            return
+
+        try:
+            # Run needle model — use imgsz=128 for better quality on small crop;
+            # use a lower conf threshold than cloth (0.1) since stitch crops are small
+            results = self.needle_model(roi, conf=0.1, imgsz=128, verbose=False)
+
+            num_boxes = len(results[0].boxes) if (results and results[0].boxes is not None) else 0
+
+            # ── Canny fallback when YOLO finds nothing ─────────────────────────
+            # needle.onnx is trained for cloth-level detection and won't fire on
+            # a small 64×64 stitch crop.  Use edge+contour centroid instead.
+            if num_boxes == 0:
+                gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+                # Enhance contrast before edge detection
+                gray_roi = cv2.equalizeHist(gray_roi)
+                edges = cv2.Canny(gray_roi, 40, 120)
+                cnts, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL,
+                                           cv2.CHAIN_APPROX_SIMPLE)
+                # Pick contours large enough to be a real stitch (>= 15 px²)
+                cnts = [c for c in cnts if cv2.contourArea(c) >= 15]
+                if cnts:
+                    # Use the contour closest to the ROI centre
+                    roi_cx, roi_cy = roi.shape[1] / 2, roi.shape[0] / 2
+                    def dist_to_centre(c):
+                        M = cv2.moments(c)
+                        if M["m00"] == 0: return 9999
+                        return math.hypot(M["m10"]/M["m00"] - roi_cx,
+                                          M["m01"]/M["m00"] - roi_cy)
+                    best_cnt = min(cnts, key=dist_to_centre)
+                    M = cv2.moments(best_cnt)
+                    if M["m00"] != 0:
+                        fx = rx1 + M["m10"] / M["m00"]
+                        fy = ry1 + M["m01"] / M["m00"]
+                        self._register_stitch(fx, fy, gray,
+                                              pattern_alpha, x_offset, y_offset,
+                                              actual_w, actual_h, source="canny")
+                return   # done whether canny fired or not
+            # ──────────────────────────────────────────────────────────────────
+
+            if num_boxes > 0:
+                boxes  = results[0].boxes
+                confs  = boxes.conf.cpu().numpy()
+                best   = int(np.argmax(confs))
+                xyxy   = boxes[best].xyxy[0].cpu().numpy()
+                cx_cam = rx1 + (xyxy[0] + xyxy[2]) / 2.0
+                cy_cam = ry1 + (xyxy[1] + xyxy[3]) / 2.0
+
+                self._register_stitch(cx_cam, cy_cam, gray,
+                                      pattern_alpha, x_offset, y_offset,
+                                      actual_w, actual_h,
+                                      source=f"yolo conf={float(confs[best]):.2f}")
+        except Exception as e:
+            import traceback
+            print(f"Needle detection error: {e}")
+            traceback.print_exc()
+
+    def _register_stitch(self, cx_cam, cy_cam, gray,
+                         pattern_alpha, x_offset, y_offset, actual_w, actual_h,
+                         source=""):
+        """Check if a candidate stitch position overlaps the pattern and record it."""
+        pat_h, pat_w = pattern_alpha.shape[:2]
+
+        # Map from camera-frame coords to pattern-overlay coords
+        px = int(np.clip(cx_cam - x_offset, 0, actual_w - 1))
+        py = int(np.clip(cy_cam - y_offset, 0, actual_h - 1))
+
+        # Proximity check against pattern lines
+        pat_crop   = pattern_alpha[:actual_h, :actual_w]
+        pat_binary = (pat_crop > 0.1).astype(np.uint8)
+        kern_r     = max(3, self.proximity_radius * 2 + 1)
+        kern       = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kern_r, kern_r))
+        near_mask  = cv2.dilate(pat_binary, kern, iterations=1)
+        on_or_near = bool(near_mask[py, px] > 0)
+
+        print(f"🪡 [{source}] cam=({cx_cam:.0f},{cy_cam:.0f})  "
+              f"pat=({px},{py})  near={on_or_near}")
+
+        if on_or_near:
+            if self.completed_stitch_mask is None:
+                self.completed_stitch_mask = np.zeros((pat_h, pat_w), dtype=np.uint8)
+            cv2.circle(self.completed_stitch_mask, (px, py), 8, 255, -1)
+            self._update_progress_from_mask(pattern_alpha)
+            self.stitches_detected += 1
+
+    def _update_progress_from_mask(self, pattern_alpha):
+        """Recalculate raw_progress and pattern_progress from completed_stitch_mask."""
+        if self.completed_stitch_mask is None:
+            return
+
+        pattern_pixels = (pattern_alpha > 0.1)
+        total = int(np.sum(pattern_pixels))
+        if total == 0:
+            return
+
+        # Dilate stitch dots to bridge small gaps (uses proximity_radius)
+        k = max(3, self.proximity_radius)
+        kernel  = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+        dilated = cv2.dilate(self.completed_stitch_mask, kernel, iterations=1)
+
+        covered = int(np.sum(np.logical_and(dilated > 0, pattern_pixels)))
+        self.raw_progress = min(100.0, covered / total * 100.0)
+        print(f"📊 Raw Progress: {self.raw_progress:.1f}%")
+
+        # Update segmented visual progress (one-way ratchet)
+        rp = self.raw_progress
+        if   rp >= 70: new_seg, new_prog = 5, 100.0
+        elif rp >= 45: new_seg, new_prog = 4,  75.0
+        elif rp >= 25: new_seg, new_prog = 3,  50.0
+        elif rp >= 12: new_seg, new_prog = 2,  25.0
+        else:          new_seg, new_prog = 1,   0.0
+
+        if new_seg > self.highest_segment_reached:
+            self.highest_segment_reached = new_seg
+            self.current_segment  = min(new_seg, 4)
+            self.pattern_progress = new_prog
+        elif self.highest_segment_reached >= 5:
+            self.current_segment  = 4
+            self.pattern_progress = 100.0
+        else:
+            self.current_segment  = self.highest_segment_reached
+            self.pattern_progress = (self.highest_segment_reached - 1) * 25.0
+
+    # ──────────────────────────────────────────────────────────────────────────
 
     def draw_glow_rect(self, img, x, y, w, h, color, glow_intensity):
         """Draw rectangle with glow effect"""
@@ -446,7 +647,11 @@ class PatternMode:
                                       (1 - alpha_crop * 0.7) * roi[:, :, c])
                     cam_frame[y_offset:overlay_end_y, x_offset:overlay_end_x] = roi
                     
-                    self.update_game_stats([], pattern_alpha, x_offset, y_offset, actual_w, actual_h)
+                    self.run_needle_pipeline(
+                        cam_frame, pattern_alpha,
+                        x_offset, y_offset, actual_w, actual_h,
+                        process_detection
+                    )
             
             # Draw cloth detection bounding box
             if cloth_bbox is not None:
@@ -456,6 +661,17 @@ class PatternMode:
                 (lw, lh), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
                 cv2.rectangle(cam_frame, (x1, y1 - lh - 8), (x1 + lw + 6, y1), (0, 255, 0), -1)
                 cv2.putText(cam_frame, label, (x1 + 3, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+
+            # Draw needle ROI box (cyan) so the user can see & reposition it
+            _half = self.NEEDLE_ROI_SIZE // 2
+            _nrx1 = max(0, int(self.needle_pos_x) - _half)
+            _nry1 = max(0, int(self.needle_pos_y) - _half)
+            _nrx2 = min(self.camera_width,  _nrx1 + self.NEEDLE_ROI_SIZE)
+            _nry2 = min(self.camera_height, _nry1 + self.NEEDLE_ROI_SIZE)
+            cv2.rectangle(cam_frame, (_nrx1, _nry1), (_nrx2, _nry2), (0, 255, 255), 2)
+            cv2.putText(cam_frame, "Needle ROI",
+                        (_nrx1, max(10, _nry1 - 5)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1)
             
             frame[self.camera_y:self.camera_y+self.camera_height, 
                   self.camera_x:self.camera_x+self.camera_width] = cam_frame
