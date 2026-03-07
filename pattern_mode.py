@@ -387,26 +387,27 @@ class PatternMode:
                 except Exception as e:
                     print(f"Cloth detection error: {e}")
             
-            # Apply EMA smoothing to stabilize the bounding box
+            # Apply weighted averaging to stabilize the bounding box
             raw_bbox = self.last_cloth_bbox
             if raw_bbox is not None:
-                if self.smooth_cloth_bbox is None:
-                    self.smooth_cloth_bbox = tuple(float(v) for v in raw_bbox)
-                else:
-                    a = self.bbox_smooth_alpha
-                    sx1, sy1, sx2, sy2 = self.smooth_cloth_bbox
-                    rx1, ry1, rx2, ry2 = raw_bbox
-                    # Only pull toward new detection if it moved more than threshold
-                    if (abs(rx1 - sx1) > self.bbox_move_threshold or
-                        abs(ry1 - sy1) > self.bbox_move_threshold or
-                        abs(rx2 - sx2) > self.bbox_move_threshold or
-                        abs(ry2 - sy2) > self.bbox_move_threshold):
-                        self.smooth_cloth_bbox = (
-                            sx1 + a * (rx1 - sx1),
-                            sy1 + a * (ry1 - sy1),
-                            sx2 + a * (rx2 - sx2),
-                            sy2 + a * (ry2 - sy2),
-                        )
+                if not hasattr(self, 'bbox_history'):
+                    self.bbox_history = []
+
+                # Add the new bounding box to the history
+                self.bbox_history.append(raw_bbox)
+
+                # Keep only the last N bounding boxes
+                max_history = 10  # Use the last 10 bounding boxes
+                if len(self.bbox_history) > max_history:
+                    self.bbox_history.pop(0)
+
+                # Adjust weights to give more importance to recent bounding boxes
+                weights = np.exp(np.linspace(0, 1, len(self.bbox_history)))
+                weights /= weights.sum()  # Normalize weights
+
+                # Compute the weighted average of the bounding boxes
+                weighted_bbox = np.average(self.bbox_history, axis=0, weights=weights)
+                self.smooth_cloth_bbox = tuple(weighted_bbox)
             cloth_bbox = (tuple(int(v) for v in self.smooth_cloth_bbox)
                           if self.smooth_cloth_bbox is not None else None)
             
