@@ -11,6 +11,14 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from music_manager import get_music_manager
 
+# Try to import YOLO for needle centring detection
+try:
+    from ultralytics import YOLO as _YOLO
+    YOLO_AVAILABLE = True
+except ImportError:
+    YOLO_AVAILABLE = False
+    print("YOLO not available – needle centring detection disabled")
+
 # Try to import pygame for audio playback
 try:
     import pygame.mixer
@@ -143,6 +151,31 @@ class WalletTutorialPlayer:
         self.ROI_STEP7_LINE_OFFSET = 28  # Pixel distance (~1 cm) of the two extra
                                          #   stitch lines shown only on step 7
         # ────────────────────────────────────────────────────────────────────────
+
+        # ── Needle centring detection ─────────────────────────────────────────
+        self.needle_confirmed        = False  # True when needle is currently centred
+        self.NEEDLE_CONF_THRESHOLD   = 0.35   # YOLO confidence threshold
+        self.NEEDLE_CENTER_TOLERANCE = 40     # px tolerance from ROI column midpoint
+        self.NEEDLE_CHECK_INTERVAL   = 6      # Run model every N draw-frames (~5 Hz @ 30 fps)
+        self._needle_check_counter   = 0      # Frame counter for throttling
+        self.needle_model = None
+        if YOLO_AVAILABLE:
+            try:
+                _needle_path = os.path.join(
+                    os.path.dirname(os.path.dirname(__file__)), 'models', 'needle.onnx')
+                if os.path.exists(_needle_path):
+                    self.needle_model = _YOLO(_needle_path, task='detect')
+                    # Warm-up run so first real frame isn't slow
+                    self.needle_model(
+                        np.zeros((64, 64, 3), dtype=np.uint8),
+                        conf=self.NEEDLE_CONF_THRESHOLD, verbose=False)
+                    print(f"\u2713 Needle centring model loaded: {_needle_path}")
+                else:
+                    print(f"\u26a0 needle.onnx not found at {_needle_path}")
+            except Exception as _e:
+                print(f"\u26a0 Needle model load error: {_e}")
+                self.needle_model = None
+        # ─────────────────────────────────────────────────────────────────────
 
         # Load the first video
         self.load_current_video()
@@ -400,6 +433,8 @@ class WalletTutorialPlayer:
         self.completed = False
         self.video_paused = False
         self.your_turn_mode = False  # Reset your turn mode
+        self.needle_confirmed = False
+        self._needle_check_counter = 0
         self.current_frame_img = None
         self.last_frame_time = time.time()
         self.frame_accumulator = 0.0
@@ -494,6 +529,8 @@ class WalletTutorialPlayer:
                 # Steps 2 and 12 skip "your turn" and go directly to next video
                 elif self.current_step >= 1 and self.current_step <= 13 and self.current_step not in (2, 12):
                     # Transition to your_turn mode
+                    self.needle_confirmed = False
+                    self._needle_check_counter = 0
                     self.your_turn_mode = True
                     return 'enter_your_turn'
                 else:
@@ -822,9 +859,18 @@ class WalletTutorialPlayer:
         if camera_frame is not None:
             # Resize camera to fill the entire area (like pattern mode)
             cam_frame_resized = cv2.resize(camera_frame, (camera_w, camera_h))
-            
+
             # Copy frame to main image
             img[camera_y:camera_y + camera_h, camera_x:camera_x + camera_w] = cam_frame_resized
+
+            # Throttled bidirectional needle centring check:
+            # runs every NEEDLE_CHECK_INTERVAL frames so it's cheap on RPi 4,
+            # but always updates needle_confirmed (including back to False if
+            # the needle moves away from the ROI centre).
+            self._needle_check_counter += 1
+            if self._needle_check_counter >= self.NEEDLE_CHECK_INTERVAL:
+                self._needle_check_counter = 0
+                self.needle_confirmed = self._run_needle_check(cam_frame_resized)
         else:
             # Dark background for camera
             cv2.rectangle(img, (camera_x, camera_y), (camera_x + camera_w, camera_y + camera_h), 
@@ -840,36 +886,52 @@ class WalletTutorialPlayer:
             _put_text(img, msg, msg_x, msg_y, font_scale_msg, COLORS['text_primary'], thickness_msg)
         
         # ── ROI guide overlay (drawn over the camera area onto img) ──────────────
-        abs_cx   = camera_x + self.ROI_CENTER_X
-        roi_top  = camera_y + self.ROI_TOP_Y
-        roi_bot  = camera_y + camera_h - self.ROI_BOT_MARGIN
-        half_w   = self.ROI_COL_WIDTH // 2
+        abs_cx  = camera_x + self.ROI_CENTER_X
+        roi_top = camera_y + self.ROI_TOP_Y
+        roi_bot = camera_y + camera_h - self.ROI_BOT_MARGIN
+        half_w  = self.ROI_COL_WIDTH // 2
+        col_x1  = abs_cx - half_w
+        col_x2  = abs_cx + half_w
 
-        col_x1 = abs_cx - half_w
-        col_x2 = abs_cx + half_w
-
-        # Animated glow on column outline
+        # Column outline – always visible so user knows where to position needle
         glow_a    = 0.5 + 0.5 * abs(math.sin(self.glow_phase))
         col_color = tuple(int(c * glow_a) for c in self.ROI_COL_COLOR)
-
         cv2.rectangle(img, (col_x1, roi_top), (col_x2, roi_bot), col_color, 2)
 
-        # Dashed centre stitch line
-        y = roi_top
-        while y < roi_bot:
-            y_end = min(y + self.ROI_DASH_LEN, roi_bot)
-            cv2.line(img, (abs_cx, y), (abs_cx, y_end), self.ROI_LINE_COLOR, 2)
-            y += self.ROI_DASH_LEN + self.ROI_DASH_GAP
+        if self.needle_confirmed:
+            # Dashed centre stitch line (only shown once needle is centred)
+            y = roi_top
+            while y < roi_bot:
+                y_end = min(y + self.ROI_DASH_LEN, roi_bot)
+                cv2.line(img, (abs_cx, y), (abs_cx, y_end), self.ROI_LINE_COLOR, 2)
+                y += self.ROI_DASH_LEN + self.ROI_DASH_GAP
 
-        # Step 7 only: two extra dashed lines ~1 cm to left and right of centre
-        if self.current_step == 7:
-            for x_off in (-self.ROI_STEP7_LINE_OFFSET, self.ROI_STEP7_LINE_OFFSET):
-                side_x = abs_cx + x_off
-                y = roi_top
-                while y < roi_bot:
-                    y_end = min(y + self.ROI_DASH_LEN, roi_bot)
-                    cv2.line(img, (side_x, y), (side_x, y_end), self.ROI_LINE_COLOR, 2)
-                    y += self.ROI_DASH_LEN + self.ROI_DASH_GAP
+            # Step 7 only: two extra dashed lines ~1 cm to left and right of centre
+            if self.current_step == 7:
+                for x_off in (-self.ROI_STEP7_LINE_OFFSET, self.ROI_STEP7_LINE_OFFSET):
+                    side_x = abs_cx + x_off
+                    y = roi_top
+                    while y < roi_bot:
+                        y_end = min(y + self.ROI_DASH_LEN, roi_bot)
+                        cv2.line(img, (side_x, y), (side_x, y_end), self.ROI_LINE_COLOR, 2)
+                        y += self.ROI_DASH_LEN + self.ROI_DASH_GAP
+        else:
+            # Warning banner: needle not yet centred (shown only while camera is live)
+            if camera_frame is not None:
+                warn_h  = 44
+                warn_y  = camera_y + 8
+                overlay = img.copy()
+                cv2.rectangle(overlay,
+                              (camera_x + 4, warn_y),
+                              (camera_x + camera_w - 4, warn_y + warn_h),
+                              (0, 60, 180), -1)
+                cv2.addWeighted(overlay, 0.78, img, 0.22, 0, img)
+                warn_txt = "!  SEWING NEEDLE NOT CENTRED"
+                warn_scale, warn_thick = 0.62, 2
+                (ww, wh), _ = cv2.getTextSize(warn_txt, UI_FONT, warn_scale, warn_thick)
+                wx = camera_x + (camera_w - ww) // 2
+                wy = warn_y + (warn_h + wh) // 2
+                _put_text(img, warn_txt, wx, wy, warn_scale, (0, 220, 255), warn_thick)
         # ─────────────────────────────────────────────────────────────────────
 
         # Draw back button (top left)
@@ -881,6 +943,35 @@ class WalletTutorialPlayer:
         # Draw NEXT button to continue to next step (bottom right)
         self.draw_button(img, self.your_turn_next_button, COLORS['button_hover'])
     
+    def _run_needle_check(self, cam_resized):
+        """Crop the ROI column from *cam_resized* and run needle.onnx.
+        Returns True if the highest-confidence detection centre-X is within
+        NEEDLE_CENTER_TOLERANCE pixels of the column's horizontal midpoint."""
+        if self.needle_model is None:
+            return False
+        h, w = cam_resized.shape[:2]
+        x1 = max(0, self.ROI_CENTER_X - self.ROI_COL_WIDTH // 2)
+        x2 = min(w, self.ROI_CENTER_X + self.ROI_COL_WIDTH // 2)
+        y1 = int(self.ROI_TOP_Y)
+        y2 = max(y1 + 1, h - int(self.ROI_BOT_MARGIN))
+        roi_crop = cam_resized[y1:y2, x1:x2]
+        if roi_crop.size == 0:
+            return False
+        try:
+            results = self.needle_model(
+                roi_crop, conf=self.NEEDLE_CONF_THRESHOLD, verbose=False)
+            if results and results[0].boxes is not None and len(results[0].boxes) > 0:
+                roi_w = x2 - x1
+                boxes = results[0].boxes
+                confs = boxes.conf.cpu().numpy()
+                best  = int(np.argmax(confs))
+                xyxy  = boxes[best].xyxy[0].cpu().numpy()
+                cx    = (xyxy[0] + xyxy[2]) / 2.0
+                return abs(cx - roi_w / 2.0) <= self.NEEDLE_CENTER_TOLERANCE
+        except Exception as e:
+            print(f"Needle check error: {e}")
+        return False
+
     def cleanup(self):
         """Release video capture and audio resources"""
         if self.cap:
