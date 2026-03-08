@@ -42,6 +42,43 @@ FONTS = {
     'title_size': 2.5
 }
 
+# Crisp font for all wallet tutorial text – DUPLEX renders much cleaner than
+# TRIPLEX on low-resolution screens (no thin serifs to pixelate).
+UI_FONT = cv2.FONT_HERSHEY_DUPLEX
+
+
+def _put_text(img, text, x, y, scale, color, thickness):
+    """Draw text with a 1-px black outline so it reads against any background."""
+    cv2.putText(img, text, (x + 1, y + 1), UI_FONT, scale, (0, 0, 0), thickness + 2, cv2.LINE_AA)
+    cv2.putText(img, text, (x, y),         UI_FONT, scale, color,     thickness,     cv2.LINE_AA)
+
+# Per-step instructions shown in "Your Turn" practice screen
+STEP_INSTRUCTIONS = {
+    1:  ["Take a 12x24 cm piece of cloth, fold it in half,",
+         "and stitch along the open edge to close it."],
+    2:  ["Turn the stitched cloth inside out so that",
+         "the seam is positioned on the inside."],
+    3:  ["Reinforce the seam by stitching again along the same line."],
+    4:  ["Prepare another 12x24 cm piece of cloth, fold it in half,",
+         "and stitch along the folded edge."],
+    5:  ["Place an 11x24 cm cloth with the stitched cloth from Steps 1-2 in the center.",
+         "Use pin needles (if available) to hold the layers in place."],
+    6:  ["Position the folded cloth from Step 4 underneath the assembled layers.",
+         "Sew around the edges in a U-shaped stitch to secure the pieces together."],
+    7:  ["Create a triple stitch in the center, approx. 0.5-1 cm apart,",
+         "to strengthen the middle section."],
+    8:  ["Place the 11x24 cm inner cover on top of the structure",
+         "and stitch along the upper edge."],
+    9:  ["Turn the cloth over and stitch again along the same seam to reinforce it."],
+    10: ["Place a 12x24 cm (base cover) at the back",
+         "and secure it with a U-shaped stitch."],
+    11: ["Position the final 12x24 cm (back lining) at the front",
+         "and stitch it using the same U-shaped pattern."],
+    12: ["Turn the wallet inside out from the top opening."],
+    13: ["Finally, stitch along the top opening to close any remaining gap",
+         "and complete the wallet."],
+}
+
 
 class WalletTutorialPlayer:
     def __init__(self, width=800, height=600, video_path=None, audio_path=None):
@@ -58,8 +95,8 @@ class WalletTutorialPlayer:
         
         # Multi-video support for wallet tutorial steps
         self.current_step = 0  # Current video index (0-10 for 11 videos)
-        self.total_steps = 11  # Wallet: Materials + 9 steps + Showcase
-        self.videos_base_path = r'c:\Users\Ron Cristian Mendoza\Downloads\Steps Wallet-20260301T072112Z-1-001\Steps Wallet'
+        self.total_steps = 15  # Wallet: Materials + 13 steps + Showcase
+        self.videos_base_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'videos')
         self.video_files = []  # Will store paths to wallet videos
         self.load_video_list()
         
@@ -92,7 +129,19 @@ class WalletTutorialPlayer:
         
         # Music manager for sound effects
         self.music_manager = get_music_manager()
-        
+
+        # ── "Your Turn" ROI guide overlay – change any value to reposition/resize ──
+        self.ROI_CENTER_X   = 272   # Horizontal centre of the column
+                                    #   (pixels from LEFT edge of the camera feed)
+        self.ROI_COL_WIDTH  = 140   # Total width of the single column in pixels
+        self.ROI_TOP_Y      = 0     # Y start offset from TOP of the camera feed
+        self.ROI_BOT_MARGIN = 0   # Y margin from BOTTOM of the camera feed
+        self.ROI_COL_COLOR  = (0, 255, 255)    # BGR colour of the column outline
+        self.ROI_LINE_COLOR = (220, 220, 220)  # BGR colour of the dashed stitch line
+        self.ROI_DASH_LEN   = 14    # Pixel length of each dash segment
+        self.ROI_DASH_GAP   = 8     # Pixel gap between dash segments
+        # ────────────────────────────────────────────────────────────────────────
+
         # Load the first video
         self.load_current_video()
         
@@ -170,9 +219,9 @@ class WalletTutorialPlayer:
         }
     
     def load_video_list(self):
-        """Load the list of wallet tutorial video files (Materials + Step 1-9 + Showcase)"""
+        """Load the list of wallet tutorial video files (Materials + Step 1-13 + Showcase)"""
         self.video_files = []
-        
+
         # Step 0: Wallet Materials video
         materials_patterns = [
             'Wallet Materials.mp4',
@@ -193,19 +242,26 @@ class WalletTutorialPlayer:
         if not materials_found:
             self.video_files.append(None)
             print(f"Warning: Wallet Materials video not found in {self.videos_base_path}")
-        
-        # Steps 1-9: Wallet construction steps
-        for i in range(1, 10):  # Steps 1 through 9
+
+        # Steps 1-13: Wallet construction steps
+        for i in range(1, 14):  # Steps 1 through 13
             video_found = False
-            patterns = []
-            
-            # First step has special naming
+
+            # First step has special naming (also try plain "Step 1.mp4")
             if i == 1:
                 patterns = [
+                    'Step 1.mp4',
+                    'Step 1.MP4',
+                    'step 1.mp4',
+                    'step 1.MP4',
+                    'step1.mp4',
+                    'step1.MP4',
                     'Step 1 Wallet.mp4',
                     'Step 1 Wallet.MP4',
                     'Step 1 Wallet.mov',
                     'Step 1 Wallet.MOV',
+                    'Step 1.mov',
+                    'Step 1.MOV',
                 ]
             else:
                 patterns = [
@@ -222,7 +278,7 @@ class WalletTutorialPlayer:
                     f'step {i}.mov',
                     f'step {i}.MOV',
                 ]
-            
+
             for pattern in patterns:
                 video_path = os.path.join(self.videos_base_path, pattern)
                 if os.path.exists(video_path):
@@ -230,7 +286,7 @@ class WalletTutorialPlayer:
                     video_found = True
                     print(f"Found wallet tutorial video: {pattern}")
                     break
-            
+
             if not video_found:
                 self.video_files.append(None)
                 print(f"Warning: wallet step{i} video not found in {self.videos_base_path}")
@@ -413,9 +469,9 @@ class WalletTutorialPlayer:
                 self.replay_current_video()
                 return 'replay_current'
         
-        # Check previous button (only when video is playing/paused and on steps 1-9)
+        # Check previous button (only when video is playing/paused and on steps 1-13)
         if not self.skipped and not self.completed and not self.your_turn_mode:
-            if self.current_step >= 1 and self.current_step <= 9:
+            if self.current_step >= 1 and self.current_step <= 13:
                 btn = self.previous_button
                 if btn['x'] <= x <= btn['x'] + btn['w'] and btn['y'] <= y <= btn['y'] + btn['h']:
                     self.play_button_click_sound()
@@ -432,8 +488,9 @@ class WalletTutorialPlayer:
                 # If on last step, this is the Done button
                 if self.current_step >= self.total_steps - 1:
                     return 'continue'  # Done with all tutorials
-                # Check if current step needs \"your turn\" practice (steps 1-9, not materials or showcase)
-                elif self.current_step >= 1 and self.current_step <= 9:
+                # Check if current step needs "your turn" practice (steps 1-13, not materials or showcase)
+                # Steps 2 and 12 skip "your turn" and go directly to next video
+                elif self.current_step >= 1 and self.current_step <= 13 and self.current_step not in (2, 12):
                     # Transition to your_turn mode
                     self.your_turn_mode = True
                     return 'enter_your_turn'
@@ -515,17 +572,15 @@ class WalletTutorialPlayer:
         cv2.rectangle(img, (x, y), (x + w, y + h), border_color, 2)
         
         # Text
-        font = cv2.FONT_HERSHEY_TRIPLEX
-        font_scale = 0.8
+        font_scale = 0.75
         thickness = 2
         text = btn['text']
-        
-        (text_w, text_h), baseline = cv2.getTextSize(text, font, font_scale, thickness)
+
+        (text_w, text_h), baseline = cv2.getTextSize(text, UI_FONT, font_scale, thickness)
         text_x = x + (w - text_w) // 2
         text_y = y + (h + text_h) // 2
-        
-        cv2.putText(img, text, (text_x, text_y), font, font_scale, 
-                   COLORS['text_primary'], thickness)
+
+        _put_text(img, text, text_x, text_y, font_scale, COLORS['text_primary'], thickness)
     
     def draw_video_frame(self, img):
         """Draw actual video frame or placeholder"""
@@ -579,27 +634,23 @@ class WalletTutorialPlayer:
             cv2.circle(img, (center_x, center_y), radius + 10, COLORS['cyan'], 1)
             
             # Tutorial text
-            font = cv2.FONT_HERSHEY_TRIPLEX
-            
             # Title
             title = "WALLET TUTORIAL VIDEO"
-            font_scale = 1.2
+            font_scale = 1.1
             thickness = 2
-            (text_w, text_h), _ = cv2.getTextSize(title, font, font_scale, thickness)
+            (text_w, text_h), _ = cv2.getTextSize(title, UI_FONT, font_scale, thickness)
             text_x = center_x - text_w // 2
             text_y = center_y - 60
-            cv2.putText(img, title, (text_x, text_y), font, font_scale, 
-                       COLORS['text_accent'], thickness)
-            
+            _put_text(img, title, text_x, text_y, font_scale, COLORS['text_accent'], thickness)
+
             # Subtitle
             subtitle = "(No Video File Found)"
             font_scale = 0.7
-            thickness = 1
-            (text_w, text_h), _ = cv2.getTextSize(subtitle, font, font_scale, thickness)
+            thickness = 2
+            (text_w, text_h), _ = cv2.getTextSize(subtitle, UI_FONT, font_scale, thickness)
             text_x = center_x - text_w // 2
             text_y = center_y - 30
-            cv2.putText(img, subtitle, (text_x, text_y), font, font_scale, 
-                       COLORS['text_secondary'], thickness)
+            _put_text(img, subtitle, text_x, text_y, font_scale, COLORS['text_secondary'], thickness)
         
         # Progress bar
         progress = self.video_frame / self.max_frames if self.max_frames > 0 else 0
@@ -657,8 +708,8 @@ class WalletTutorialPlayer:
             # Draw replay current button (left side)
             self.draw_button(img, self.replay_current_button, COLORS['button_normal'])
             
-            # Draw previous button (bottom left) - only show on steps 1-9
-            if self.current_step >= 1 and self.current_step <= 9:
+            # Draw previous button (bottom left) - only show on steps 1-13
+            if self.current_step >= 1 and self.current_step <= 13:
                 self.draw_button(img, self.previous_button, COLORS['button_hover'])
             
             # Draw next/done button (right side)
@@ -671,114 +722,90 @@ class WalletTutorialPlayer:
             
         else:
             # Completed or skipped
-            font = cv2.FONT_HERSHEY_TRIPLEX
             title = "WALLET TUTORIAL COMPLETED" if self.completed else "WALLET TUTORIAL"
-            font_scale = 1.5
+            font_scale = 1.4
             thickness = 3
-            
-            (text_w, text_h), _ = cv2.getTextSize(title, font, font_scale, thickness)
+
+            (text_w, text_h), _ = cv2.getTextSize(title, UI_FONT, font_scale, thickness)
             text_x = (self.width - text_w) // 2
             text_y = self.height // 3
-            
-            cv2.putText(img, title, (text_x, text_y), font, font_scale, 
-                       COLORS['text_accent'], thickness)
+
+            _put_text(img, title, text_x, text_y, font_scale, COLORS['text_accent'], thickness)
             
             # Draw replay and continue buttons
             self.draw_button(img, self.replay_button, COLORS['button_normal'])
             self.draw_button(img, self.continue_button, COLORS['button_hover'])
     
     def draw_step_indicator(self, img):
-        """Draw step indicator showing current progress (Materials, Step 1-9, Showcase)"""
-        font = cv2.FONT_HERSHEY_TRIPLEX
-        
+        """Draw step indicator showing current progress (Materials, Step 1-13, Showcase)"""
         # Determine the text based on current step
         if self.current_step == 0:
             text = "Wallet Materials"
         elif self.current_step == self.total_steps - 1:
             text = "Wallet Showcase"
         else:
-            text = f"Wallet Step {self.current_step} of {self.total_steps - 2}"  # -2 for materials and showcase
-        
-        font_scale = 0.8
+            text = f"Wallet Step {self.current_step} of {self.total_steps - 2}"
+
+        font_scale = 0.85
         thickness = 2
-        
-        (text_w, text_h), baseline = cv2.getTextSize(text, font, font_scale, thickness)
-        # Keep centered horizontally at the top
+
+        (text_w, text_h), baseline = cv2.getTextSize(text, UI_FONT, font_scale, thickness)
         text_x = (self.width - text_w) // 2
-        text_y = 20 + (50 + text_h) // 2  # Same Y position as back button
-        
-        # Background for better visibility
+        text_y = 20 + (50 + text_h) // 2
+
         padding = 10
-        cv2.rectangle(img, 
+        cv2.rectangle(img,
                      (text_x - padding, text_y - text_h - padding),
                      (text_x + text_w + padding, text_y + padding),
-                     (40, 40, 40), -1)
-        
-        # Border
-        cv2.rectangle(img, 
+                     (20, 20, 20), -1)
+        cv2.rectangle(img,
                      (text_x - padding, text_y - text_h - padding),
                      (text_x + text_w + padding, text_y + padding),
                      COLORS['cyan'], 2)
-        
-        # Text
-        cv2.putText(img, text, (text_x, text_y), font, font_scale, 
-                   COLORS['text_accent'], thickness)
+        _put_text(img, text, text_x, text_y, font_scale, COLORS['text_accent'], thickness)
     
     def draw_your_turn(self, img, camera_frame):
         """Draw the 'Your Turn' practice screen with webcam feed"""
-        font = cv2.FONT_HERSHEY_TRIPLEX
-        
-        # Title at top
+        # ── Title ────────────────────────────────────────────────────────────
         title = f"Your Turn - Practice Step {self.current_step}"
-        font_scale = 1.2
-        thickness = 3
-        
-        (text_w, text_h), baseline = cv2.getTextSize(title, font, font_scale, thickness)
+        title_scale = 0.95
+        title_thick = 2
+
+        (text_w, text_h), _ = cv2.getTextSize(title, UI_FONT, title_scale, title_thick)
         text_x = (self.width - text_w) // 2
-        text_y = 50
-        
-        # Background for title
-        padding = 15
-        cv2.rectangle(img, 
+        text_y = 38
+
+        padding = 10
+        cv2.rectangle(img,
                      (text_x - padding, text_y - text_h - padding),
                      (text_x + text_w + padding, text_y + padding),
-                     (40, 40, 40), -1)
-        
-        # Border with glow
+                     (20, 20, 20), -1)
         glow_intensity = 0.5 + 0.5 * abs(math.sin(self.glow_phase))
         border_color = tuple(int(c * glow_intensity) for c in COLORS['cyan'])
-        cv2.rectangle(img, 
+        cv2.rectangle(img,
                      (text_x - padding, text_y - text_h - padding),
                      (text_x + text_w + padding, text_y + padding),
-                     border_color, 3)
-        
-        # Title text
-        cv2.putText(img, title, (text_x, text_y), font, font_scale, 
-                   COLORS['text_accent'], thickness)
-        
-        # Instruction text
-        instruction = "Now it's your turn! Practice what you learned in the video."
-        font_scale_small = 0.7
-        thickness_small = 1
-        (inst_w, inst_h), _ = cv2.getTextSize(instruction, font, font_scale_small, thickness_small)
-        inst_x = (self.width - inst_w) // 2
-        inst_y = text_y + text_h + 40
-        cv2.putText(img, instruction, (inst_x, inst_y), font, font_scale_small, 
-                   COLORS['text_secondary'], thickness_small)
-        
-        # Second instruction line
-        instruction2 = "When you're ready, click NEXT to continue to the next step."
-        (inst2_w, inst2_h), _ = cv2.getTextSize(instruction2, font, font_scale_small, thickness_small)
-        inst2_x = (self.width - inst2_w) // 2
-        inst2_y = inst_y + 25
-        cv2.putText(img, instruction2, (inst2_x, inst2_y), font, font_scale_small, 
-                   COLORS['text_secondary'], thickness_small)
-        
-        # Camera feed area (same dimensions as pattern mode)
+                     border_color, 2)
+        _put_text(img, title, text_x, text_y, title_scale, COLORS['text_accent'], title_thick)
+
+        # ── Step instructions ─────────────────────────────────────────────
+        inst_scale = 0.62
+        inst_thick = 2
+        lines = STEP_INSTRUCTIONS.get(self.current_step, ["Practice what you learned in the video."])
+        line_spacing = 22
+        cur_y = text_y + text_h + 26
+        for line in lines:
+            (lw, lh), _ = cv2.getTextSize(line, UI_FONT, inst_scale, inst_thick)
+            lx = (self.width - lw) // 2
+            _put_text(img, line, lx, cur_y, inst_scale, COLORS['text_secondary'], inst_thick)
+            cur_y += line_spacing
+        last_inst_y = cur_y
+
+        # Camera feed area
         camera_w = 544
         camera_h = 400
-        camera_x = (self.width - camera_w) // 2  # Center horizontally
-        camera_y = inst2_y + 30
+        camera_x = (self.width - camera_w) // 2
+        camera_y = last_inst_y + 10
         
         # Draw camera frame border with glow effect (similar to pattern mode)
         border_color_intensity = 0.4 + 0.3 * abs(math.sin(self.glow_phase * 0.7))
@@ -803,14 +830,36 @@ class WalletTutorialPlayer:
             
             # Show "Opening camera..." message
             msg = "Opening camera..."
-            font_scale_msg = 0.8
+            font_scale_msg = 0.75
             thickness_msg = 2
-            (msg_w, msg_h), _ = cv2.getTextSize(msg, font, font_scale_msg, thickness_msg)
+            (msg_w, msg_h), _ = cv2.getTextSize(msg, UI_FONT, font_scale_msg, thickness_msg)
             msg_x = camera_x + (camera_w - msg_w) // 2
             msg_y = camera_y + (camera_h + msg_h) // 2
-            cv2.putText(img, msg, (msg_x, msg_y), font, font_scale_msg, 
-                       COLORS['text_primary'], thickness_msg)
+            _put_text(img, msg, msg_x, msg_y, font_scale_msg, COLORS['text_primary'], thickness_msg)
         
+        # ── ROI guide overlay (drawn over the camera area onto img) ──────────────
+        abs_cx   = camera_x + self.ROI_CENTER_X
+        roi_top  = camera_y + self.ROI_TOP_Y
+        roi_bot  = camera_y + camera_h - self.ROI_BOT_MARGIN
+        half_w   = self.ROI_COL_WIDTH // 2
+
+        col_x1 = abs_cx - half_w
+        col_x2 = abs_cx + half_w
+
+        # Animated glow on column outline
+        glow_a    = 0.5 + 0.5 * abs(math.sin(self.glow_phase))
+        col_color = tuple(int(c * glow_a) for c in self.ROI_COL_COLOR)
+
+        cv2.rectangle(img, (col_x1, roi_top), (col_x2, roi_bot), col_color, 2)
+
+        # Dashed centre stitch line
+        y = roi_top
+        while y < roi_bot:
+            y_end = min(y + self.ROI_DASH_LEN, roi_bot)
+            cv2.line(img, (abs_cx, y), (abs_cx, y_end), self.ROI_LINE_COLOR, 2)
+            y += self.ROI_DASH_LEN + self.ROI_DASH_GAP
+        # ─────────────────────────────────────────────────────────────────────
+
         # Draw back button (top left)
         self.draw_button(img, self.back_button, COLORS['button_hover'])
         
