@@ -41,6 +41,51 @@ class PatternMode:
         
         # Evaluate button (below stats panel)
         self.evaluate_button = {'x': 800, 'y': 470, 'w': 200, 'h': 50}
+
+        # Color detection selector (right side, above stats)
+        self.color_panel_x = 800
+        self.color_panel_y = 120
+        self.color_panel_width = 200
+        self.color_panel_height = 70
+        self.selected_detection_color = 'white'
+        self.color_profiles = {
+            'white': {
+                'label': 'WHITE',
+                'preview_bgr': (240, 240, 240),
+                'hsv_ranges': [((0, 0, 170), (179, 50, 255))],
+                'min_ratio': 0.15,
+            },
+            'yellow': {
+                'label': 'YELLOW',
+                'preview_bgr': (0, 255, 255),
+                'hsv_ranges': [((18, 80, 80), (40, 255, 255))],
+                'min_ratio': 0.15,
+            },
+            'red': {
+                'label': 'RED',
+                'preview_bgr': (0, 0, 255),
+                'hsv_ranges': [
+                    ((0, 90, 70), (10, 255, 255)),
+                    ((160, 90, 70), (179, 255, 255)),
+                ],
+                'min_ratio': 0.15,
+            },
+        }
+        self.color_buttons = {}
+
+        # Confidence controls (below evaluate button)
+        self.conf_panel_x = 800
+        self.conf_panel_y = 525
+        self.conf_panel_width = 200
+        self.conf_panel_height = 65
+        self.conf_minus_button = {'x': 0, 'y': 0, 'w': 0, 'h': 0}
+        self.conf_plus_button = {'x': 0, 'y': 0, 'w': 0, 'h': 0}
+
+        # Live color-match indicator state
+        self.last_color_match_ratio = 0.0
+        self.last_color_match = False
+        self.last_color_mask = None
+        self.last_color_mask_bounds = None
         
         # Try again button (centered in modal) - will be calculated dynamically
         self.try_again_button = {'x': 0, 'y': 0, 'w': 200, 'h': 60}
@@ -327,8 +372,8 @@ class PatternMode:
 
         try:
             # Run needle model — use imgsz=128 for better quality on small crop;
-            # use a lower conf threshold than cloth (0.1) since stitch crops are small
-            results = self.needle_model(roi, conf=0.1, imgsz=128, verbose=False)
+            # Reuse current confidence threshold so +/- controls affect both models.
+            results = self.needle_model(roi, conf=self.confidence_threshold, imgsz=128, verbose=False)
 
             num_boxes = len(results[0].boxes) if (results and results[0].boxes is not None) else 0
 
@@ -357,7 +402,7 @@ class PatternMode:
                     if M["m00"] != 0:
                         fx = rx1 + M["m10"] / M["m00"]
                         fy = ry1 + M["m01"] / M["m00"]
-                        self._register_stitch(fx, fy, gray,
+                        self._register_stitch(fx, fy, cam_frame,
                                               pattern_alpha, x_offset, y_offset,
                                               actual_w, actual_h, source="canny")
                 return   # done whether canny fired or not
@@ -371,7 +416,7 @@ class PatternMode:
                 cx_cam = rx1 + (xyxy[0] + xyxy[2]) / 2.0
                 cy_cam = ry1 + (xyxy[1] + xyxy[3]) / 2.0
 
-                self._register_stitch(cx_cam, cy_cam, gray,
+                self._register_stitch(cx_cam, cy_cam, cam_frame,
                                       pattern_alpha, x_offset, y_offset,
                                       actual_w, actual_h,
                                       source=f"yolo conf={float(confs[best]):.2f}")
@@ -380,10 +425,13 @@ class PatternMode:
             print(f"Needle detection error: {e}")
             traceback.print_exc()
 
-    def _register_stitch(self, cx_cam, cy_cam, gray,
+    def _register_stitch(self, cx_cam, cy_cam, cam_frame,
                          pattern_alpha, x_offset, y_offset, actual_w, actual_h,
                          source=""):
         """Check if a candidate stitch position overlaps the pattern and record it."""
+        if not self._matches_selected_color(cam_frame, cx_cam, cy_cam):
+            return
+
         pat_h, pat_w = pattern_alpha.shape[:2]
 
         # Map from camera-frame coords to pattern-overlay coords
@@ -407,6 +455,48 @@ class PatternMode:
             cv2.circle(self.completed_stitch_mask, (px, py), 8, 255, -1)
             self._update_progress_from_mask(pattern_alpha)
             self.stitches_detected += 1
+
+    def _matches_selected_color(self, cam_frame, cx_cam, cy_cam):
+        """Return True when the sampled stitch area matches the currently selected color."""
+        color_cfg = self.color_profiles[self.selected_detection_color]
+
+        sample_radius = 7
+        x = int(cx_cam)
+        y = int(cy_cam)
+        x1 = max(0, x - sample_radius)
+        y1 = max(0, y - sample_radius)
+        x2 = min(cam_frame.shape[1], x + sample_radius + 1)
+        y2 = min(cam_frame.shape[0], y + sample_radius + 1)
+
+        patch = cam_frame[y1:y2, x1:x2]
+        if patch.size == 0:
+            self.last_color_match_ratio = 0.0
+            self.last_color_match = False
+            self.last_color_mask = None
+            self.last_color_mask_bounds = None
+            return False
+
+        combined_mask = self._get_selected_color_mask(patch)
+
+        match_ratio = float(np.count_nonzero(combined_mask)) / float(combined_mask.size)
+        self.last_color_match_ratio = match_ratio
+        self.last_color_match = match_ratio >= color_cfg['min_ratio']
+        self.last_color_mask = combined_mask
+        self.last_color_mask_bounds = (x1, y1, x2, y2)
+        return self.last_color_match
+
+    def _get_selected_color_mask(self, bgr_patch):
+        """Build binary mask for the currently selected color in a BGR patch."""
+        color_cfg = self.color_profiles[self.selected_detection_color]
+        hsv_patch = cv2.cvtColor(bgr_patch, cv2.COLOR_BGR2HSV)
+        combined_mask = np.zeros(hsv_patch.shape[:2], dtype=np.uint8)
+
+        for low, high in color_cfg['hsv_ranges']:
+            low_np = np.array(low, dtype=np.uint8)
+            high_np = np.array(high, dtype=np.uint8)
+            combined_mask = cv2.bitwise_or(combined_mask, cv2.inRange(hsv_patch, low_np, high_np))
+
+        return combined_mask
 
     def _update_progress_from_mask(self, pattern_alpha):
         """Recalculate raw_progress and pattern_progress from completed_stitch_mask."""
@@ -504,6 +594,12 @@ class PatternMode:
         
         # Draw evaluate button
         self.draw_evaluate_button(frame)
+
+        # Draw selectable color filter controls
+        self.draw_color_selector(frame)
+
+        # Draw confidence controls
+        self.draw_confidence_controls(frame)
         
         # Draw evaluation results if evaluated
         if self.is_evaluated:
@@ -547,6 +643,7 @@ class PatternMode:
                        cv2.FONT_HERSHEY_TRIPLEX, 0.8, self.COLORS['text_primary'], 2)
         else:
             cam_frame = cv2.resize(camera_frame, (self.camera_width, self.camera_height))
+            detection_frame = cam_frame.copy()
             
             # Load pattern mask
             pattern_overlay, pattern_alpha = self.load_blueprint(self.current_level)
@@ -648,7 +745,7 @@ class PatternMode:
                     cam_frame[y_offset:overlay_end_y, x_offset:overlay_end_x] = roi
                     
                     self.run_needle_pipeline(
-                        cam_frame, pattern_alpha,
+                        detection_frame, pattern_alpha,
                         x_offset, y_offset, actual_w, actual_h,
                         process_detection
                     )
@@ -672,6 +769,48 @@ class PatternMode:
             cv2.putText(cam_frame, "Needle ROI",
                         (_nrx1, max(10, _nry1 - 5)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1)
+
+            # Mark live selected-color detection at ROI center.
+            self._matches_selected_color(detection_frame, self.needle_pos_x, self.needle_pos_y)
+            color_cfg = self.color_profiles[self.selected_detection_color]
+            if self.last_color_match:
+                marker_text = f"{color_cfg['label']} detected"
+                marker_color = (0, 220, 0)
+            else:
+                marker_text = f"No {color_cfg['label'].lower()} ({self.last_color_match_ratio * 100:.0f}%)"
+                marker_color = (0, 0, 255)
+
+            # Highlight matched color pixels in the sampled patch.
+            if self.last_color_mask is not None and self.last_color_mask_bounds is not None:
+                bx1, by1, bx2, by2 = self.last_color_mask_bounds
+                mask = self.last_color_mask
+                patch_h = by2 - by1
+                patch_w = bx2 - bx1
+                if patch_h > 0 and patch_w > 0 and mask.shape[0] == patch_h and mask.shape[1] == patch_w:
+                    match_pixels = (mask > 0)
+                    if np.any(match_pixels):
+                        color_highlight = np.zeros((patch_h, patch_w, 3), dtype=np.uint8)
+                        color_highlight[:, :] = color_cfg['preview_bgr']
+                        patch_roi = cam_frame[by1:by2, bx1:bx2]
+                        blended = cv2.addWeighted(
+                            patch_roi[match_pixels], 0.35, color_highlight[match_pixels], 0.65, 0
+                        )
+                        if blended is not None:
+                            patch_roi[match_pixels] = blended
+
+                        contour_mask = match_pixels.astype(np.uint8) * 255
+                        contours, _ = cv2.findContours(contour_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                        for cnt in contours:
+                            if cv2.contourArea(cnt) < 4:
+                                continue
+                            cnt[:, :, 0] += bx1
+                            cnt[:, :, 1] += by1
+                            cv2.drawContours(cam_frame, [cnt], -1, marker_color, 1)
+
+            cv2.circle(cam_frame, (int(self.needle_pos_x), int(self.needle_pos_y)), 5, marker_color, -1)
+            cv2.putText(cam_frame, marker_text,
+                        (_nrx1, min(self.camera_height - 8, _nry2 + 16)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, marker_color, 1)
             
             frame[self.camera_y:self.camera_y+self.camera_height, 
                   self.camera_x:self.camera_x+self.camera_width] = cam_frame
@@ -734,6 +873,93 @@ class PatternMode:
             # Draw label - larger font
             cv2.putText(frame, label, (item_x + box_size + 8, legend_y), 
                        cv2.FONT_HERSHEY_TRIPLEX, 0.65, self.COLORS['text_secondary'], 2)
+
+        target = self.color_profiles[self.selected_detection_color]['label']
+        cv2.putText(frame, f"Detecting: {target}", (legend_x, legend_y + 30),
+                   cv2.FONT_HERSHEY_TRIPLEX, 0.6, self.COLORS['text_primary'], 2)
+
+    def draw_color_selector(self, frame):
+        """Draw color selection buttons for stitch filtering."""
+        x = self.color_panel_x
+        y = self.color_panel_y
+        w = self.color_panel_width
+        h = self.color_panel_height
+
+        pulse = 0.35 + 0.25 * abs(math.sin(self.glow_phase * 0.9))
+        self.draw_glow_rect(frame, x, y, w, h, self.COLORS['bright_blue'], pulse)
+
+        panel_overlay = frame.copy()
+        cv2.rectangle(panel_overlay, (x + 2, y + 2), (x + w - 2, y + h - 2), self.COLORS['dark_blue'], -1)
+        cv2.addWeighted(panel_overlay, 0.82, frame, 0.18, 0, frame)
+
+        cv2.putText(frame, "DETECT COLOR", (x + 16, y + 22), cv2.FONT_HERSHEY_TRIPLEX,
+                   0.45, self.COLORS['text_secondary'], 1)
+
+        labels = ['white', 'yellow', 'red']
+        btn_w = 58
+        btn_h = 34
+        start_x = x + 10
+        btn_y = y + 28
+        gap = 6
+
+        self.color_buttons = {}
+        for idx, key in enumerate(labels):
+            bx = start_x + idx * (btn_w + gap)
+            by = btn_y
+            is_selected = key == self.selected_detection_color
+            cfg = self.color_profiles[key]
+
+            border = self.COLORS['glow_cyan'] if is_selected else self.COLORS['medium_blue']
+            cv2.rectangle(frame, (bx, by), (bx + btn_w, by + btn_h), border, 2)
+
+            fill = frame.copy()
+            fill_alpha = 0.6 if is_selected else 0.35
+            cv2.rectangle(fill, (bx + 2, by + 2), (bx + btn_w - 2, by + btn_h - 2), self.COLORS['button_normal'], -1)
+            cv2.addWeighted(fill, fill_alpha, frame, 1 - fill_alpha, 0, frame)
+
+            cv2.circle(frame, (bx + 11, by + btn_h // 2), 6, cfg['preview_bgr'], -1)
+            cv2.circle(frame, (bx + 11, by + btn_h // 2), 6, self.COLORS['text_primary'], 1)
+            cv2.putText(frame, cfg['label'][0], (bx + 22, by + 23), cv2.FONT_HERSHEY_TRIPLEX,
+                       0.55, self.COLORS['text_primary'], 2)
+
+            self.color_buttons[key] = {'x': bx, 'y': by, 'w': btn_w, 'h': btn_h}
+
+    def draw_confidence_controls(self, frame):
+        """Draw clickable controls for confidence threshold."""
+        x = self.conf_panel_x
+        y = self.conf_panel_y
+        w = self.conf_panel_width
+        h = self.conf_panel_height
+
+        pulse = 0.35 + 0.25 * abs(math.sin(self.glow_phase * 1.1))
+        self.draw_glow_rect(frame, x, y, w, h, self.COLORS['bright_blue'], pulse)
+
+        panel_overlay = frame.copy()
+        cv2.rectangle(panel_overlay, (x + 2, y + 2), (x + w - 2, y + h - 2), self.COLORS['dark_blue'], -1)
+        cv2.addWeighted(panel_overlay, 0.82, frame, 0.18, 0, frame)
+
+        cv2.putText(frame, "CONFIDENCE", (x + 16, y + 20), cv2.FONT_HERSHEY_TRIPLEX,
+                   0.45, self.COLORS['text_secondary'], 1)
+
+        btn_w = 40
+        btn_h = 30
+        btn_y = y + 27
+
+        self.conf_minus_button = {'x': x + 12, 'y': btn_y, 'w': btn_w, 'h': btn_h}
+        self.conf_plus_button = {'x': x + w - 12 - btn_w, 'y': btn_y, 'w': btn_w, 'h': btn_h}
+
+        for btn, label in ((self.conf_minus_button, '-'), (self.conf_plus_button, '+')):
+            cv2.rectangle(frame, (btn['x'], btn['y']), (btn['x'] + btn['w'], btn['y'] + btn['h']), self.COLORS['medium_blue'], 2)
+            fill = frame.copy()
+            cv2.rectangle(fill, (btn['x'] + 2, btn['y'] + 2), (btn['x'] + btn['w'] - 2, btn['y'] + btn['h'] - 2), self.COLORS['button_normal'], -1)
+            cv2.addWeighted(fill, 0.6, frame, 0.4, 0, frame)
+            cv2.putText(frame, label, (btn['x'] + 14, btn['y'] + 22), cv2.FONT_HERSHEY_TRIPLEX,
+                       0.65, self.COLORS['text_primary'], 2)
+
+        conf_text = f"{self.confidence_threshold:.2f}"
+        (tw, _), _ = cv2.getTextSize(conf_text, cv2.FONT_HERSHEY_TRIPLEX, 0.6, 2)
+        cv2.putText(frame, conf_text, (x + (w - tw) // 2, btn_y + 22), cv2.FONT_HERSHEY_TRIPLEX,
+                   0.6, self.COLORS['text_primary'], 2)
     
     def draw_guide_overlay(self, frame):
         """Draw game guide/tutorial overlay - multi-step"""
@@ -1345,6 +1571,28 @@ class PatternMode:
             return 'back'
         
         # Check evaluate button (only if not evaluated yet)
+        for color_name, btn in self.color_buttons.items():
+            if btn['x'] <= x <= btn['x'] + btn['w'] and btn['y'] <= y <= btn['y'] + btn['h']:
+                self.play_button_click_sound()
+                self.selected_detection_color = color_name
+                print(f"🎨 Detection color set to: {self.color_profiles[color_name]['label']}")
+                return None
+
+        # Check confidence buttons
+        if (self.conf_minus_button['x'] <= x <= self.conf_minus_button['x'] + self.conf_minus_button['w'] and
+                self.conf_minus_button['y'] <= y <= self.conf_minus_button['y'] + self.conf_minus_button['h']):
+            self.play_button_click_sound()
+            self.confidence_threshold = max(0.05, self.confidence_threshold - 0.05)
+            print(f"Confidence threshold: {self.confidence_threshold:.2f}")
+            return None
+
+        if (self.conf_plus_button['x'] <= x <= self.conf_plus_button['x'] + self.conf_plus_button['w'] and
+                self.conf_plus_button['y'] <= y <= self.conf_plus_button['y'] + self.conf_plus_button['h']):
+            self.play_button_click_sound()
+            self.confidence_threshold = min(0.90, self.confidence_threshold + 0.05)
+            print(f"Confidence threshold: {self.confidence_threshold:.2f}")
+            return None
+
         if not self.is_evaluated:
             eb = self.evaluate_button
             if eb['x'] <= x <= eb['x'] + eb['w'] and eb['y'] <= y <= eb['y'] + eb['h']:
