@@ -155,6 +155,7 @@ class PatternMode:
         self.smooth_cloth_bbox = None  # Smoothed bbox for stable overlay
         self.bbox_smooth_alpha = 0.1  # Lower smoothing factor for slower, smoother updates
         self.bbox_move_threshold = 12  # Increased movement threshold to ignore smaller jitters
+        self.cloth_detect_size = (320, 240)  # Run cloth model on smaller frame for speed
         
         # Load cloth detection model
         try:
@@ -330,7 +331,7 @@ class PatternMode:
 
     def run_needle_pipeline(self, cam_frame, pattern_alpha,
                             x_offset, y_offset, actual_w, actual_h,
-                            run_detection=True):
+                            run_detection=True, hsv_frame=None):
         """
         Single-needle detection pipeline (replaces multi-stitch update_game_stats).
 
@@ -400,7 +401,7 @@ class PatternMode:
                         fy = ry1 + M["m01"] / M["m00"]
                         self._register_stitch(fx, fy, cam_frame,
                                               pattern_alpha, x_offset, y_offset,
-                                              actual_w, actual_h, source="canny")
+                                              actual_w, actual_h, source="canny", hsv_frame=hsv_frame)
                 return   # done whether canny fired or not
             # ──────────────────────────────────────────────────────────────────
 
@@ -415,7 +416,7 @@ class PatternMode:
                 self._register_stitch(cx_cam, cy_cam, cam_frame,
                                       pattern_alpha, x_offset, y_offset,
                                       actual_w, actual_h,
-                                      source=f"yolo conf={float(confs[best]):.2f}")
+                                      source=f"yolo conf={float(confs[best]):.2f}", hsv_frame=hsv_frame)
         except Exception as e:
             import traceback
             print(f"Needle detection error: {e}")
@@ -423,9 +424,9 @@ class PatternMode:
 
     def _register_stitch(self, cx_cam, cy_cam, cam_frame,
                          pattern_alpha, x_offset, y_offset, actual_w, actual_h,
-                         source=""):
+                         source="", hsv_frame=None):
         """Check if a candidate stitch position overlaps the pattern and record it."""
-        if not self._matches_selected_color(cam_frame, cx_cam, cy_cam):
+        if not self._matches_selected_color(cam_frame, cx_cam, cy_cam, hsv_frame=hsv_frame):
             return
 
         pat_h, pat_w = pattern_alpha.shape[:2]
@@ -452,7 +453,7 @@ class PatternMode:
             self._update_progress_from_mask(pattern_alpha)
             self.stitches_detected += 1
 
-    def _matches_selected_color(self, cam_frame, cx_cam, cy_cam):
+    def _matches_selected_color(self, cam_frame, cx_cam, cy_cam, hsv_frame=None):
         """Return True when the sampled stitch area matches the currently selected color."""
         color_cfg = self.color_profiles[self.selected_detection_color]
 
@@ -472,7 +473,10 @@ class PatternMode:
             self.last_color_mask_bounds = None
             return False
 
-        combined_mask = self._get_selected_color_mask(patch)
+        hsv_patch = None
+        if hsv_frame is not None:
+            hsv_patch = hsv_frame[y1:y2, x1:x2]
+        combined_mask = self._get_selected_color_mask(patch, hsv_patch=hsv_patch)
 
         match_ratio = float(np.count_nonzero(combined_mask)) / float(combined_mask.size)
         self.last_color_match_ratio = match_ratio
@@ -481,10 +485,11 @@ class PatternMode:
         self.last_color_mask_bounds = (x1, y1, x2, y2)
         return self.last_color_match
 
-    def _get_selected_color_mask(self, bgr_patch):
+    def _get_selected_color_mask(self, bgr_patch, hsv_patch=None):
         """Build binary mask for the currently selected color in a BGR patch."""
         color_cfg = self.color_profiles[self.selected_detection_color]
-        hsv_patch = cv2.cvtColor(bgr_patch, cv2.COLOR_BGR2HSV)
+        if hsv_patch is None:
+            hsv_patch = cv2.cvtColor(bgr_patch, cv2.COLOR_BGR2HSV)
         combined_mask = np.zeros(hsv_patch.shape[:2], dtype=np.uint8)
 
         for low, high in color_cfg['hsv_ranges']:
@@ -640,6 +645,7 @@ class PatternMode:
         else:
             cam_frame = cv2.resize(camera_frame, (self.camera_width, self.camera_height))
             detection_frame = cam_frame.copy()
+            hsv_detection_frame = cv2.cvtColor(detection_frame, cv2.COLOR_BGR2HSV)
             
             # Load pattern mask
             pattern_overlay, pattern_alpha = self.load_blueprint(self.current_level)
@@ -649,13 +655,14 @@ class PatternMode:
             
             if self.cloth_model is not None:
                 try:
-                    # Pass cam_frame directly — YOLO letterboxes internally and
-                    # returns xyxy already in cam_frame coordinate space
+                    # Run cloth detection on a smaller frame, then scale bbox back up.
+                    detect_w, detect_h = self.cloth_detect_size
+                    small_frame = cv2.resize(cam_frame, (detect_w, detect_h))
                     results = self.cloth_model(
-                        cam_frame,
+                        small_frame,
                         conf=self.confidence_threshold,
                         iou=self.iou_threshold,
-                        imgsz=576,
+                        imgsz=320,
                         verbose=False
                     )
                     
@@ -665,10 +672,13 @@ class PatternMode:
                         best_idx = int(np.argmax(confs))
                         xyxy = boxes[best_idx].xyxy[0].cpu().numpy()
                         
-                        x1 = int(xyxy[0])
-                        y1 = int(xyxy[1])
-                        x2 = int(xyxy[2])
-                        y2 = int(xyxy[3])
+                        scale_x = self.camera_width / float(detect_w)
+                        scale_y = self.camera_height / float(detect_h)
+
+                        x1 = int(xyxy[0] * scale_x)
+                        y1 = int(xyxy[1] * scale_y)
+                        x2 = int(xyxy[2] * scale_x)
+                        y2 = int(xyxy[3] * scale_y)
                         cloth_bbox = (x1, y1, x2, y2)
                         print(f"👕 Cloth detected: conf={float(confs[best_idx]):.2f}")
                 except Exception as e:
@@ -736,7 +746,8 @@ class PatternMode:
                     self.run_needle_pipeline(
                         detection_frame, pattern_alpha,
                         x_offset, y_offset, actual_w, actual_h,
-                        run_detection=True
+                        run_detection=True,
+                        hsv_frame=hsv_detection_frame
                     )
             
             # Draw cloth detection bounding box
@@ -760,7 +771,7 @@ class PatternMode:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1)
 
             # Mark live selected-color detection at ROI center.
-            self._matches_selected_color(detection_frame, self.needle_pos_x, self.needle_pos_y)
+            self._matches_selected_color(detection_frame, self.needle_pos_x, self.needle_pos_y, hsv_frame=hsv_detection_frame)
             color_cfg = self.color_profiles[self.selected_detection_color]
             if self.last_color_match:
                 marker_text = f"{color_cfg['label']} detected"
