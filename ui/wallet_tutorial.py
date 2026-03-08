@@ -140,6 +140,8 @@ class WalletTutorialPlayer:
         self.ROI_LINE_COLOR = (220, 220, 220)  # BGR colour of the dashed stitch line
         self.ROI_DASH_LEN   = 14    # Pixel length of each dash segment
         self.ROI_DASH_GAP   = 8     # Pixel gap between dash segments
+        self.ROI_STEP7_LINE_OFFSET = 28  # Pixel distance (~1 cm) of the two extra
+                                         #   stitch lines shown only on step 7
         # ────────────────────────────────────────────────────────────────────────
 
         # Load the first video
@@ -469,9 +471,9 @@ class WalletTutorialPlayer:
                 self.replay_current_video()
                 return 'replay_current'
         
-        # Check previous button (only when video is playing/paused and on steps 1-13)
+        # Check previous button (only when video is playing/paused and on steps 1-13 + showcase)
         if not self.skipped and not self.completed and not self.your_turn_mode:
-            if self.current_step >= 1 and self.current_step <= 13:
+            if self.current_step >= 1 and self.current_step <= self.total_steps - 1:
                 btn = self.previous_button
                 if btn['x'] <= x <= btn['x'] + btn['w'] and btn['y'] <= y <= btn['y'] + btn['h']:
                     self.play_button_click_sound()
@@ -708,8 +710,8 @@ class WalletTutorialPlayer:
             # Draw replay current button (left side)
             self.draw_button(img, self.replay_current_button, COLORS['button_normal'])
             
-            # Draw previous button (bottom left) - only show on steps 1-13
-            if self.current_step >= 1 and self.current_step <= 13:
+            # Draw previous button (bottom left) - show on steps 1-13 and showcase
+            if self.current_step >= 1 and self.current_step <= self.total_steps - 1:
                 self.draw_button(img, self.previous_button, COLORS['button_hover'])
             
             # Draw next/done button (right side)
@@ -858,6 +860,16 @@ class WalletTutorialPlayer:
             y_end = min(y + self.ROI_DASH_LEN, roi_bot)
             cv2.line(img, (abs_cx, y), (abs_cx, y_end), self.ROI_LINE_COLOR, 2)
             y += self.ROI_DASH_LEN + self.ROI_DASH_GAP
+
+        # Step 7 only: two extra dashed lines ~1 cm to left and right of centre
+        if self.current_step == 7:
+            for x_off in (-self.ROI_STEP7_LINE_OFFSET, self.ROI_STEP7_LINE_OFFSET):
+                side_x = abs_cx + x_off
+                y = roi_top
+                while y < roi_bot:
+                    y_end = min(y + self.ROI_DASH_LEN, roi_bot)
+                    cv2.line(img, (side_x, y), (side_x, y_end), self.ROI_LINE_COLOR, 2)
+                    y += self.ROI_DASH_LEN + self.ROI_DASH_GAP
         # ─────────────────────────────────────────────────────────────────────
 
         # Draw back button (top left)
