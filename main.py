@@ -301,6 +301,7 @@ class SewBotApp:
                         self.release_camera()
                     elif action == 'level_selected':  # Level number selected
                         self.pattern_mode.current_level = value
+                        self.pattern_mode.reset_progress()  # Reset progress when entering level
                         self.state = 'pattern'
                         # Initialize camera if not already opened
                         if self.camera is None and not self.camera_initializing:
@@ -312,6 +313,7 @@ class SewBotApp:
                 if result == 'back':
                     # Don't release camera, just go back to level selection
                     # This allows quick switching between levels
+                    # Note: reset_progress() already called in pattern_mode.handle_click
                     self.state = 'level_selection'
                 elif result == 'next_level':
                     # Move to next level

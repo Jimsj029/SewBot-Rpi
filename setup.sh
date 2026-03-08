@@ -95,6 +95,10 @@ pip install torch torchvision
 echo "Installing ultralytics..."
 pip install ultralytics
 
+# Install scikit-image for pattern skeletonization
+echo "Installing scikit-image..."
+pip install scikit-image
+
 # Install ONNX Runtime (need version 1.14+ for IR version 10 support)
 echo "Installing ONNX Runtime (version 1.14+ required for ONNX model)..."
 # Uninstall old system version first

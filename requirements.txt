@@ -16,3 +16,4 @@
 #   - torch
 #   - torchvision
 #   - ultralytics
+#   - scikit-image (for pattern skeletonization)
