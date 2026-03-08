@@ -151,11 +151,7 @@ class PatternMode:
         self.confidence_threshold = 0.3  # Lowered for INT8 model (produces lower confidence scores)
         self.iou_threshold = 0.6  # Intersection over Union threshold
         
-        # Performance optimization: Frame skipping for detection
-        # Process detection every N frames to reduce CPU load
-        self.frame_skip = 2  # Process every 2nd frame (doubles FPS)
-        self.frame_counter = 0
-        self.last_cloth_bbox = None  # Cache last cloth detection result
+        # Cloth bbox tracking
         self.smooth_cloth_bbox = None  # Smoothed bbox for stable overlay
         self.bbox_smooth_alpha = 0.1  # Lower smoothing factor for slower, smoother updates
         self.bbox_move_threshold = 12  # Increased movement threshold to ignore smaller jitters
@@ -648,45 +644,38 @@ class PatternMode:
             # Load pattern mask
             pattern_overlay, pattern_alpha = self.load_blueprint(self.current_level)
             
-            # Run cloth detection to find where to position the pattern
+            # Run cloth detection every frame to find where to position the pattern
             cloth_bbox = None
-            self.frame_counter += 1
-            process_detection = (self.frame_counter % self.frame_skip == 0)
             
             if self.cloth_model is not None:
                 try:
-                    if not process_detection:
-                        cloth_bbox = self.last_cloth_bbox
-                    else:
-                        # Pass cam_frame directly — YOLO letterboxes internally and
-                        # returns xyxy already in cam_frame coordinate space
-                        results = self.cloth_model(
-                            cam_frame,
-                            conf=self.confidence_threshold,
-                            iou=self.iou_threshold,
-                            imgsz=576,
-                            verbose=False
-                        )
+                    # Pass cam_frame directly — YOLO letterboxes internally and
+                    # returns xyxy already in cam_frame coordinate space
+                    results = self.cloth_model(
+                        cam_frame,
+                        conf=self.confidence_threshold,
+                        iou=self.iou_threshold,
+                        imgsz=576,
+                        verbose=False
+                    )
+                    
+                    if len(results) > 0 and results[0].boxes is not None and len(results[0].boxes) > 0:
+                        boxes = results[0].boxes
+                        confs = boxes.conf.cpu().numpy()
+                        best_idx = int(np.argmax(confs))
+                        xyxy = boxes[best_idx].xyxy[0].cpu().numpy()
                         
-                        if len(results) > 0 and results[0].boxes is not None and len(results[0].boxes) > 0:
-                            boxes = results[0].boxes
-                            confs = boxes.conf.cpu().numpy()
-                            best_idx = int(np.argmax(confs))
-                            xyxy = boxes[best_idx].xyxy[0].cpu().numpy()
-                            
-                            x1 = int(xyxy[0])
-                            y1 = int(xyxy[1])
-                            x2 = int(xyxy[2])
-                            y2 = int(xyxy[3])
-                            cloth_bbox = (x1, y1, x2, y2)
-                            print(f"👕 Cloth detected: conf={float(confs[best_idx]):.2f}")
-                        
-                        self.last_cloth_bbox = cloth_bbox
+                        x1 = int(xyxy[0])
+                        y1 = int(xyxy[1])
+                        x2 = int(xyxy[2])
+                        y2 = int(xyxy[3])
+                        cloth_bbox = (x1, y1, x2, y2)
+                        print(f"👕 Cloth detected: conf={float(confs[best_idx]):.2f}")
                 except Exception as e:
                     print(f"Cloth detection error: {e}")
             
             # Apply weighted averaging to stabilize the bounding box
-            raw_bbox = self.last_cloth_bbox
+            raw_bbox = cloth_bbox
             if raw_bbox is not None:
                 if not hasattr(self, 'bbox_history'):
                     self.bbox_history = []
@@ -747,7 +736,7 @@ class PatternMode:
                     self.run_needle_pipeline(
                         detection_frame, pattern_alpha,
                         x_offset, y_offset, actual_w, actual_h,
-                        process_detection
+                        run_detection=True
                     )
             
             # Draw cloth detection bounding box
