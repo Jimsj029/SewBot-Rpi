@@ -250,6 +250,10 @@ class PatternMode:
         # Cut the binary mask in half (keep top half)
         mask = mask[:mask.shape[0] // 2, :]
 
+        # Reduce width by 50%
+        new_w = max(1, mask.shape[1] // 2)
+        mask = cv2.resize(mask, (new_w, mask.shape[0]), interpolation=cv2.INTER_NEAREST)
+
         # Move the pattern to the middle of the cloth while keeping it centered horizontally
         top_offset = (self.uniform_height - mask.shape[0]) // 2
         left_offset = (self.uniform_width - mask.shape[1]) // 2
