@@ -32,19 +32,19 @@ class PatternMode:
         
         # Score/Stats panel (right side of camera)
         self.score_panel_x = 800
-        self.score_panel_y = 200
+        self.score_panel_y = 190
         self.score_panel_width = 200
-        self.score_panel_height = 250
+        self.score_panel_height = 155
         
         # Back button (top left)
         self.back_button = {'x': 20, 'y': 20, 'w': 120, 'h': 50}
         
         # Evaluate button (below stats panel)
-        self.evaluate_button = {'x': 800, 'y': 470, 'w': 200, 'h': 50}
+        self.evaluate_button = {'x': 800, 'y': 350, 'w': 200, 'h': 50}
 
-        # Color detection selector (right side, above stats)
+        # Color detection selector (right side, top)
         self.color_panel_x = 800
-        self.color_panel_y = 120
+        self.color_panel_y = 115
         self.color_panel_width = 200
         self.color_panel_height = 70
         self.selected_detection_color = 'white'
@@ -75,7 +75,7 @@ class PatternMode:
 
         # Confidence controls (below evaluate button)
         self.conf_panel_x = 800
-        self.conf_panel_y = 525
+        self.conf_panel_y = 405
         self.conf_panel_width = 200
         self.conf_panel_height = 65
         self.conf_minus_button = {'x': 0, 'y': 0, 'w': 0, 'h': 0}
@@ -151,41 +151,33 @@ class PatternMode:
         self.confidence_threshold = 0.3  # Lowered for INT8 model (produces lower confidence scores)
         self.iou_threshold = 0.6  # Intersection over Union threshold
         
+        # Cloth colour selector
+        self.selected_cloth_color = 'red'
+        self.cloth_color_profiles = {
+            'red': {
+                'label': 'RED',
+                'preview_bgr': (0, 0, 220),
+                'hsv_ranges': [
+                    ((0,  80, 50), (10, 255, 255)),
+                    ((160, 80, 50), (179, 255, 255)),
+                ],
+            },
+            'black': {
+                'label': 'BLACK',
+                'preview_bgr': (30, 30, 30),
+                'hsv_ranges': [
+                    ((0, 0, 0), (179, 80, 60)),
+                ],
+            },
+        }
+        self.cloth_color_buttons = {}
+        self.cloth_color_panel_x = 800
+        self.cloth_color_panel_y = 475   # below confidence panel
+        self.cloth_color_panel_width = 200
+        self.cloth_color_panel_height = 70
+
         # Cloth bbox tracking
         self.smooth_cloth_bbox = None  # Smoothed bbox for stable overlay
-        self.bbox_smooth_alpha = 0.1  # Lower smoothing factor for slower, smoother updates
-        self.bbox_move_threshold = 12  # Increased movement threshold to ignore smaller jitters
-        self.cloth_detect_size = (320, 240)  # Run cloth model on smaller frame for speed
-        
-        # Load cloth detection model
-        try:
-            cloth_model_path = os.path.join(models_dir, 'cloth.onnx')
-            
-            if os.path.exists(cloth_model_path):
-                print(f"Loading cloth detection model: {cloth_model_path}")
-                self.cloth_model = YOLO(cloth_model_path, task='detect')
-                print(f"✓ Cloth detection model loaded successfully!")
-                
-                # Print available classes
-                if hasattr(self.cloth_model, 'names'):
-                    print(f"  Detected classes:")
-                    for idx, name in self.cloth_model.names.items():
-                        print(f"    Class {idx}: {name}")
-                print(f"  Confidence threshold: {self.confidence_threshold}")
-                
-                # Test the model with dummy data
-                print("  Testing cloth model inference...")
-                test_img = np.zeros((560, 560, 3), dtype=np.uint8)
-                self.cloth_model(test_img, conf=self.confidence_threshold, verbose=False)
-                print("  ✓ Cloth model test successful!")
-            else:
-                print(f"⚠ Cloth model not found: {cloth_model_path}")
-                self.cloth_model = None
-        except Exception as e:
-            print(f"⚠ ERROR loading cloth model: {e}")
-            import traceback
-            traceback.print_exc()
-            self.cloth_model = None
 
         # Load needle detection model (used for single-stitch ROI pipeline)
         try:
@@ -605,6 +597,9 @@ class PatternMode:
 
         # Draw confidence controls
         self.draw_confidence_controls(frame)
+
+        # Draw cloth colour selector
+        self.draw_cloth_color_selector(frame)
         
         # Draw evaluation results if evaluated
         if self.is_evaluated:
@@ -630,78 +625,34 @@ class PatternMode:
         text_y = bb['y'] + (bb['h'] + text_h) // 2
         cv2.putText(frame, text, (text_x, text_y), cv2.FONT_HERSHEY_TRIPLEX, font_scale, self.COLORS['text_primary'], thickness)
     
-    def _refine_cloth_bbox(self, cam_frame, rough_bbox):
-        """Tighten a loose YOLO cloth bbox using colour-seeded segmentation.
+    def _detect_cloth_by_color(self, cam_frame):
+        """Detect cloth bbox using fixed HSV ranges from the selected cloth colour."""
+        h, w = cam_frame.shape[:2]
+        hsv = cv2.cvtColor(cam_frame, cv2.COLOR_BGR2HSV)
 
-        Samples the HSV colour at the centre of the rough bbox, then builds an
-        inRange mask with a generous tolerance, cleans it up with morphology,
-        and returns the bounding rect of the largest matching contour.
-        Falls back to the original rough_bbox if the refinement produces
-        something suspiciously small.
-        """
-        x1, y1, x2, y2 = rough_bbox
-        pad = 5
-        rx1 = max(0, x1 - pad)
-        ry1 = max(0, y1 - pad)
-        rx2 = min(cam_frame.shape[1], x2 + pad)
-        ry2 = min(cam_frame.shape[0], y2 + pad)
-        roi = cam_frame[ry1:ry2, rx1:rx2]
-        if roi.size == 0:
-            return rough_bbox
+        cfg = self.cloth_color_profiles[self.selected_cloth_color]
+        combined = np.zeros((h, w), dtype=np.uint8)
+        for lo, hi in cfg['hsv_ranges']:
+            lo_np = np.array(lo, dtype=np.uint8)
+            hi_np = np.array(hi, dtype=np.uint8)
+            combined = cv2.bitwise_or(combined, cv2.inRange(hsv, lo_np, hi_np))
 
-        roi_h, roi_w = roi.shape[:2]
-        hsv_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+        # Morphological cleanup to merge gaps and remove noise
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
+        combined = cv2.morphologyEx(combined, cv2.MORPH_CLOSE, kernel)
+        combined = cv2.morphologyEx(combined, cv2.MORPH_OPEN,  kernel)
 
-        # Sample the centre patch (20×20) to estimate the cloth's HSV colour
-        cy, cx = roi_h // 2, roi_w // 2
-        half = 10
-        sample = hsv_roi[max(0, cy - half):cy + half, max(0, cx - half):cx + half]
-        if sample.size == 0:
-            return rough_bbox
-
-        flat = sample.reshape(-1, 3).astype(np.float32)
-        mean_hsv = flat.mean(axis=0)
-        std_hsv  = flat.std(axis=0)
-
-        # Generous tolerance: at least ±15 H, ±50 S, ±50 V
-        tol = np.maximum(std_hsv * 2.5, np.array([15.0, 50.0, 50.0]))
-        lo = np.clip(mean_hsv - tol, 0, 255).astype(np.uint8)
-        hi = np.clip(mean_hsv + tol, 0, 255).astype(np.uint8)
-
-        mask = cv2.inRange(hsv_roi, lo, hi)
-
-        # Handle hue wraparound for red-ish colours
-        h = float(mean_hsv[0])
-        if h < 20:
-            lo2 = np.array([max(0, int(180 - tol[0])), int(lo[1]), int(lo[2])], dtype=np.uint8)
-            hi2 = np.array([179, int(hi[1]), int(hi[2])], dtype=np.uint8)
-            mask = cv2.bitwise_or(mask, cv2.inRange(hsv_roi, lo2, hi2))
-        elif h > 160:
-            lo2 = np.array([0, int(lo[1]), int(lo[2])], dtype=np.uint8)
-            hi2 = np.array([min(179, int(tol[0])), int(hi[1]), int(hi[2])], dtype=np.uint8)
-            mask = cv2.bitwise_or(mask, cv2.inRange(hsv_roi, lo2, hi2))
-
-        # Morphological cleanup to fill holes and remove noise
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  kernel)
-
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contours, _ = cv2.findContours(combined, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if not contours:
-            return rough_bbox
+            return None
 
         largest = max(contours, key=cv2.contourArea)
+        # Reject blobs smaller than 5% of frame area
+        if cv2.contourArea(largest) < h * w * 0.05:
+            return None
+
         bx, by, bw, bh = cv2.boundingRect(largest)
-
-        fx1, fy1 = rx1 + bx, ry1 + by
-        fx2, fy2 = fx1 + bw, fy1 + bh
-
-        # Reject refinement if it shrinks the box to less than 30% of the original
-        orig_w, orig_h = x2 - x1, y2 - y1
-        if (fx2 - fx1) < orig_w * 0.3 or (fy2 - fy1) < orig_h * 0.3:
-            return rough_bbox
-
-        return (fx1, fy1, fx2, fy2)
+        return (bx, by, bx + bw, by + bh)
 
     def draw_camera_feed(self, frame, camera_frame):
         """Draw camera feed with pattern overlay"""
@@ -727,41 +678,8 @@ class PatternMode:
             # Load pattern mask
             pattern_overlay, pattern_alpha = self.load_blueprint(self.current_level)
             
-            # Run cloth detection every frame to find where to position the pattern
-            cloth_bbox = None
-            
-            if self.cloth_model is not None:
-                try:
-                    # Run cloth detection on a smaller frame, then scale bbox back up.
-                    detect_w, detect_h = self.cloth_detect_size
-                    small_frame = cv2.resize(cam_frame, (detect_w, detect_h))
-                    results = self.cloth_model(
-                        small_frame,
-                        conf=self.confidence_threshold,
-                        iou=self.iou_threshold,
-                        imgsz=320,
-                        verbose=False
-                    )
-                    
-                    if len(results) > 0 and results[0].boxes is not None and len(results[0].boxes) > 0:
-                        boxes = results[0].boxes
-                        confs = boxes.conf.cpu().numpy()
-                        best_idx = int(np.argmax(confs))
-                        xyxy = boxes[best_idx].xyxy[0].cpu().numpy()
-                        
-                        scale_x = self.camera_width / float(detect_w)
-                        scale_y = self.camera_height / float(detect_h)
-
-                        x1 = int(xyxy[0] * scale_x)
-                        y1 = int(xyxy[1] * scale_y)
-                        x2 = int(xyxy[2] * scale_x)
-                        y2 = int(xyxy[3] * scale_y)
-                        cloth_bbox = (x1, y1, x2, y2)
-                        # Tighten the loose YOLO box to the actual cloth colour
-                        cloth_bbox = self._refine_cloth_bbox(cam_frame, cloth_bbox)
-                        print(f"👕 Cloth detected: conf={float(confs[best_idx]):.2f}")
-                except Exception as e:
-                    print(f"Cloth detection error: {e}")
+            # Detect cloth region using colour segmentation
+            cloth_bbox = self._detect_cloth_by_color(cam_frame)
             
             # Apply weighted averaging to stabilize the bounding box
             raw_bbox = cloth_bbox
@@ -784,6 +702,11 @@ class PatternMode:
                 # Compute the weighted average of the bounding boxes
                 weighted_bbox = np.average(self.bbox_history, axis=0, weights=weights)
                 self.smooth_cloth_bbox = tuple(weighted_bbox)
+            else:
+                # No detection this frame — clear smoother so box disappears
+                self.smooth_cloth_bbox = None
+                if hasattr(self, 'bbox_history'):
+                    self.bbox_history.clear()
             cloth_bbox = (tuple(int(v) for v in self.smooth_cloth_bbox)
                           if self.smooth_cloth_bbox is not None else None)
             
@@ -1002,6 +925,52 @@ class PatternMode:
                        0.55, self.COLORS['text_primary'], 2)
 
             self.color_buttons[key] = {'x': bx, 'y': by, 'w': btn_w, 'h': btn_h}
+
+    def draw_cloth_color_selector(self, frame):
+        """Draw cloth colour selector buttons (RED / BLACK)."""
+        x = self.cloth_color_panel_x
+        y = self.cloth_color_panel_y
+        w = self.cloth_color_panel_width
+        h = self.cloth_color_panel_height
+
+        pulse = 0.35 + 0.25 * abs(math.sin(self.glow_phase * 0.85))
+        self.draw_glow_rect(frame, x, y, w, h, self.COLORS['bright_blue'], pulse)
+
+        panel_overlay = frame.copy()
+        cv2.rectangle(panel_overlay, (x + 2, y + 2), (x + w - 2, y + h - 2), self.COLORS['dark_blue'], -1)
+        cv2.addWeighted(panel_overlay, 0.82, frame, 0.18, 0, frame)
+
+        cv2.putText(frame, "CLOTH COLOR", (x + 22, y + 22), cv2.FONT_HERSHEY_TRIPLEX,
+                   0.45, self.COLORS['text_secondary'], 1)
+
+        labels = list(self.cloth_color_profiles.keys())
+        btn_w = 84
+        btn_h = 34
+        start_x = x + 10
+        btn_y = y + 28
+        gap = 12
+
+        self.cloth_color_buttons = {}
+        for idx, key in enumerate(labels):
+            bx = start_x + idx * (btn_w + gap)
+            by = btn_y
+            is_selected = key == self.selected_cloth_color
+            cfg = self.cloth_color_profiles[key]
+
+            border = self.COLORS['glow_cyan'] if is_selected else self.COLORS['medium_blue']
+            cv2.rectangle(frame, (bx, by), (bx + btn_w, by + btn_h), border, 2)
+
+            fill = frame.copy()
+            fill_alpha = 0.6 if is_selected else 0.35
+            cv2.rectangle(fill, (bx + 2, by + 2), (bx + btn_w - 2, by + btn_h - 2), self.COLORS['button_normal'], -1)
+            cv2.addWeighted(fill, fill_alpha, frame, 1 - fill_alpha, 0, frame)
+
+            cv2.circle(frame, (bx + 11, by + btn_h // 2), 6, cfg['preview_bgr'], -1)
+            cv2.circle(frame, (bx + 11, by + btn_h // 2), 6, self.COLORS['text_primary'], 1)
+            cv2.putText(frame, cfg['label'], (bx + 22, by + 23), cv2.FONT_HERSHEY_TRIPLEX,
+                       0.42, self.COLORS['text_primary'], 1)
+
+            self.cloth_color_buttons[key] = {'x': bx, 'y': by, 'w': btn_w, 'h': btn_h}
 
     def draw_confidence_controls(self, frame):
         """Draw clickable controls for confidence threshold."""
@@ -1655,6 +1624,16 @@ class PatternMode:
                 self.play_button_click_sound()
                 self.selected_detection_color = color_name
                 print(f"🎨 Detection color set to: {self.color_profiles[color_name]['label']}")
+                return None
+
+        for color_name, btn in self.cloth_color_buttons.items():
+            if btn['x'] <= x <= btn['x'] + btn['w'] and btn['y'] <= y <= btn['y'] + btn['h']:
+                self.play_button_click_sound()
+                self.selected_cloth_color = color_name
+                self.smooth_cloth_bbox = None  # reset smoother on cloth colour change
+                if hasattr(self, 'bbox_history'):
+                    self.bbox_history.clear()
+                print(f"🧵 Cloth color set to: {self.cloth_color_profiles[color_name]['label']}")
                 return None
 
         # Check confidence buttons
