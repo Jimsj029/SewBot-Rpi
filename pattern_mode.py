@@ -250,8 +250,8 @@ class PatternMode:
         # Cut the binary mask in half (keep top half)
         mask = mask[:mask.shape[0] // 2, :]
 
-        # Move the pattern to the top of the cloth while keeping it centered horizontally
-        top_offset = 0
+        # Move the pattern to the middle of the cloth while keeping it centered horizontally
+        top_offset = (self.uniform_height - mask.shape[0]) // 2
         left_offset = (self.uniform_width - mask.shape[1]) // 2
         centered_mask = np.zeros((self.uniform_height, self.uniform_width), dtype=mask.dtype)
         centered_mask[top_offset:top_offset + mask.shape[0], left_offset:left_offset + mask.shape[1]] = mask
@@ -626,6 +626,79 @@ class PatternMode:
         text_y = bb['y'] + (bb['h'] + text_h) // 2
         cv2.putText(frame, text, (text_x, text_y), cv2.FONT_HERSHEY_TRIPLEX, font_scale, self.COLORS['text_primary'], thickness)
     
+    def _refine_cloth_bbox(self, cam_frame, rough_bbox):
+        """Tighten a loose YOLO cloth bbox using colour-seeded segmentation.
+
+        Samples the HSV colour at the centre of the rough bbox, then builds an
+        inRange mask with a generous tolerance, cleans it up with morphology,
+        and returns the bounding rect of the largest matching contour.
+        Falls back to the original rough_bbox if the refinement produces
+        something suspiciously small.
+        """
+        x1, y1, x2, y2 = rough_bbox
+        pad = 5
+        rx1 = max(0, x1 - pad)
+        ry1 = max(0, y1 - pad)
+        rx2 = min(cam_frame.shape[1], x2 + pad)
+        ry2 = min(cam_frame.shape[0], y2 + pad)
+        roi = cam_frame[ry1:ry2, rx1:rx2]
+        if roi.size == 0:
+            return rough_bbox
+
+        roi_h, roi_w = roi.shape[:2]
+        hsv_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+
+        # Sample the centre patch (20×20) to estimate the cloth's HSV colour
+        cy, cx = roi_h // 2, roi_w // 2
+        half = 10
+        sample = hsv_roi[max(0, cy - half):cy + half, max(0, cx - half):cx + half]
+        if sample.size == 0:
+            return rough_bbox
+
+        flat = sample.reshape(-1, 3).astype(np.float32)
+        mean_hsv = flat.mean(axis=0)
+        std_hsv  = flat.std(axis=0)
+
+        # Generous tolerance: at least ±15 H, ±50 S, ±50 V
+        tol = np.maximum(std_hsv * 2.5, np.array([15.0, 50.0, 50.0]))
+        lo = np.clip(mean_hsv - tol, 0, 255).astype(np.uint8)
+        hi = np.clip(mean_hsv + tol, 0, 255).astype(np.uint8)
+
+        mask = cv2.inRange(hsv_roi, lo, hi)
+
+        # Handle hue wraparound for red-ish colours
+        h = float(mean_hsv[0])
+        if h < 20:
+            lo2 = np.array([max(0, int(180 - tol[0])), int(lo[1]), int(lo[2])], dtype=np.uint8)
+            hi2 = np.array([179, int(hi[1]), int(hi[2])], dtype=np.uint8)
+            mask = cv2.bitwise_or(mask, cv2.inRange(hsv_roi, lo2, hi2))
+        elif h > 160:
+            lo2 = np.array([0, int(lo[1]), int(lo[2])], dtype=np.uint8)
+            hi2 = np.array([min(179, int(tol[0])), int(hi[1]), int(hi[2])], dtype=np.uint8)
+            mask = cv2.bitwise_or(mask, cv2.inRange(hsv_roi, lo2, hi2))
+
+        # Morphological cleanup to fill holes and remove noise
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  kernel)
+
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return rough_bbox
+
+        largest = max(contours, key=cv2.contourArea)
+        bx, by, bw, bh = cv2.boundingRect(largest)
+
+        fx1, fy1 = rx1 + bx, ry1 + by
+        fx2, fy2 = fx1 + bw, fy1 + bh
+
+        # Reject refinement if it shrinks the box to less than 30% of the original
+        orig_w, orig_h = x2 - x1, y2 - y1
+        if (fx2 - fx1) < orig_w * 0.3 or (fy2 - fy1) < orig_h * 0.3:
+            return rough_bbox
+
+        return (fx1, fy1, fx2, fy2)
+
     def draw_camera_feed(self, frame, camera_frame):
         """Draw camera feed with pattern overlay"""
         # Draw camera frame border with glow effect
@@ -680,6 +753,8 @@ class PatternMode:
                         x2 = int(xyxy[2] * scale_x)
                         y2 = int(xyxy[3] * scale_y)
                         cloth_bbox = (x1, y1, x2, y2)
+                        # Tighten the loose YOLO box to the actual cloth colour
+                        cloth_bbox = self._refine_cloth_bbox(cam_frame, cloth_bbox)
                         print(f"👕 Cloth detected: conf={float(confs[best_idx]):.2f}")
                 except Exception as e:
                     print(f"Cloth detection error: {e}")
