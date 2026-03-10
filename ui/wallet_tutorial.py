@@ -623,10 +623,10 @@ class WalletTutorialPlayer:
     
     def draw_video_frame(self, img):
         """Draw actual video frame or placeholder"""
-        # Video area - moved down for better spacing
+        # Video area - lowered to leave room for step instructions above
         video_margin = 50
         video_x = video_margin
-        video_y = 90  # Moved down from 50 to give more space for step indicator
+        video_y = 145  # Extra space above video for step instruction text
         video_w = self.width - 2 * video_margin
         video_h = self.height - video_y - video_margin - 100
         
@@ -660,7 +660,10 @@ class WalletTutorialPlayer:
         # Border
         cv2.rectangle(img, (video_x, video_y), (video_x + video_w, video_y + video_h), 
                      COLORS['cyan'], 2)
-        
+
+        # Step instruction text above the video (steps 1-13 only)
+        self._draw_step_overlay(img, video_x, video_y, video_w, video_h)
+
         # If no video frame, show placeholder content
         if self.current_frame_img is None:
             center_x = video_x + video_w // 2
@@ -803,6 +806,37 @@ class WalletTutorialPlayer:
                      COLORS['cyan'], 2)
         _put_text(img, text, text_x, text_y, font_scale, COLORS['text_accent'], thickness)
     
+    def _draw_step_overlay(self, img, video_x, video_y, video_w, video_h):
+        """Draw step instruction lines centered above the video frame for steps 1-13."""
+        if self.current_step < 1 or self.current_step > 13:
+            return
+
+        lines = STEP_INSTRUCTIONS.get(self.current_step, [])
+
+        OVERLAY_FONT = cv2.FONT_HERSHEY_SIMPLEX
+        inst_scale   = 0.62
+        inst_thick   = 1
+        line_spacing = 26
+
+        (_, inst_h), _ = cv2.getTextSize("Ag", OVERLAY_FONT, inst_scale, inst_thick)
+
+        # Total block height for all lines, centred in the gap above the video
+        block_h = len(lines) * line_spacing - (line_spacing - inst_h)
+        gap = video_y - 60  # space between header indicator and video top
+        start_y = 60 + (gap - block_h) // 2 + inst_h
+
+        cur_y = start_y
+        center_x = video_x + video_w // 2
+
+        for line in lines:
+            (lw, _), _ = cv2.getTextSize(line, OVERLAY_FONT, inst_scale, inst_thick)
+            lx = center_x - lw // 2
+            cv2.putText(img, line, (lx + 1, cur_y + 1), OVERLAY_FONT,
+                        inst_scale, (0, 0, 0), inst_thick + 4, cv2.LINE_AA)
+            cv2.putText(img, line, (lx, cur_y), OVERLAY_FONT,
+                        inst_scale, COLORS['text_secondary'], inst_thick + 1, cv2.LINE_AA)
+            cur_y += line_spacing
+
     def draw_your_turn(self, img, camera_frame):
         """Draw the 'Your Turn' practice screen with webcam feed"""
         # ── Title ────────────────────────────────────────────────────────────
