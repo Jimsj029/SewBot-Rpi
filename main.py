@@ -18,6 +18,13 @@ from level_selection import LevelSelection
 from pattern_mode import PatternMode
 from music_manager import get_music_manager
 
+_UI_FONT = cv2.FONT_HERSHEY_DUPLEX
+
+def _put_text(img, text, x, y, scale, color, thickness):
+    """Draw text with a 1-px black outline for readability on any background."""
+    cv2.putText(img, text, (x + 1, y + 1), _UI_FONT, scale, (0, 0, 0), thickness + 2, cv2.LINE_AA)
+    cv2.putText(img, text, (x, y),         _UI_FONT, scale, color,     thickness,     cv2.LINE_AA)
+
 
 class SewBotApp:
     def __init__(self):
@@ -465,10 +472,10 @@ class SewBotApp:
         cv2.addWeighted(overlay, 0.6, img, 0.4, 0, img)
         
         text, font_scale, thickness = "< BACK", 0.6, 2
-        (text_w, text_h), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_TRIPLEX, font_scale, thickness)
+        (text_w, text_h), _ = cv2.getTextSize(text, _UI_FONT, font_scale, thickness)
         text_x = bb['x'] + (bb['w'] - text_w) // 2
         text_y = bb['y'] + (bb['h'] + text_h) // 2
-        cv2.putText(img, text, (text_x, text_y), cv2.FONT_HERSHEY_TRIPLEX, font_scale, self.COLORS['text_primary'], thickness)
+        _put_text(img, text, text_x, text_y, font_scale, self.COLORS['text_primary'], thickness)
     
     def draw_quit_button(self, img):
         qb = self.quit_button
@@ -480,10 +487,10 @@ class SewBotApp:
         cv2.addWeighted(overlay, 0.6, img, 0.4, 0, img)
         
         text, font_scale, thickness = "QUIT", 0.6, 2
-        (text_w, text_h), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_TRIPLEX, font_scale, thickness)
+        (text_w, text_h), _ = cv2.getTextSize(text, _UI_FONT, font_scale, thickness)
         text_x = qb['x'] + (qb['w'] - text_w) // 2
         text_y = qb['y'] + (qb['h'] + text_h) // 2
-        cv2.putText(img, text, (text_x, text_y), cv2.FONT_HERSHEY_TRIPLEX, font_scale, self.COLORS['text_primary'], thickness)
+        _put_text(img, text, text_x, text_y, font_scale, self.COLORS['text_primary'], thickness)
     
     def draw_mute_button(self, img):
         """Draw mute/unmute button in upper right corner"""
@@ -632,7 +639,10 @@ class SewBotApp:
     def draw_wallet_tutorial(self, frame):
         # Use pre-rendered grid background
         frame[:] = self.grid_background
-        
+
+        # Draw mute button (top-right corner, same as other screens)
+        self.draw_mute_button(frame)
+
         # Get camera frame if in your_turn mode
         camera_frame = None
         if self.wallet_tutorial_player.your_turn_mode:
@@ -669,18 +679,10 @@ class SewBotApp:
         cv2.circle(frame, (offset, offset), 3, self.COLORS['cyan'], -1)
         
         text, font_scale, thickness = "SELECT MODE", 1.5, 3
-        (text_w, text_h), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_TRIPLEX, font_scale, thickness)
+        (text_w, text_h), _ = cv2.getTextSize(text, _UI_FONT, font_scale, thickness)
         text_x, text_y = (self.width - text_w) // 2, 80
         
-        # Reduced glow layers from 6 to 3
-        glow_intensity = 0.6 + 0.4 * abs(math.sin(self.glow_phase * 0.8))
-        for offset_val in [4, 2, 1]:
-            alpha = glow_intensity * (1 - offset_val / 5)
-            glow_color = tuple(int(c * alpha) for c in self.COLORS['glow_blue'])
-            cv2.putText(frame, text, (text_x, text_y), cv2.FONT_HERSHEY_TRIPLEX, font_scale, glow_color, thickness + offset_val)
-        
-        cv2.putText(frame, text, (text_x, text_y), cv2.FONT_HERSHEY_TRIPLEX, font_scale, self.COLORS['bright_blue'], thickness)
-        cv2.putText(frame, text, (text_x, text_y), cv2.FONT_HERSHEY_TRIPLEX, font_scale, self.COLORS['text_primary'], 1)
+        _put_text(frame, text, text_x, text_y, font_scale, self.COLORS['bright_blue'], thickness)
         
         # Draw all three mode buttons
         self.draw_mode_button(frame, self.pattern_button)
@@ -700,13 +702,11 @@ class SewBotApp:
         
         # Draw title (centered)
         title_font_scale, title_thickness = 1.0, 2
-        (title_w, title_h), _ = cv2.getTextSize(button_data['title'], cv2.FONT_HERSHEY_TRIPLEX, title_font_scale, title_thickness)
+        (title_w, title_h), _ = cv2.getTextSize(button_data['title'], _UI_FONT, title_font_scale, title_thickness)
         title_x = x + (w - title_w) // 2
         title_y = y + 40  # Better vertical positioning
         
-        # Title with glow
-        cv2.putText(img, button_data['title'], (title_x, title_y), cv2.FONT_HERSHEY_TRIPLEX, title_font_scale, self.COLORS['glow_cyan'], title_thickness + 2)
-        cv2.putText(img, button_data['title'], (title_x, title_y), cv2.FONT_HERSHEY_TRIPLEX, title_font_scale, self.COLORS['text_primary'], title_thickness)
+        _put_text(img, button_data['title'], title_x, title_y, title_font_scale, self.COLORS['text_primary'], title_thickness)
         
         # Draw description (centered, wrapped if needed)
         desc_font_scale = 0.45
@@ -721,7 +721,7 @@ class SewBotApp:
         
         for word in words:
             test_line = ' '.join(current_line + [word])
-            (test_w, test_h), _ = cv2.getTextSize(test_line, cv2.FONT_HERSHEY_TRIPLEX, desc_font_scale, desc_thickness)
+            (test_w, test_h), _ = cv2.getTextSize(test_line, _UI_FONT, desc_font_scale, desc_thickness)
             if test_w <= max_width:
                 current_line.append(word)
             else:
@@ -735,10 +735,10 @@ class SewBotApp:
         line_height = 18
         start_y = title_y + 25  # More space below title
         for i, line in enumerate(lines):
-            (line_w, line_h), _ = cv2.getTextSize(line, cv2.FONT_HERSHEY_TRIPLEX, desc_font_scale, desc_thickness)
+            (line_w, line_h), _ = cv2.getTextSize(line, _UI_FONT, desc_font_scale, desc_thickness)
             line_x = x + (w - line_w) // 2
             line_y = start_y + i * line_height
-            cv2.putText(img, line, (line_x, line_y), cv2.FONT_HERSHEY_TRIPLEX, desc_font_scale, self.COLORS['text_secondary'], desc_thickness)
+            _put_text(img, line, line_x, line_y, desc_font_scale, self.COLORS['text_secondary'], desc_thickness)
     
     def run(self):
         
