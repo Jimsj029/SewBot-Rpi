@@ -12,6 +12,32 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from music_manager import get_music_manager
 
+try:
+    from .typography import (
+        FONT_MAIN,
+        FONT_DISPLAY,
+        text_scale,
+        text_thickness,
+        get_text_size,
+        fit_text_scale,
+        draw_text,
+    )
+except ImportError:
+    from typography import (
+        FONT_MAIN,
+        FONT_DISPLAY,
+        text_scale,
+        text_thickness,
+        get_text_size,
+        fit_text_scale,
+        draw_text,
+    )
+
+
+def _put_text(img, text, x, y, scale, color, thickness, font=FONT_MAIN):
+    """Draw outlined text for readability on glowing backgrounds."""
+    draw_text(img, text, x, y, scale, color, thickness, font=font)
+
 
 class LevelSelection:
     def __init__(self, width, height, colors):
@@ -76,27 +102,37 @@ class LevelSelection:
         self.glow_phase += 0.05
         
         # Draw title
-        title_font_scale = 1.5
-        title_thickness = 3
-        (title_w, title_h), _ = cv2.getTextSize(self.title_text, cv2.FONT_HERSHEY_TRIPLEX, title_font_scale, title_thickness)
+        title_font_scale = text_scale(1.58, self.width, self.height, floor=1.32, ceiling=1.78)
+        title_thickness = text_thickness(3, self.width, self.height, min_thickness=2, max_thickness=4)
+        title_font_scale = fit_text_scale(self.title_text, FONT_DISPLAY, self.width - 120, title_font_scale, title_thickness, min_scale=1.08)
+        (title_w, title_h), _ = get_text_size(self.title_text, FONT_DISPLAY, title_font_scale, title_thickness)
         title_x = (self.width - title_w) // 2
         title_y = 80
         
         # Glow effect for title
         pulse = 0.6 + 0.4 * abs(math.sin(self.glow_phase * 0.8))
-        cv2.putText(frame, self.title_text, (title_x, title_y), cv2.FONT_HERSHEY_TRIPLEX, 
-                   title_font_scale, self.COLORS['glow_cyan'], title_thickness + 2)
-        cv2.putText(frame, self.title_text, (title_x, title_y), cv2.FONT_HERSHEY_TRIPLEX, 
-                   title_font_scale, self.COLORS['bright_blue'], title_thickness)
+        glow_color = tuple(int(c * pulse) for c in self.COLORS['glow_cyan'])
+        draw_text(
+            frame,
+            self.title_text,
+            title_x,
+            title_y,
+            title_font_scale,
+            self.COLORS['bright_blue'],
+            title_thickness,
+            font=FONT_DISPLAY,
+            outline_color=glow_color,
+            outline_extra=2,
+        )
         
         # Draw subtitle
-        subtitle_font_scale = 0.7
-        subtitle_thickness = 1
-        (subtitle_w, subtitle_h), _ = cv2.getTextSize(self.subtitle_text, cv2.FONT_HERSHEY_TRIPLEX, subtitle_font_scale, subtitle_thickness)
+        subtitle_font_scale = text_scale(0.84, self.width, self.height, floor=0.74, ceiling=0.96)
+        subtitle_thickness = text_thickness(2, self.width, self.height, min_thickness=1, max_thickness=2)
+        subtitle_font_scale = fit_text_scale(self.subtitle_text, FONT_MAIN, self.width - 160, subtitle_font_scale, subtitle_thickness, min_scale=0.66)
+        (subtitle_w, subtitle_h), _ = get_text_size(self.subtitle_text, FONT_MAIN, subtitle_font_scale, subtitle_thickness)
         subtitle_x = (self.width - subtitle_w) // 2
         subtitle_y = title_y + 40
-        cv2.putText(frame, self.subtitle_text, (subtitle_x, subtitle_y), cv2.FONT_HERSHEY_TRIPLEX, 
-                   subtitle_font_scale, self.COLORS['text_secondary'], subtitle_thickness)
+        _put_text(frame, self.subtitle_text, subtitle_x, subtitle_y, subtitle_font_scale, self.COLORS['text_secondary'], subtitle_thickness)
         
         # Draw level buttons
         for btn in self.level_buttons:
@@ -138,45 +174,58 @@ class LevelSelection:
         
         # Label "LEVEL" at top
         label_text = "LEVEL"
-        label_font_scale = 0.6
-        label_thickness = 1
-        (label_w, label_h), _ = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_TRIPLEX, label_font_scale, label_thickness)
+        label_font_scale = text_scale(0.66, self.width, self.height, floor=0.58, ceiling=0.76)
+        label_thickness = text_thickness(1, self.width, self.height, min_thickness=1, max_thickness=2)
+        (label_w, label_h), _ = get_text_size(label_text, FONT_MAIN, label_font_scale, label_thickness)
         label_x = btn['x'] + (btn['w'] - label_w) // 2
         label_y = btn['y'] + 30
         
         # Level number (big, centered)
         level_text = str(btn['level'])
-        level_font_scale = 3.5
-        level_thickness = 5
-        (level_w, level_h), baseline = cv2.getTextSize(level_text, cv2.FONT_HERSHEY_TRIPLEX, level_font_scale, level_thickness)
+        level_font_scale = text_scale(3.1, self.width, self.height, floor=2.6, ceiling=3.4)
+        level_thickness = text_thickness(5, self.width, self.height, min_thickness=3, max_thickness=6)
+        level_font_scale = fit_text_scale(level_text, FONT_DISPLAY, btn['w'] - 28, level_font_scale, level_thickness, min_scale=2.2)
+        (level_w, level_h), baseline = get_text_size(level_text, FONT_DISPLAY, level_font_scale, level_thickness)
         level_x = btn['x'] + (btn['w'] - level_w) // 2
         level_y = btn['y'] + (btn['h'] // 2) + (level_h // 2)
         
         if is_locked:
-            # Draw lock icon instead
-            cv2.putText(frame, "🔒", (btn['x'] + btn['w'] // 2 - 20, level_y), cv2.FONT_HERSHEY_TRIPLEX, 
-                       2.0, self.COLORS['text_secondary'], 3)
+            lock_text = "LOCKED"
+            lock_scale = text_scale(0.82, self.width, self.height, floor=0.72, ceiling=0.94)
+            lock_thickness = text_thickness(2, self.width, self.height, min_thickness=2, max_thickness=3)
+            lock_scale = fit_text_scale(lock_text, FONT_MAIN, btn['w'] - 16, lock_scale, lock_thickness, min_scale=0.62)
+            (lock_w, lock_h), _ = get_text_size(lock_text, FONT_MAIN, lock_scale, lock_thickness)
+            lock_x = btn['x'] + (btn['w'] - lock_w) // 2
+            lock_y = btn['y'] + (btn['h'] // 2) + (lock_h // 2)
+            _put_text(frame, lock_text, lock_x, lock_y, lock_scale, self.COLORS['text_secondary'], lock_thickness)
         else:
             # Draw level number with glow
-            cv2.putText(frame, level_text, (level_x, level_y), cv2.FONT_HERSHEY_TRIPLEX, 
-                       level_font_scale, self.COLORS['glow_cyan'], level_thickness + 2)
-            cv2.putText(frame, level_text, (level_x, level_y), cv2.FONT_HERSHEY_TRIPLEX, 
-                       level_font_scale, self.COLORS['bright_blue'], level_thickness)
+            draw_text(
+                frame,
+                level_text,
+                level_x,
+                level_y,
+                level_font_scale,
+                self.COLORS['bright_blue'],
+                level_thickness,
+                font=FONT_DISPLAY,
+                outline_color=self.COLORS['glow_cyan'],
+                outline_extra=2,
+            )
         
         text_color = self.COLORS['text_secondary'] if is_locked else self.COLORS['text_primary']
-        cv2.putText(frame, label_text, (label_x, label_y), cv2.FONT_HERSHEY_TRIPLEX, 
-                   label_font_scale, text_color, label_thickness)
+        _put_text(frame, label_text, label_x, label_y, label_font_scale, text_color, label_thickness)
         
         # Difficulty indicator
         difficulty_texts = ["EASY", "MEDIUM", "HARD", "EXPERT", "MASTER"]
         difficulty_text = difficulty_texts[btn['level'] - 1]
-        diff_font_scale = 0.45
-        diff_thickness = 1
-        (diff_w, diff_h), _ = cv2.getTextSize(difficulty_text, cv2.FONT_HERSHEY_TRIPLEX, diff_font_scale, diff_thickness)
+        diff_font_scale = text_scale(0.56, self.width, self.height, floor=0.5, ceiling=0.66)
+        diff_thickness = text_thickness(1, self.width, self.height, min_thickness=1, max_thickness=2)
+        diff_font_scale = fit_text_scale(difficulty_text, FONT_MAIN, btn['w'] - 12, diff_font_scale, diff_thickness, min_scale=0.46)
+        (diff_w, diff_h), _ = get_text_size(difficulty_text, FONT_MAIN, diff_font_scale, diff_thickness)
         diff_x = btn['x'] + (btn['w'] - diff_w) // 2
         diff_y = btn['y'] + btn['h'] - 20
-        cv2.putText(frame, difficulty_text, (diff_x, diff_y), cv2.FONT_HERSHEY_TRIPLEX, 
-                   diff_font_scale, text_color, diff_thickness)
+        _put_text(frame, difficulty_text, diff_x, diff_y, diff_font_scale, text_color, diff_thickness)
     
     def draw_back_button(self, frame):
         """Draw back button"""
@@ -191,13 +240,13 @@ class LevelSelection:
         cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
         
         text = "< BACK"
-        font_scale = 0.7
-        thickness = 2
-        (text_w, text_h), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_TRIPLEX, font_scale, thickness)
+        font_scale = text_scale(0.76, self.width, self.height, floor=0.68, ceiling=0.9)
+        thickness = text_thickness(2, self.width, self.height, min_thickness=2, max_thickness=3)
+        font_scale = fit_text_scale(text, FONT_MAIN, bb['w'] - 12, font_scale, thickness, min_scale=0.58)
+        (text_w, text_h), _ = get_text_size(text, FONT_MAIN, font_scale, thickness)
         text_x = bb['x'] + (bb['w'] - text_w) // 2
         text_y = bb['y'] + (bb['h'] + text_h) // 2
-        cv2.putText(frame, text, (text_x, text_y), cv2.FONT_HERSHEY_TRIPLEX, 
-                   font_scale, self.COLORS['text_primary'], thickness)
+        _put_text(frame, text, text_x, text_y, font_scale, self.COLORS['text_primary'], thickness)
     
     def play_button_click_sound(self):
         """Play button click sound effect"""

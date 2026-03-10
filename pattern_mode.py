@@ -4,6 +4,15 @@ import math
 import os
 from ultralytics import YOLO
 from music_manager import get_music_manager
+from ui.typography import (
+    FONT_MAIN,
+    FONT_DISPLAY,
+    text_scale,
+    text_thickness,
+    get_text_size,
+    fit_text_scale,
+    draw_text,
+)
 
 
 class PatternMode:
@@ -114,10 +123,12 @@ class PatternMode:
         self.completed_stitch_mask = None  # Accumulated mask of all detected stitches
         self.proximity_radius = 5  # Legacy compatibility radius (kept small)
         self.stitch_draw_radius = 3  # Radius of each accepted stitch stamp
-        self.cyan_spread_radius = 3  # Visual cyan expansion around accepted stitches
+        self.cyan_spread_radius = 2  # Visual cyan expansion around accepted stitches
         self.progress_spread_radius = 4  # Progress expansion to bridge tiny gaps only
-        self.min_stitch_move_px = 3  # Min movement before accepting another center stitch
-        self.stitch_cooldown_frames = 2  # Min frames between accepted center stitches
+        # Keep these permissive so centerline-guided tracing can advance one
+        # pixel step at a time on small screens/cameras.
+        self.min_stitch_move_px = 1.0  # Min movement before accepting another center stitch
+        self.stitch_cooldown_frames = 1  # Min frames between accepted center stitches
         self.stitch_frame_index = 0
         self.last_stitch_frame_index = -9999
         self.last_stitch_point = None
@@ -135,14 +146,19 @@ class PatternMode:
         self.prev_motion_patch = None
         self.last_motion_diff = 0.0
         self.cloth_motion_active = False
+        self.last_motion_centroid = None
+        self.motion_vector_x = 0.0
+        self.motion_vector_y = 0.0
+        self.motion_vector_min_mag = 0.35
         self.needle_on_pattern = True  # Whether the needle is currently on a pattern pixel
 
         # Follow-line validation (on/off pattern while sewing)
         self.pattern_alpha_threshold = 0.5
         self.follow_corridor_radius = 6
-        self.follow_order_tolerance = 18
-        self.follow_centerline_distance = 5
+        self.follow_order_tolerance = 24
+        self.follow_centerline_distance = 8
         self.snap_stitches_to_centerline = True
+        self.centerline_step_limit = 6  # Max index jump per accepted center sample
         self.follow_off_confirm_frames = 4
         self.follow_on_confirm_frames = 2
         self.follow_off_count = 0
@@ -295,8 +311,9 @@ class PatternMode:
         # Cut the binary mask in half (keep top half)
         mask = mask[:mask.shape[0] // 2, :]
 
-        # Reduce width by 50%
-        new_w = max(1, mask.shape[1] // 2)
+        # Base width is 50%; increase it by 25% => 62.5% of original width.
+        new_w = int(round(mask.shape[1] * 0.625))
+        new_w = max(1, min(mask.shape[1], new_w))
         mask = cv2.resize(mask, (new_w, mask.shape[0]), interpolation=cv2.INTER_NEAREST)
 
         # Move the pattern to the middle of the cloth while keeping it centered horizontally
@@ -336,6 +353,9 @@ class PatternMode:
         self.prev_motion_patch = None
         self.last_motion_diff = 0.0
         self.cloth_motion_active = False
+        self.last_motion_centroid = None
+        self.motion_vector_x = 0.0
+        self.motion_vector_y = 0.0
         self.centerline_progress_idx = 0
         self.centerline_progress_initialized = False
         self.needle_on_pattern = True
@@ -385,6 +405,9 @@ class PatternMode:
         if cam_frame is None or cam_frame.size == 0:
             self.cloth_motion_active = False
             self.last_motion_diff = 0.0
+            self.last_motion_centroid = None
+            self.motion_vector_x = 0.0
+            self.motion_vector_y = 0.0
             return
 
         gray = cv2.cvtColor(cam_frame, cv2.COLOR_BGR2GRAY)
@@ -401,6 +424,9 @@ class PatternMode:
         if patch.size == 0 or patch.shape[0] < 8 or patch.shape[1] < 8:
             self.cloth_motion_active = False
             self.last_motion_diff = 0.0
+            self.last_motion_centroid = None
+            self.motion_vector_x = 0.0
+            self.motion_vector_y = 0.0
             return
 
         patch = cv2.GaussianBlur(patch, (5, 5), 0)
@@ -409,10 +435,32 @@ class PatternMode:
             self.prev_motion_patch = patch
             self.cloth_motion_active = False
             self.last_motion_diff = 0.0
+            self.last_motion_centroid = None
+            self.motion_vector_x = 0.0
+            self.motion_vector_y = 0.0
             return
 
         diff = cv2.absdiff(patch, self.prev_motion_patch)
         self.last_motion_diff = float(np.mean(diff))
+
+        # Estimate local motion direction from the centroid shift of changed pixels.
+        motion_thresh = max(1.0, self.motion_diff_threshold * 1.2)
+        _, motion_mask = cv2.threshold(diff, motion_thresh, 255, cv2.THRESH_BINARY)
+        motion_pixels = int(np.count_nonzero(motion_mask))
+        if motion_pixels >= 20:
+            ys, xs = np.where(motion_mask > 0)
+            centroid = np.array([float(np.mean(xs)), float(np.mean(ys))], dtype=np.float32)
+            if self.last_motion_centroid is not None:
+                raw_dx = float(centroid[0] - self.last_motion_centroid[0])
+                raw_dy = float(centroid[1] - self.last_motion_centroid[1])
+                blend = 0.35
+                self.motion_vector_x = (1.0 - blend) * self.motion_vector_x + blend * raw_dx
+                self.motion_vector_y = (1.0 - blend) * self.motion_vector_y + blend * raw_dy
+            self.last_motion_centroid = centroid
+        else:
+            self.motion_vector_x *= 0.7
+            self.motion_vector_y *= 0.7
+
         self.prev_motion_patch = patch
 
         if self.last_motion_diff >= self.motion_diff_threshold:
@@ -421,6 +469,34 @@ class PatternMode:
             self.motion_grace_counter = max(0, self.motion_grace_counter - 1)
 
         self.cloth_motion_active = self.motion_grace_counter > 0
+
+    def _infer_centerline_step_direction(self, centerline_path, current_idx):
+        """Infer +1/-1 movement along centerline from local cloth motion."""
+        if centerline_path is None or len(centerline_path) < 3:
+            return 0
+
+        idx = int(np.clip(current_idx, 0, len(centerline_path) - 1))
+        prev_idx = max(0, idx - 1)
+        next_idx = min(len(centerline_path) - 1, idx + 1)
+        if prev_idx == next_idx:
+            return 0
+
+        tangent = centerline_path[next_idx].astype(np.float32) - centerline_path[prev_idx].astype(np.float32)
+        tan_norm = float(np.linalg.norm(tangent))
+        if tan_norm < 1e-6:
+            return 0
+        tangent /= tan_norm
+
+        motion = np.array([self.motion_vector_x, self.motion_vector_y], dtype=np.float32)
+        motion_mag = float(np.linalg.norm(motion))
+        if motion_mag < self.motion_vector_min_mag:
+            return 0
+
+        projection = float(np.dot(motion, tangent))
+        if abs(projection) < 0.05:
+            return 0
+
+        return 1 if projection > 0 else -1
 
     def run_needle_pipeline(self, cam_frame, pattern_alpha,
                             x_offset, y_offset, actual_w, actual_h,
@@ -571,9 +647,18 @@ class PatternMode:
             if source == "center":
                 if (self.stitch_frame_index - self.last_stitch_frame_index) < self.stitch_cooldown_frames:
                     return
-                if self.last_stitch_point is not None:
+                # In centerline mode we intentionally allow dense adjacent points.
+                # A strict movement check here can deadlock progression on tightly
+                # sampled paths where consecutive points overlap existing circles.
+                use_centerline_mode = (
+                    self.snap_stitches_to_centerline
+                    and centerline_path is not None
+                    and len(centerline_path) > 0
+                )
+                if (not use_centerline_mode) and self.last_stitch_point is not None:
                     lx, ly = self.last_stitch_point
-                    if math.hypot(draw_x - lx, draw_y - ly) < self.min_stitch_move_px:
+                    min_move = float(self.min_stitch_move_px)
+                    if math.hypot(draw_x - lx, draw_y - ly) < min_move:
                         return
 
             if self.completed_stitch_mask is None:
@@ -583,20 +668,37 @@ class PatternMode:
             cv2.circle(self.completed_stitch_mask, (draw_x, draw_y), self.stitch_draw_radius, 255, -1)
             new_pixels = int(np.count_nonzero(self.completed_stitch_mask))
 
-            # Only advance stats/progress when this stitch added new coverage.
-            if new_pixels > prev_pixels:
+            if source == "center":
+                # Record accepted center sample even when no new pixels were
+                # added, so the next frame can progress to the next path point.
                 self.last_stitch_point = (draw_x, draw_y)
                 self.last_stitch_frame_index = self.stitch_frame_index
                 if centerline_path is not None and nearest_idx is not None and len(centerline_path) > 0:
                     max_idx = len(centerline_path) - 1
+                    nearest_idx = int(np.clip(nearest_idx, 0, max_idx))
                     if not self.centerline_progress_initialized:
-                        self.centerline_progress_idx = int(np.clip(nearest_idx, 0, max_idx))
+                        self.centerline_progress_idx = nearest_idx
                         self.centerline_progress_initialized = True
                     else:
-                        self.centerline_progress_idx = max(self.centerline_progress_idx, int(nearest_idx))
-                    # Nudge one point forward after each accepted stitch to avoid
-                    # getting stuck at the same centerline index.
-                    self.centerline_progress_idx = min(max_idx, self.centerline_progress_idx + 1)
+                        current_idx = int(self.centerline_progress_idx)
+                        # Usually we move toward nearest_idx. If nearest_idx ==
+                        # current_idx (common with needle-anchored overlay),
+                        # infer direction from cloth motion to keep progression moving.
+                        delta = nearest_idx - current_idx
+                        if delta == 0:
+                            delta = self._infer_centerline_step_direction(centerline_path, current_idx)
+
+                        step_limit = max(1, int(self.centerline_step_limit))
+                        if delta > step_limit:
+                            delta = step_limit
+                        elif delta < -step_limit:
+                            delta = -step_limit
+
+                        if delta != 0:
+                            self.centerline_progress_idx = int(np.clip(current_idx + delta, 0, max_idx))
+
+            # Only advance stats/progress when this stitch added new coverage.
+            if new_pixels > prev_pixels:
                 self._update_progress_from_mask(pattern_alpha)
                 self.stitches_detected += 1
 
@@ -796,6 +898,10 @@ class PatternMode:
             alpha = glow_intensity * (1 - i * 0.4)
             glow_color = tuple(int(c * alpha) for c in color)
             cv2.rectangle(img, (x - offset, y - offset), (x + w + offset, y + h + offset), glow_color, 1)
+
+    def _put_text(self, img, text, x, y, scale, color, thickness, font=FONT_MAIN):
+        """Draw outlined anti-aliased text for readability."""
+        draw_text(img, text, x, y, scale, color, thickness, font=font)
     
     def draw(self, frame, camera_frame, grid_background):
         """Draw the entire pattern mode interface"""
@@ -812,26 +918,35 @@ class PatternMode:
         
         pulse = 0.6 + 0.4 * abs(math.sin(self.glow_phase * 0.8))
         
-        font_scale = 1.2
-        thickness = 3
-        (level_w, level_h), _ = cv2.getTextSize(level_text, cv2.FONT_HERSHEY_TRIPLEX, font_scale, thickness)
+        font_scale = text_scale(1.2, self.width, self.height, floor=1.02, ceiling=1.35)
+        thickness = text_thickness(3, self.width, self.height, min_thickness=2, max_thickness=4)
+        font_scale = fit_text_scale(level_text, FONT_DISPLAY, self.width - 220, font_scale, thickness, min_scale=0.9)
+        (level_w, level_h), _ = get_text_size(level_text, FONT_DISPLAY, font_scale, thickness)
         level_x = (self.width - level_w) // 2
         level_y = self.level_display_y
         
         # Draw with glow effect
-        cv2.putText(frame, level_text, (level_x, level_y), cv2.FONT_HERSHEY_TRIPLEX, 
-                   font_scale, self.COLORS['glow_cyan'], thickness + 1)
-        cv2.putText(frame, level_text, (level_x, level_y), cv2.FONT_HERSHEY_TRIPLEX, 
-                   font_scale, self.COLORS['bright_blue'], thickness)
+        glow_color = tuple(int(c * pulse) for c in self.COLORS['glow_cyan'])
+        draw_text(
+            frame,
+            level_text,
+            level_x,
+            level_y,
+            font_scale,
+            self.COLORS['bright_blue'],
+            thickness,
+            font=FONT_DISPLAY,
+            outline_color=glow_color,
+            outline_extra=2,
+        )
         
         # Draw difficulty text below
-        diff_font_scale = 0.6
-        diff_thickness = 1
-        (diff_w, diff_h), _ = cv2.getTextSize(difficulty_text, cv2.FONT_HERSHEY_TRIPLEX, diff_font_scale, diff_thickness)
+        diff_font_scale = text_scale(0.66, self.width, self.height, floor=0.58, ceiling=0.76)
+        diff_thickness = text_thickness(1, self.width, self.height, min_thickness=1, max_thickness=2)
+        (diff_w, diff_h), _ = get_text_size(difficulty_text, FONT_MAIN, diff_font_scale, diff_thickness)
         diff_x = (self.width - diff_w) // 2
         diff_y = level_y + 30
-        cv2.putText(frame, difficulty_text, (diff_x, diff_y), cv2.FONT_HERSHEY_TRIPLEX, 
-                   diff_font_scale, self.COLORS['text_secondary'], diff_thickness)
+        self._put_text(frame, difficulty_text, diff_x, diff_y, diff_font_scale, self.COLORS['text_secondary'], diff_thickness)
         
         # Draw back button (top left)
         self.draw_back_button(frame)
@@ -872,11 +987,14 @@ class PatternMode:
         cv2.rectangle(overlay, (bb['x'] + 2, bb['y'] + 2), (bb['x'] + bb['w'] - 2, bb['y'] + bb['h'] - 2), self.COLORS['button_normal'], -1)
         cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
         
-        text, font_scale, thickness = "< BACK", 0.6, 2
-        (text_w, text_h), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_TRIPLEX, font_scale, thickness)
+        text = "< BACK"
+        font_scale = text_scale(0.72, self.width, self.height, floor=0.66, ceiling=0.86)
+        thickness = text_thickness(2, self.width, self.height, min_thickness=2, max_thickness=3)
+        font_scale = fit_text_scale(text, FONT_MAIN, bb['w'] - 12, font_scale, thickness, min_scale=0.58)
+        (text_w, text_h), _ = get_text_size(text, FONT_MAIN, font_scale, thickness)
         text_x = bb['x'] + (bb['w'] - text_w) // 2
         text_y = bb['y'] + (bb['h'] + text_h) // 2
-        cv2.putText(frame, text, (text_x, text_y), cv2.FONT_HERSHEY_TRIPLEX, font_scale, self.COLORS['text_primary'], thickness)
+        self._put_text(frame, text, text_x, text_y, font_scale, self.COLORS['text_primary'], thickness)
     
     def _detect_cloth_by_color(self, cam_frame):
         """Detect cloth outline using improved HSV colour segmentation.
@@ -965,8 +1083,13 @@ class PatternMode:
                          (self.camera_x + self.camera_width, self.camera_y + self.camera_height), 
                          self.COLORS['dark_blue'], -1)
             text = "Camera not available"
-            cv2.putText(frame, text, (self.camera_x + 120, self.camera_y + self.camera_height // 2), 
-                       cv2.FONT_HERSHEY_TRIPLEX, 0.8, self.COLORS['text_primary'], 2)
+            text_scale_value = text_scale(0.84, self.width, self.height, floor=0.74, ceiling=0.96)
+            text_thick = text_thickness(2, self.width, self.height, min_thickness=1, max_thickness=2)
+            text_scale_value = fit_text_scale(text, FONT_MAIN, self.camera_width - 30, text_scale_value, text_thick, min_scale=0.62)
+            (tw, th), _ = get_text_size(text, FONT_MAIN, text_scale_value, text_thick)
+            tx = self.camera_x + (self.camera_width - tw) // 2
+            ty = self.camera_y + (self.camera_height + th) // 2
+            self._put_text(frame, text, tx, ty, text_scale_value, self.COLORS['text_primary'], text_thick)
         else:
             cam_frame = cv2.resize(camera_frame, (self.camera_width, self.camera_height))
             detection_frame = cam_frame.copy()
@@ -1009,29 +1132,43 @@ class PatternMode:
                     exp_y = overlay_h // 2
 
                 # Align expected centerline stitch point directly under the red dot.
-                x_offset = int(self.needle_pos_x) - exp_x
-                y_offset = int(self.needle_pos_y) - exp_y
-                x_offset = max(0, min(x_offset, self.camera_width - overlay_w))
-                y_offset = max(0, min(y_offset, self.camera_height - overlay_h))
+                x_offset = int(round(self.needle_pos_x)) - exp_x
+                y_offset = int(round(self.needle_pos_y)) - exp_y
                 trace_y = exp_y
-                
-                overlay_end_x = min(x_offset + overlay_w, self.camera_width)
-                overlay_end_y = min(y_offset + overlay_h, self.camera_height)
-                actual_w = overlay_end_x - x_offset
-                actual_h = overlay_end_y - y_offset
-                
-                if actual_w > 0 and actual_h > 0:
+
+                # Allow the pattern overlay to extend off-screen and crop the
+                # visible portion; this keeps the expected path aligned to the
+                # needle across the entire pattern.
+                dst_x1 = max(0, x_offset)
+                dst_y1 = max(0, y_offset)
+                dst_x2 = min(self.camera_width, x_offset + overlay_w)
+                dst_y2 = min(self.camera_height, y_offset + overlay_h)
+                visible_w = dst_x2 - dst_x1
+                visible_h = dst_y2 - dst_y1
+
+                # Source crop in pattern coordinates for the visible ROI.
+                src_x1 = max(0, -x_offset)
+                src_y1 = max(0, -y_offset)
+                src_x2 = src_x1 + visible_w
+                src_y2 = src_y1 + visible_h
+
+                # Validation should use full pattern coordinates.
+                actual_w = overlay_w
+                actual_h = overlay_h
+
+                if visible_w > 0 and visible_h > 0:
                     corridor_mask = self._get_pattern_corridor_mask(pattern_alpha, actual_w, actual_h)
                     realtime_pattern = self.create_realtime_pattern(pattern_overlay, pattern_alpha, trace_y=trace_y)
-                    
-                    roi = cam_frame[y_offset:overlay_end_y, x_offset:overlay_end_x]
-                    pattern_crop = realtime_pattern[0:actual_h, 0:actual_w] if realtime_pattern is not None else pattern_overlay[0:actual_h, 0:actual_w]
-                    alpha_crop = pattern_alpha[0:actual_h, 0:actual_w]
+
+                    roi = cam_frame[dst_y1:dst_y2, dst_x1:dst_x2]
+                    pattern_src = realtime_pattern if realtime_pattern is not None else pattern_overlay
+                    pattern_crop = pattern_src[src_y1:src_y2, src_x1:src_x2]
+                    alpha_crop = pattern_alpha[src_y1:src_y2, src_x1:src_x2]
                     
                     for c in range(3):
                         roi[:, :, c] = (alpha_crop * pattern_crop[:, :, c] * 0.7 +
                                       (1 - alpha_crop * 0.7) * roi[:, :, c])
-                    cam_frame[y_offset:overlay_end_y, x_offset:overlay_end_x] = roi
+                    cam_frame[dst_y1:dst_y2, dst_x1:dst_x2] = roi
                     
                     self.run_needle_pipeline(
                         detection_frame, pattern_alpha,
@@ -1057,6 +1194,10 @@ class PatternMode:
                         centerline_path=centerline_path,
                         expected_path_idx=expected_path_idx
                     )
+
+                    # Use the updated index immediately for follow validation.
+                    if centerline_path is not None and len(centerline_path) > 0:
+                        expected_path_idx = int(np.clip(self.centerline_progress_idx, 0, len(centerline_path) - 1))
 
                     # Follow-line decision uses center-point color + corridor + order.
                     center_color_match = self._matches_selected_color(
@@ -1106,7 +1247,7 @@ class PatternMode:
             # ─────────────────────────────────────────────────────────────────
 
             # Outside-pattern warning (color-gated + hysteresis stabilized)
-            if follow_check_ready and not self.needle_on_pattern and self.raw_progress >= 2.0:
+            if follow_check_ready and self.needle_confirmed and not self.needle_on_pattern and self.raw_progress >= 2.0:
                 ow_h = 36
                 ow_y = 60 if self.needle_confirmed else 60
                 _ov2 = cam_frame.copy()
@@ -1169,9 +1310,21 @@ class PatternMode:
                             cv2.drawContours(cam_frame, [cnt], -1, marker_color, 1)
 
             cv2.circle(cam_frame, (int(self.needle_pos_x), int(self.needle_pos_y)), 5, marker_color, -1)
-            cv2.putText(cam_frame, marker_text,
-                        (col_x1, self.camera_height - 8),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, marker_color, 1)
+            marker_scale = text_scale(0.52, self.width, self.height, floor=0.46, ceiling=0.62)
+            marker_thick = text_thickness(1, self.width, self.height, min_thickness=1, max_thickness=2)
+            marker_scale = fit_text_scale(marker_text, FONT_MAIN, self.camera_width - col_x1 - 6, marker_scale, marker_thick, min_scale=0.4)
+            draw_text(
+                cam_frame,
+                marker_text,
+                col_x1,
+                self.camera_height - 8,
+                marker_scale,
+                marker_color,
+                marker_thick,
+                font=FONT_MAIN,
+                outline_color=(0, 0, 0),
+                outline_extra=1,
+            )
             
             frame[self.camera_y:self.camera_y+self.camera_height, 
                   self.camera_x:self.camera_x+self.camera_width] = cam_frame
@@ -1232,12 +1385,15 @@ class PatternMode:
                         self.COLORS['medium_blue'], 1)
             
             # Draw label - larger font
-            cv2.putText(frame, label, (item_x + box_size + 8, legend_y), 
-                       cv2.FONT_HERSHEY_TRIPLEX, 0.65, self.COLORS['text_secondary'], 2)
+            label_scale = text_scale(0.66, self.width, self.height, floor=0.58, ceiling=0.76)
+            label_thick = text_thickness(2, self.width, self.height, min_thickness=1, max_thickness=2)
+            self._put_text(frame, label, item_x + box_size + 8, legend_y, label_scale, self.COLORS['text_secondary'], label_thick)
 
         target = self.color_profiles[self.selected_detection_color]['label']
-        cv2.putText(frame, f"Detecting: {target}", (legend_x, legend_y + 30),
-                   cv2.FONT_HERSHEY_TRIPLEX, 0.6, self.COLORS['text_primary'], 2)
+        detect_text = f"Detecting: {target}"
+        detect_scale = text_scale(0.62, self.width, self.height, floor=0.54, ceiling=0.72)
+        detect_thick = text_thickness(2, self.width, self.height, min_thickness=1, max_thickness=2)
+        self._put_text(frame, detect_text, legend_x, legend_y + 30, detect_scale, self.COLORS['text_primary'], detect_thick)
 
     def draw_color_selector(self, frame):
         """Draw color selection buttons for stitch filtering."""
@@ -1253,8 +1409,9 @@ class PatternMode:
         cv2.rectangle(panel_overlay, (x + 2, y + 2), (x + w - 2, y + h - 2), self.COLORS['dark_blue'], -1)
         cv2.addWeighted(panel_overlay, 0.82, frame, 0.18, 0, frame)
 
-        cv2.putText(frame, "DETECT COLOR", (x + 16, y + 22), cv2.FONT_HERSHEY_TRIPLEX,
-                   0.45, self.COLORS['text_secondary'], 1)
+        header_scale = text_scale(0.5, self.width, self.height, floor=0.46, ceiling=0.58)
+        header_thick = text_thickness(1, self.width, self.height, min_thickness=1, max_thickness=2)
+        self._put_text(frame, "DETECT COLOR", x + 16, y + 22, header_scale, self.COLORS['text_secondary'], header_thick)
 
         labels = ['white', 'yellow', 'red']
         btn_w = 58
@@ -1280,8 +1437,9 @@ class PatternMode:
 
             cv2.circle(frame, (bx + 11, by + btn_h // 2), 6, cfg['preview_bgr'], -1)
             cv2.circle(frame, (bx + 11, by + btn_h // 2), 6, self.COLORS['text_primary'], 1)
-            cv2.putText(frame, cfg['label'][0], (bx + 22, by + 23), cv2.FONT_HERSHEY_TRIPLEX,
-                       0.55, self.COLORS['text_primary'], 2)
+            letter_scale = text_scale(0.58, self.width, self.height, floor=0.52, ceiling=0.66)
+            letter_thick = text_thickness(2, self.width, self.height, min_thickness=1, max_thickness=2)
+            self._put_text(frame, cfg['label'][0], bx + 22, by + 23, letter_scale, self.COLORS['text_primary'], letter_thick)
 
             self.color_buttons[key] = {'x': bx, 'y': by, 'w': btn_w, 'h': btn_h}
 
@@ -1299,8 +1457,9 @@ class PatternMode:
         cv2.rectangle(panel_overlay, (x + 2, y + 2), (x + w - 2, y + h - 2), self.COLORS['dark_blue'], -1)
         cv2.addWeighted(panel_overlay, 0.82, frame, 0.18, 0, frame)
 
-        cv2.putText(frame, "CLOTH COLOR", (x + 22, y + 22), cv2.FONT_HERSHEY_TRIPLEX,
-                   0.45, self.COLORS['text_secondary'], 1)
+        header_scale = text_scale(0.5, self.width, self.height, floor=0.46, ceiling=0.58)
+        header_thick = text_thickness(1, self.width, self.height, min_thickness=1, max_thickness=2)
+        self._put_text(frame, "CLOTH COLOR", x + 22, y + 22, header_scale, self.COLORS['text_secondary'], header_thick)
 
         labels = list(self.cloth_color_profiles.keys())
         btn_w = 84
@@ -1326,8 +1485,9 @@ class PatternMode:
 
             cv2.circle(frame, (bx + 11, by + btn_h // 2), 6, cfg['preview_bgr'], -1)
             cv2.circle(frame, (bx + 11, by + btn_h // 2), 6, self.COLORS['text_primary'], 1)
-            cv2.putText(frame, cfg['label'], (bx + 22, by + 23), cv2.FONT_HERSHEY_TRIPLEX,
-                       0.42, self.COLORS['text_primary'], 1)
+            cloth_scale = text_scale(0.46, self.width, self.height, floor=0.42, ceiling=0.54)
+            cloth_thick = text_thickness(1, self.width, self.height, min_thickness=1, max_thickness=2)
+            self._put_text(frame, cfg['label'], bx + 22, by + 23, cloth_scale, self.COLORS['text_primary'], cloth_thick)
 
             self.cloth_color_buttons[key] = {'x': bx, 'y': by, 'w': btn_w, 'h': btn_h}
 
@@ -1345,8 +1505,9 @@ class PatternMode:
         cv2.rectangle(panel_overlay, (x + 2, y + 2), (x + w - 2, y + h - 2), self.COLORS['dark_blue'], -1)
         cv2.addWeighted(panel_overlay, 0.82, frame, 0.18, 0, frame)
 
-        cv2.putText(frame, "CONFIDENCE", (x + 16, y + 20), cv2.FONT_HERSHEY_TRIPLEX,
-                   0.45, self.COLORS['text_secondary'], 1)
+        header_scale = text_scale(0.5, self.width, self.height, floor=0.46, ceiling=0.58)
+        header_thick = text_thickness(1, self.width, self.height, min_thickness=1, max_thickness=2)
+        self._put_text(frame, "CONFIDENCE", x + 16, y + 20, header_scale, self.COLORS['text_secondary'], header_thick)
 
         btn_w = 40
         btn_h = 30
@@ -1360,13 +1521,15 @@ class PatternMode:
             fill = frame.copy()
             cv2.rectangle(fill, (btn['x'] + 2, btn['y'] + 2), (btn['x'] + btn['w'] - 2, btn['y'] + btn['h'] - 2), self.COLORS['button_normal'], -1)
             cv2.addWeighted(fill, 0.6, frame, 0.4, 0, frame)
-            cv2.putText(frame, label, (btn['x'] + 14, btn['y'] + 22), cv2.FONT_HERSHEY_TRIPLEX,
-                       0.65, self.COLORS['text_primary'], 2)
+            sign_scale = text_scale(0.7, self.width, self.height, floor=0.62, ceiling=0.8)
+            sign_thick = text_thickness(2, self.width, self.height, min_thickness=1, max_thickness=2)
+            self._put_text(frame, label, btn['x'] + 14, btn['y'] + 22, sign_scale, self.COLORS['text_primary'], sign_thick)
 
         conf_text = f"{self.confidence_threshold:.2f}"
-        (tw, _), _ = cv2.getTextSize(conf_text, cv2.FONT_HERSHEY_TRIPLEX, 0.6, 2)
-        cv2.putText(frame, conf_text, (x + (w - tw) // 2, btn_y + 22), cv2.FONT_HERSHEY_TRIPLEX,
-                   0.6, self.COLORS['text_primary'], 2)
+        conf_scale = text_scale(0.64, self.width, self.height, floor=0.56, ceiling=0.74)
+        conf_thick = text_thickness(2, self.width, self.height, min_thickness=1, max_thickness=2)
+        (tw, _), _ = get_text_size(conf_text, FONT_MAIN, conf_scale, conf_thick)
+        self._put_text(frame, conf_text, x + (w - tw) // 2, btn_y + 22, conf_scale, self.COLORS['text_primary'], conf_thick)
     
     def draw_guide_overlay(self, frame):
         """Draw game guide/tutorial overlay - multi-step"""
@@ -1377,8 +1540,8 @@ class PatternMode:
         cv2.addWeighted(overlay, 0.85, frame, 0.15, 0, frame)
         
         # Guide panel
-        panel_w = 650
-        panel_h = 420
+        panel_w = min(650, self.width - 120)
+        panel_h = min(420, self.height - 90)
         panel_x = (self.width - panel_w) // 2
         panel_y = (self.height - panel_h) // 2
         
@@ -1399,24 +1562,41 @@ class PatternMode:
         
         # Title
         title = "HOW TO PLAY"
-        (title_w, _), _ = cv2.getTextSize(title, cv2.FONT_HERSHEY_TRIPLEX, 1.3, 3)
+        title_scale = text_scale(1.3, self.width, self.height, floor=1.12, ceiling=1.45)
+        title_thickness = text_thickness(3, self.width, self.height, min_thickness=2, max_thickness=4)
+        title_scale = fit_text_scale(title, FONT_DISPLAY, panel_w - 80, title_scale, title_thickness, min_scale=1.0)
+        (title_w, _), _ = get_text_size(title, FONT_DISPLAY, title_scale, title_thickness)
         title_x = panel_x + (panel_w - title_w) // 2
-        title_y = panel_y + 50
-        cv2.putText(frame, title, (title_x, title_y), 
-                   cv2.FONT_HERSHEY_TRIPLEX, 1.3, self.COLORS['glow_cyan'], 3)
+        title_y = panel_y + 52
+        draw_text(
+            frame,
+            title,
+            title_x,
+            title_y,
+            title_scale,
+            self.COLORS['bright_blue'],
+            title_thickness,
+            font=FONT_DISPLAY,
+            outline_color=self.COLORS['glow_cyan'],
+            outline_extra=2,
+        )
         
         # Step indicator
         step_text = f"Step {self.guide_step} of 4"
-        (step_w, step_h), _ = cv2.getTextSize(step_text, cv2.FONT_HERSHEY_TRIPLEX, 0.6, 2)
+        step_scale = text_scale(0.66, self.width, self.height, floor=0.58, ceiling=0.76)
+        step_thickness = text_thickness(2, self.width, self.height, min_thickness=1, max_thickness=2)
+        (step_w, step_h), _ = get_text_size(step_text, FONT_MAIN, step_scale, step_thickness)
         step_x = panel_x + panel_w - step_w - 30
         step_y = panel_y + 45
-        cv2.putText(frame, step_text, (step_x, step_y), 
-                   cv2.FONT_HERSHEY_TRIPLEX, 0.6, self.COLORS['text_secondary'], 2, cv2.LINE_AA)
+        self._put_text(frame, step_text, step_x, step_y, step_scale, self.COLORS['text_secondary'], step_thickness)
         
         # Content based on current step
         content_x = panel_x + 40
-        content_y = title_y + 60
-        line_height = 50
+        content_y = title_y + 58
+        body_scale_base = text_scale(0.72, self.width, self.height, floor=0.64, ceiling=0.82)
+        body_thick = text_thickness(2, self.width, self.height, min_thickness=1, max_thickness=2)
+        (_, body_h), _ = get_text_size("Ag", FONT_MAIN, body_scale_base, body_thick)
+        line_height = max(34, body_h + 14)
         
         if self.guide_step == 1:
             instructions = [
@@ -1465,9 +1645,11 @@ class PatternMode:
                 y_pos += line_height // 2
                 continue
             
-            text, color, font_scale, thickness = instruction
-            cv2.putText(frame, text, (content_x, y_pos), 
-                       cv2.FONT_HERSHEY_TRIPLEX, font_scale, color, thickness, cv2.LINE_AA)
+            text, color, base_scale, base_thickness = instruction
+            line_scale = text_scale(base_scale, self.width, self.height, floor=max(0.58, base_scale * 0.86), ceiling=base_scale * 1.12)
+            line_thick = max(1, text_thickness(base_thickness, self.width, self.height, min_thickness=1, max_thickness=3))
+            line_scale = fit_text_scale(text, FONT_MAIN, panel_w - 80, line_scale, line_thick, min_scale=max(0.52, base_scale * 0.78))
+            self._put_text(frame, text, content_x, y_pos, line_scale, color, line_thick)
             y_pos += line_height
         
         # Button ("Next" or "Got it!") - bottom right corner
@@ -1496,14 +1678,24 @@ class PatternMode:
         cv2.addWeighted(btn_overlay, 0.9, frame, 0.1, 0, frame)
         
         # Button text (smaller font)
-        (btn_text_w, btn_text_h), _ = cv2.getTextSize(button_text, cv2.FONT_HERSHEY_TRIPLEX, 0.8, 2)
+        btn_scale = text_scale(0.84, self.width, self.height, floor=0.74, ceiling=0.96)
+        btn_thickness = text_thickness(2, self.width, self.height, min_thickness=2, max_thickness=3)
+        btn_scale = fit_text_scale(button_text, FONT_DISPLAY, button_w - 16, btn_scale, btn_thickness, min_scale=0.66)
+        (btn_text_w, btn_text_h), _ = get_text_size(button_text, FONT_DISPLAY, btn_scale, btn_thickness)
         btn_text_x = button_x + (button_w - btn_text_w) // 2
         btn_text_y = button_y + (button_h + btn_text_h) // 2
-        
-        cv2.putText(frame, button_text, (btn_text_x, btn_text_y), 
-                   cv2.FONT_HERSHEY_TRIPLEX, 0.8, self.COLORS['glow_cyan'], 3)
-        cv2.putText(frame, button_text, (btn_text_x, btn_text_y), 
-                   cv2.FONT_HERSHEY_TRIPLEX, 0.8, self.COLORS['bright_blue'], 2)
+        draw_text(
+            frame,
+            button_text,
+            btn_text_x,
+            btn_text_y,
+            btn_scale,
+            self.COLORS['bright_blue'],
+            btn_thickness,
+            font=FONT_DISPLAY,
+            outline_color=self.COLORS['glow_cyan'],
+            outline_extra=2,
+        )
     
     def draw_warning_overlay(self, frame):
         """Draw warning overlay when stitching outside current segment"""
@@ -1523,17 +1715,26 @@ class PatternMode:
         cv2.addWeighted(overlay, flash_alpha, frame, 1 - flash_alpha, 0, frame)
         
         # Warning text - larger and more readable
-        font_scale = 1.0
-        thickness = 4
-        (text_w, text_h), _ = cv2.getTextSize(self.warning_message, cv2.FONT_HERSHEY_TRIPLEX, font_scale, thickness)
+        font_scale = text_scale(1.02, self.width, self.height, floor=0.88, ceiling=1.15)
+        thickness = text_thickness(4, self.width, self.height, min_thickness=3, max_thickness=5)
+        font_scale = fit_text_scale(self.warning_message, FONT_DISPLAY, self.camera_width - 30, font_scale, thickness, min_scale=0.72)
+        (text_w, text_h), _ = get_text_size(self.warning_message, FONT_DISPLAY, font_scale, thickness)
         text_x = self.camera_x + (self.camera_width - text_w) // 2
         text_y = banner_y + (banner_height + text_h) // 2
         
         # Draw text with outline for visibility
-        cv2.putText(frame, self.warning_message, (text_x, text_y), 
-                   cv2.FONT_HERSHEY_TRIPLEX, font_scale, (0, 0, 0), thickness + 3)  # Black outline
-        cv2.putText(frame, self.warning_message, (text_x, text_y), 
-                   cv2.FONT_HERSHEY_TRIPLEX, font_scale, (255, 255, 255), thickness)  # White text
+        draw_text(
+            frame,
+            self.warning_message,
+            text_x,
+            text_y,
+            font_scale,
+            (255, 255, 255),
+            thickness,
+            font=FONT_DISPLAY,
+            outline_color=(0, 0, 0),
+            outline_extra=3,
+        )
     
     def update_game_stats(self, detected_stitch_masks, pattern_alpha, x_offset, y_offset, actual_w, actual_h):
         """Update game statistics based on detected stitches vs pattern (ROI-optimized)"""
@@ -1681,16 +1882,24 @@ class PatternMode:
         cv2.addWeighted(overlay, 0.8, frame, 0.2, 0, frame)
         
         # Title "STATS"
-        title_font_scale = 0.9
-        title_thickness = 2
+        title_font_scale = text_scale(0.92, self.width, self.height, floor=0.82, ceiling=1.05)
+        title_thickness = text_thickness(2, self.width, self.height, min_thickness=2, max_thickness=3)
         title_text = "STATS"
-        (title_w, title_h), _ = cv2.getTextSize(title_text, cv2.FONT_HERSHEY_TRIPLEX, title_font_scale, title_thickness)
+        (title_w, title_h), _ = get_text_size(title_text, FONT_DISPLAY, title_font_scale, title_thickness)
         title_x = x + (w - title_w) // 2
         title_y = y + 40
-        cv2.putText(frame, title_text, (title_x, title_y), cv2.FONT_HERSHEY_TRIPLEX, 
-                   title_font_scale, self.COLORS['glow_cyan'], title_thickness + 1)
-        cv2.putText(frame, title_text, (title_x, title_y), cv2.FONT_HERSHEY_TRIPLEX, 
-                   title_font_scale, self.COLORS['bright_blue'], title_thickness)
+        draw_text(
+            frame,
+            title_text,
+            title_x,
+            title_y,
+            title_font_scale,
+            self.COLORS['bright_blue'],
+            title_thickness,
+            font=FONT_DISPLAY,
+            outline_color=self.COLORS['glow_cyan'],
+            outline_extra=2,
+        )
         
         # Draw horizontal divider
         cv2.line(frame, (x + 15, title_y + 15), (x + w - 15, title_y + 15), self.COLORS['medium_blue'], 2)
@@ -1698,11 +1907,12 @@ class PatternMode:
         # Stats content
         content_x = x + 20
         start_y = title_y + 45
+        label_scale = text_scale(0.62, self.width, self.height, floor=0.56, ceiling=0.74)
+        label_thick = text_thickness(2, self.width, self.height, min_thickness=1, max_thickness=2)
         
         # Progress bar (moved up since accuracy/score removed)
         progress_y = start_y + 20
-        cv2.putText(frame, "PROGRESS", (content_x, progress_y), cv2.FONT_HERSHEY_TRIPLEX, 
-                   0.6, self.COLORS['text_secondary'], 2)
+        self._put_text(frame, "PROGRESS", content_x, progress_y, label_scale, self.COLORS['text_secondary'], label_thick)
         
         # Progress bar background (divided into 4 segments)
         bar_y = progress_y + 15
@@ -1743,16 +1953,18 @@ class PatternMode:
                      self.COLORS['medium_blue'], 2)
         
         # Progress percentage text
-        progress_text = f"{self.pattern_progress:.0f}%"
-        (prog_w, prog_h), _ = cv2.getTextSize(progress_text, cv2.FONT_HERSHEY_TRIPLEX, 0.6, 2)
-        cv2.putText(frame, progress_text, (content_x + (bar_width - prog_w) // 2, bar_y + 16), 
-                   cv2.FONT_HERSHEY_TRIPLEX, 0.6, self.COLORS['text_primary'], 2)
+        progress_text = f"{self.raw_progress:.0f}%"
+        percent_scale = text_scale(0.62, self.width, self.height, floor=0.56, ceiling=0.74)
+        percent_thick = text_thickness(2, self.width, self.height, min_thickness=1, max_thickness=2)
+        (prog_w, prog_h), _ = get_text_size(progress_text, FONT_MAIN, percent_scale, percent_thick)
+        self._put_text(frame, progress_text, content_x + (bar_width - prog_w) // 2, bar_y + 16, percent_scale, self.COLORS['text_primary'], percent_thick)
         
         # Segment indicator text
         segment_text_y = bar_y + bar_height + 18
         segment_label = f"SEGMENT {self.current_segment}/4"
-        cv2.putText(frame, segment_label, (content_x, segment_text_y), 
-                   cv2.FONT_HERSHEY_TRIPLEX, 0.5, self.COLORS['text_secondary'], 2)
+        segment_scale = text_scale(0.54, self.width, self.height, floor=0.5, ceiling=0.64)
+        segment_thick = text_thickness(2, self.width, self.height, min_thickness=1, max_thickness=2)
+        self._put_text(frame, segment_label, content_x, segment_text_y, segment_scale, self.COLORS['text_secondary'], segment_thick)
     
     def draw_evaluate_button(self, frame):
         """Draw the evaluate button below stats panel"""
@@ -1776,14 +1988,14 @@ class PatternMode:
         
         # Button text
         text = "EVALUATE"
-        font_scale = 0.8
-        thickness = 2
-        (text_w, text_h), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_TRIPLEX, font_scale, thickness)
+        font_scale = text_scale(0.84, self.width, self.height, floor=0.76, ceiling=0.96)
+        thickness = text_thickness(2, self.width, self.height, min_thickness=2, max_thickness=3)
+        font_scale = fit_text_scale(text, FONT_DISPLAY, eb['w'] - 14, font_scale, thickness, min_scale=0.66)
+        (text_w, text_h), _ = get_text_size(text, FONT_DISPLAY, font_scale, thickness)
         text_x = eb['x'] + (eb['w'] - text_w) // 2
         text_y = eb['y'] + (eb['h'] + text_h) // 2
         
-        cv2.putText(frame, text, (text_x, text_y), cv2.FONT_HERSHEY_TRIPLEX, 
-                   font_scale, self.COLORS['text_primary'], thickness)
+        self._put_text(frame, text, text_x, text_y, font_scale, self.COLORS['text_primary'], thickness, font=FONT_DISPLAY)
     
     def draw_evaluation_results(self, frame):
         """Draw evaluation results as a large centered modal window"""
@@ -1829,33 +2041,38 @@ class PatternMode:
             title = "LEVEL INCOMPLETE"
             title_color = self.COLORS['text_secondary']
         
-        (title_w, title_h), _ = cv2.getTextSize(title, cv2.FONT_HERSHEY_TRIPLEX, 1.2, 3)
+        title_scale = text_scale(1.2, self.width, self.height, floor=1.04, ceiling=1.35)
+        title_thickness = text_thickness(3, self.width, self.height, min_thickness=2, max_thickness=4)
+        title_scale = fit_text_scale(title, FONT_DISPLAY, panel_w - 40, title_scale, title_thickness, min_scale=0.92)
+        (title_w, title_h), _ = get_text_size(title, FONT_DISPLAY, title_scale, title_thickness)
         title_x = panel_x + (panel_w - title_w) // 2
-        cv2.putText(frame, title, (title_x, content_y), 
-                   cv2.FONT_HERSHEY_TRIPLEX, 1.2, title_color, 3)
+        self._put_text(frame, title, title_x, content_y, title_scale, title_color, title_thickness, font=FONT_DISPLAY)
         
         # Progress achieved
         content_y += 70
         progress_label = "Progress Achieved:"
-        (prog_label_w, _), _ = cv2.getTextSize(progress_label, cv2.FONT_HERSHEY_TRIPLEX, 0.8, 2)
+        prog_label_scale = text_scale(0.82, self.width, self.height, floor=0.74, ceiling=0.94)
+        prog_label_thick = text_thickness(2, self.width, self.height, min_thickness=1, max_thickness=2)
+        (prog_label_w, _), _ = get_text_size(progress_label, FONT_MAIN, prog_label_scale, prog_label_thick)
         label_x = panel_x + (panel_w - prog_label_w) // 2
-        cv2.putText(frame, progress_label, (label_x, content_y), 
-                   cv2.FONT_HERSHEY_TRIPLEX, 0.8, self.COLORS['text_secondary'], 2)
+        self._put_text(frame, progress_label, label_x, content_y, prog_label_scale, self.COLORS['text_secondary'], prog_label_thick)
         
         content_y += 50
         progress_text = f"{self.raw_progress:.1f}%"
-        (prog_w, _), _ = cv2.getTextSize(progress_text, cv2.FONT_HERSHEY_TRIPLEX, 1.5, 3)
+        prog_scale = text_scale(1.45, self.width, self.height, floor=1.22, ceiling=1.65)
+        prog_thick = text_thickness(3, self.width, self.height, min_thickness=2, max_thickness=4)
+        (prog_w, _), _ = get_text_size(progress_text, FONT_DISPLAY, prog_scale, prog_thick)
         prog_x = panel_x + (panel_w - prog_w) // 2
-        cv2.putText(frame, progress_text, (prog_x, content_y), 
-                   cv2.FONT_HERSHEY_TRIPLEX, 1.5, self.COLORS['text_primary'], 3)
+        self._put_text(frame, progress_text, prog_x, content_y, prog_scale, self.COLORS['text_primary'], prog_thick, font=FONT_DISPLAY)
         
         # Requirement text
         content_y += 40
         req_text = "(Need 80% to pass)"
-        (req_w, _), _ = cv2.getTextSize(req_text, cv2.FONT_HERSHEY_TRIPLEX, 0.6, 1)
+        req_scale = text_scale(0.64, self.width, self.height, floor=0.58, ceiling=0.74)
+        req_thick = text_thickness(1, self.width, self.height, min_thickness=1, max_thickness=2)
+        (req_w, _), _ = get_text_size(req_text, FONT_MAIN, req_scale, req_thick)
         req_x = panel_x + (panel_w - req_w) // 2
-        cv2.putText(frame, req_text, (req_x, content_y), 
-                   cv2.FONT_HERSHEY_TRIPLEX, 0.6, self.COLORS['text_secondary'], 1)
+        self._put_text(frame, req_text, req_x, content_y, req_scale, self.COLORS['text_secondary'], req_thick)
         
         # Action button (Try Again or Next Level)
         if self.level_completed:
@@ -1890,14 +2107,14 @@ class PatternMode:
         
         # Button text
         text = "TRY AGAIN"
-        font_scale = 0.9
-        thickness = 3
-        (text_w, text_h), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_TRIPLEX, font_scale, thickness)
+        font_scale = text_scale(0.92, self.width, self.height, floor=0.8, ceiling=1.04)
+        thickness = text_thickness(3, self.width, self.height, min_thickness=2, max_thickness=4)
+        font_scale = fit_text_scale(text, FONT_DISPLAY, button_w - 20, font_scale, thickness, min_scale=0.72)
+        (text_w, text_h), _ = get_text_size(text, FONT_DISPLAY, font_scale, thickness)
         text_x = button_x + (button_w - text_w) // 2
         text_y = button_y + (button_h + text_h) // 2
         
-        cv2.putText(frame, text, (text_x, text_y), cv2.FONT_HERSHEY_TRIPLEX, 
-                   font_scale, self.COLORS['text_primary'], thickness)
+        self._put_text(frame, text, text_x, text_y, font_scale, self.COLORS['text_primary'], thickness, font=FONT_DISPLAY)
     
     def draw_next_level_button_centered(self, frame, panel_x, panel_y, panel_w, panel_h):
         """Draw next level button in the centered modal"""
@@ -1926,17 +2143,26 @@ class PatternMode:
         
         # Button text
         text = "NEXT LEVEL >"
-        font_scale = 0.9
-        thickness = 3
-        (text_w, text_h), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_TRIPLEX, font_scale, thickness)
+        font_scale = text_scale(0.92, self.width, self.height, floor=0.8, ceiling=1.04)
+        thickness = text_thickness(3, self.width, self.height, min_thickness=2, max_thickness=4)
+        font_scale = fit_text_scale(text, FONT_DISPLAY, button_w - 20, font_scale, thickness, min_scale=0.72)
+        (text_w, text_h), _ = get_text_size(text, FONT_DISPLAY, font_scale, thickness)
         text_x = button_x + (button_w - text_w) // 2
         text_y = button_y + (button_h + text_h) // 2
         
         # Draw with glow effect
-        cv2.putText(frame, text, (text_x, text_y), cv2.FONT_HERSHEY_TRIPLEX, 
-                   font_scale, self.COLORS['glow_cyan'], thickness + 1)
-        cv2.putText(frame, text, (text_x, text_y), cv2.FONT_HERSHEY_TRIPLEX, 
-                   font_scale, self.COLORS['bright_blue'], thickness)
+        draw_text(
+            frame,
+            text,
+            text_x,
+            text_y,
+            font_scale,
+            self.COLORS['bright_blue'],
+            thickness,
+            font=FONT_DISPLAY,
+            outline_color=self.COLORS['glow_cyan'],
+            outline_extra=2,
+        )
     
     def draw_stat_item(self, frame, label, value, x, y, max_width, value_color=None):
         """Helper method to draw a stat item (label and value)"""
@@ -1944,14 +2170,16 @@ class PatternMode:
             value_color = self.COLORS['text_primary']
         
         # Draw label - larger font
-        cv2.putText(frame, label, (x, y), cv2.FONT_HERSHEY_TRIPLEX, 
-                   0.6, self.COLORS['text_secondary'], 2)
+        label_scale = text_scale(0.62, self.width, self.height, floor=0.56, ceiling=0.74)
+        label_thick = text_thickness(2, self.width, self.height, min_thickness=1, max_thickness=2)
+        self._put_text(frame, label, x, y, label_scale, self.COLORS['text_secondary'], label_thick)
         
         # Draw value (right-aligned on same line) - larger font
-        (val_w, val_h), _ = cv2.getTextSize(value, cv2.FONT_HERSHEY_TRIPLEX, 0.9, 2)
+        value_scale = text_scale(0.92, self.width, self.height, floor=0.82, ceiling=1.06)
+        value_thick = text_thickness(2, self.width, self.height, min_thickness=1, max_thickness=3)
+        (val_w, val_h), _ = get_text_size(value, FONT_DISPLAY, value_scale, value_thick)
         value_x = x + max_width - val_w
-        cv2.putText(frame, value, (value_x, y), cv2.FONT_HERSHEY_TRIPLEX, 
-                   0.9, value_color, 2)
+        self._put_text(frame, value, value_x, y, value_scale, value_color, value_thick, font=FONT_DISPLAY)
 
     def handle_click(self, x, y):
         """Handle mouse clicks in pattern mode"""

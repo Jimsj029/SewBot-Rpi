@@ -18,12 +18,32 @@ from level_selection import LevelSelection
 from pattern_mode import PatternMode
 from music_manager import get_music_manager
 
-_UI_FONT = cv2.FONT_HERSHEY_DUPLEX
+try:
+    from ui.typography import (
+        FONT_MAIN,
+        FONT_DISPLAY,
+        text_scale,
+        text_thickness,
+        get_text_size,
+        fit_text_scale,
+        draw_text,
+    )
+except ImportError:
+    from typography import (
+        FONT_MAIN,
+        FONT_DISPLAY,
+        text_scale,
+        text_thickness,
+        get_text_size,
+        fit_text_scale,
+        draw_text,
+    )
+
+_UI_FONT = FONT_MAIN
 
 def _put_text(img, text, x, y, scale, color, thickness):
     """Draw text with a 1-px black outline for readability on any background."""
-    cv2.putText(img, text, (x + 1, y + 1), _UI_FONT, scale, (0, 0, 0), thickness + 2, cv2.LINE_AA)
-    cv2.putText(img, text, (x, y),         _UI_FONT, scale, color,     thickness,     cv2.LINE_AA)
+    draw_text(img, text, x, y, scale, color, thickness, font=_UI_FONT)
 
 
 class SewBotApp:
@@ -471,8 +491,11 @@ class SewBotApp:
         cv2.rectangle(overlay, (bb['x'] + 2, bb['y'] + 2), (bb['x'] + bb['w'] - 2, bb['y'] + bb['h'] - 2), self.COLORS['button_normal'], -1)
         cv2.addWeighted(overlay, 0.6, img, 0.4, 0, img)
         
-        text, font_scale, thickness = "< BACK", 0.6, 2
-        (text_w, text_h), _ = cv2.getTextSize(text, _UI_FONT, font_scale, thickness)
+        text = "< BACK"
+        font_scale = text_scale(0.72, self.width, self.height, floor=0.66, ceiling=0.88)
+        thickness = text_thickness(2, self.width, self.height, min_thickness=2, max_thickness=3)
+        font_scale = fit_text_scale(text, _UI_FONT, bb['w'] - 14, font_scale, thickness, min_scale=0.58)
+        (text_w, text_h), _ = get_text_size(text, _UI_FONT, font_scale, thickness)
         text_x = bb['x'] + (bb['w'] - text_w) // 2
         text_y = bb['y'] + (bb['h'] + text_h) // 2
         _put_text(img, text, text_x, text_y, font_scale, self.COLORS['text_primary'], thickness)
@@ -486,8 +509,11 @@ class SewBotApp:
         cv2.rectangle(overlay, (qb['x'] + 2, qb['y'] + 2), (qb['x'] + qb['w'] - 2, qb['y'] + qb['h'] - 2), (100, 50, 50), -1)
         cv2.addWeighted(overlay, 0.6, img, 0.4, 0, img)
         
-        text, font_scale, thickness = "QUIT", 0.6, 2
-        (text_w, text_h), _ = cv2.getTextSize(text, _UI_FONT, font_scale, thickness)
+        text = "QUIT"
+        font_scale = text_scale(0.72, self.width, self.height, floor=0.66, ceiling=0.88)
+        thickness = text_thickness(2, self.width, self.height, min_thickness=2, max_thickness=3)
+        font_scale = fit_text_scale(text, _UI_FONT, qb['w'] - 14, font_scale, thickness, min_scale=0.58)
+        (text_w, text_h), _ = get_text_size(text, _UI_FONT, font_scale, thickness)
         text_x = qb['x'] + (qb['w'] - text_w) // 2
         text_y = qb['y'] + (qb['h'] + text_h) // 2
         _put_text(img, text, text_x, text_y, font_scale, self.COLORS['text_primary'], thickness)
@@ -581,8 +607,11 @@ class SewBotApp:
             text_start_y = self.height // 3  # Default position if no logo
         
         # Draw SEWBOT title
-        text, font_scale, thickness = "SEWBOT", 2.5, 4
-        (text_w, text_h), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_TRIPLEX, font_scale, thickness)
+        text = "SEWBOT"
+        title_font = FONT_DISPLAY
+        font_scale = text_scale(2.45, self.width, self.height, floor=2.05, ceiling=2.65)
+        thickness = text_thickness(4, self.width, self.height, min_thickness=3, max_thickness=5)
+        (text_w, text_h), _ = get_text_size(text, title_font, font_scale, thickness)
         text_x, text_y = (self.width - text_w) // 2, text_start_y
         
         # Reduced glow layers from 5 to 3 for performance
@@ -590,17 +619,18 @@ class SewBotApp:
         for offset in [6, 4, 2]:
             alpha = glow_intensity * (1 - offset / 8)
             glow_color = tuple(int(c * alpha) for c in self.COLORS['glow_cyan'])
-            cv2.putText(frame, text, (text_x, text_y), cv2.FONT_HERSHEY_TRIPLEX, font_scale, glow_color, thickness + offset)
+            cv2.putText(frame, text, (text_x, text_y), title_font, font_scale, glow_color, thickness + offset, cv2.LINE_AA)
         
-        cv2.putText(frame, text, (text_x, text_y), cv2.FONT_HERSHEY_TRIPLEX, font_scale, self.COLORS['neon_blue'], thickness)
-        cv2.putText(frame, text, (text_x, text_y), cv2.FONT_HERSHEY_TRIPLEX, font_scale, self.COLORS['text_primary'], 2)
+        draw_text(frame, text, text_x, text_y, font_scale, self.COLORS['neon_blue'], thickness, font=title_font)
+        cv2.putText(frame, text, (text_x, text_y), title_font, font_scale, self.COLORS['text_primary'], max(1, thickness - 2), cv2.LINE_AA)
         
         subtitle = "[SEWING GUIDANCE SYSTEM ]"
-        sub_font_scale = 0.9
-        sub_thickness = 2
-        (sub_w, sub_h), _ = cv2.getTextSize(subtitle, cv2.FONT_HERSHEY_TRIPLEX, sub_font_scale, sub_thickness)
+        sub_font_scale = text_scale(0.92, self.width, self.height, floor=0.82, ceiling=1.06)
+        sub_thickness = text_thickness(2, self.width, self.height, min_thickness=1, max_thickness=3)
+        sub_font_scale = fit_text_scale(subtitle, _UI_FONT, self.width - 120, sub_font_scale, sub_thickness, min_scale=0.72)
+        (sub_w, sub_h), _ = get_text_size(subtitle, _UI_FONT, sub_font_scale, sub_thickness)
         subtitle_y = text_y + 50
-        cv2.putText(frame, subtitle, ((self.width - sub_w) // 2, subtitle_y), cv2.FONT_HERSHEY_TRIPLEX, sub_font_scale, self.COLORS['text_accent'], sub_thickness, cv2.LINE_AA)
+        _put_text(frame, subtitle, (self.width - sub_w) // 2, subtitle_y, sub_font_scale, self.COLORS['text_accent'], sub_thickness)
         
         # Position START button below subtitle with spacing
         btn = self.start_button
@@ -612,13 +642,15 @@ class SewBotApp:
         cv2.rectangle(overlay, (btn['x'] + 3, btn['y'] + 3), (btn['x'] + btn['w'] - 3, btn['y'] + btn['h'] - 3), self.COLORS['button_normal'], -1)
         cv2.addWeighted(overlay, 0.7, frame, 0.3, 0, frame)
         
-        text, font_scale, thickness = "START", 1.0, 2
-        (text_w, text_h), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_TRIPLEX, font_scale, thickness)
+        text = "START"
+        font_scale = text_scale(1.06, self.width, self.height, floor=0.94, ceiling=1.18)
+        thickness = text_thickness(2, self.width, self.height, min_thickness=2, max_thickness=3)
+        font_scale = fit_text_scale(text, title_font, btn['w'] - 30, font_scale, thickness, min_scale=0.86)
+        (text_w, text_h), _ = get_text_size(text, title_font, font_scale, thickness)
         text_x = btn['x'] + (btn['w'] - text_w) // 2
         text_y = btn['y'] + (btn['h'] + text_h) // 2
         # Reduced glow thickness
-        cv2.putText(frame, text, (text_x, text_y), cv2.FONT_HERSHEY_TRIPLEX, font_scale, self.COLORS['glow_cyan'], thickness + 2)
-        cv2.putText(frame, text, (text_x, text_y), cv2.FONT_HERSHEY_TRIPLEX, font_scale, self.COLORS['text_primary'], thickness)
+        draw_text(frame, text, text_x, text_y, font_scale, self.COLORS['text_primary'], thickness, font=title_font, outline_color=self.COLORS['glow_cyan'], outline_extra=1)
         
         self.draw_quit_button(frame)
     
@@ -678,11 +710,14 @@ class SewBotApp:
         cv2.line(frame, (offset, offset), (offset + bracket_size, offset), self.COLORS['neon_blue'], thickness)
         cv2.circle(frame, (offset, offset), 3, self.COLORS['cyan'], -1)
         
-        text, font_scale, thickness = "SELECT MODE", 1.5, 3
-        (text_w, text_h), _ = cv2.getTextSize(text, _UI_FONT, font_scale, thickness)
+        text = "SELECT MODE"
+        font_scale = text_scale(1.52, self.width, self.height, floor=1.28, ceiling=1.7)
+        thickness = text_thickness(3, self.width, self.height, min_thickness=2, max_thickness=4)
+        font_scale = fit_text_scale(text, FONT_DISPLAY, self.width - 140, font_scale, thickness, min_scale=1.05)
+        (text_w, text_h), _ = get_text_size(text, FONT_DISPLAY, font_scale, thickness)
         text_x, text_y = (self.width - text_w) // 2, 80
         
-        _put_text(frame, text, text_x, text_y, font_scale, self.COLORS['bright_blue'], thickness)
+        draw_text(frame, text, text_x, text_y, font_scale, self.COLORS['bright_blue'], thickness, font=FONT_DISPLAY)
         
         # Draw all three mode buttons
         self.draw_mode_button(frame, self.pattern_button)
@@ -701,16 +736,18 @@ class SewBotApp:
         cv2.addWeighted(overlay, 0.7, img, 1 - 0.7, 0, img)
         
         # Draw title (centered)
-        title_font_scale, title_thickness = 1.0, 2
-        (title_w, title_h), _ = cv2.getTextSize(button_data['title'], _UI_FONT, title_font_scale, title_thickness)
+        title_font_scale = text_scale(1.0, self.width, self.height, floor=0.92, ceiling=1.15)
+        title_thickness = text_thickness(2, self.width, self.height, min_thickness=2, max_thickness=3)
+        title_font_scale = fit_text_scale(button_data['title'], FONT_DISPLAY, w - 30, title_font_scale, title_thickness, min_scale=0.82)
+        (title_w, title_h), _ = get_text_size(button_data['title'], FONT_DISPLAY, title_font_scale, title_thickness)
         title_x = x + (w - title_w) // 2
         title_y = y + 40  # Better vertical positioning
         
-        _put_text(img, button_data['title'], title_x, title_y, title_font_scale, self.COLORS['text_primary'], title_thickness)
+        draw_text(img, button_data['title'], title_x, title_y, title_font_scale, self.COLORS['text_primary'], title_thickness, font=FONT_DISPLAY, outline_color=self.COLORS['glow_cyan'], outline_extra=1)
         
         # Draw description (centered, wrapped if needed)
-        desc_font_scale = 0.45
-        desc_thickness = 1
+        desc_font_scale = text_scale(0.58, self.width, self.height, floor=0.52, ceiling=0.68)
+        desc_thickness = text_thickness(1, self.width, self.height, min_thickness=1, max_thickness=2)
         description = button_data['description']
         
         # Simple text wrapping
@@ -721,7 +758,7 @@ class SewBotApp:
         
         for word in words:
             test_line = ' '.join(current_line + [word])
-            (test_w, test_h), _ = cv2.getTextSize(test_line, _UI_FONT, desc_font_scale, desc_thickness)
+            (test_w, test_h), _ = get_text_size(test_line, _UI_FONT, desc_font_scale, desc_thickness)
             if test_w <= max_width:
                 current_line.append(word)
             else:
@@ -732,10 +769,11 @@ class SewBotApp:
             lines.append(' '.join(current_line))
         
         # Draw description lines
-        line_height = 18
+        (_, desc_h), _ = get_text_size("Ag", _UI_FONT, desc_font_scale, desc_thickness)
+        line_height = max(18, desc_h + 8)
         start_y = title_y + 25  # More space below title
         for i, line in enumerate(lines):
-            (line_w, line_h), _ = cv2.getTextSize(line, _UI_FONT, desc_font_scale, desc_thickness)
+            (line_w, line_h), _ = get_text_size(line, _UI_FONT, desc_font_scale, desc_thickness)
             line_x = x + (w - line_w) // 2
             line_y = start_y + i * line_height
             _put_text(img, line, line_x, line_y, desc_font_scale, self.COLORS['text_secondary'], desc_thickness)
