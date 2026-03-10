@@ -83,7 +83,7 @@ class TutorialPlayer:
         
         # Multi-video support for tutorial steps
         self.current_step = 0  # Current video index (0-4 for 5 videos)
-        self.total_steps = 5
+        self.total_steps = 8
         self.videos_base_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'videos', 'sewing-set-up')
         self.video_files = []  # Will store paths to step1.mov through step5.mov
         self.load_video_list()
