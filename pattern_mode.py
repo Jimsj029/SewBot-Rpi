@@ -123,10 +123,12 @@ class PatternMode:
         self.completed_stitch_mask = None  # Accumulated mask of all detected stitches
         self.proximity_radius = 5  # Legacy compatibility radius (kept small)
         self.stitch_draw_radius = 3  # Radius of each accepted stitch stamp
-        self.cyan_spread_radius = 3  # Visual cyan expansion around accepted stitches
+        self.cyan_spread_radius = 2  # Visual cyan expansion around accepted stitches
         self.progress_spread_radius = 4  # Progress expansion to bridge tiny gaps only
-        self.min_stitch_move_px = 3  # Min movement before accepting another center stitch
-        self.stitch_cooldown_frames = 2  # Min frames between accepted center stitches
+        # Keep these permissive so centerline-guided tracing can advance one
+        # pixel step at a time on small screens/cameras.
+        self.min_stitch_move_px = 1.0  # Min movement before accepting another center stitch
+        self.stitch_cooldown_frames = 1  # Min frames between accepted center stitches
         self.stitch_frame_index = 0
         self.last_stitch_frame_index = -9999
         self.last_stitch_point = None
@@ -144,14 +146,19 @@ class PatternMode:
         self.prev_motion_patch = None
         self.last_motion_diff = 0.0
         self.cloth_motion_active = False
+        self.last_motion_centroid = None
+        self.motion_vector_x = 0.0
+        self.motion_vector_y = 0.0
+        self.motion_vector_min_mag = 0.35
         self.needle_on_pattern = True  # Whether the needle is currently on a pattern pixel
 
         # Follow-line validation (on/off pattern while sewing)
         self.pattern_alpha_threshold = 0.5
         self.follow_corridor_radius = 6
-        self.follow_order_tolerance = 18
-        self.follow_centerline_distance = 5
+        self.follow_order_tolerance = 24
+        self.follow_centerline_distance = 8
         self.snap_stitches_to_centerline = True
+        self.centerline_step_limit = 6  # Max index jump per accepted center sample
         self.follow_off_confirm_frames = 4
         self.follow_on_confirm_frames = 2
         self.follow_off_count = 0
@@ -304,8 +311,9 @@ class PatternMode:
         # Cut the binary mask in half (keep top half)
         mask = mask[:mask.shape[0] // 2, :]
 
-        # Reduce width by 50%
-        new_w = max(1, mask.shape[1] // 2)
+        # Base width is 50%; increase it by 25% => 62.5% of original width.
+        new_w = int(round(mask.shape[1] * 0.625))
+        new_w = max(1, min(mask.shape[1], new_w))
         mask = cv2.resize(mask, (new_w, mask.shape[0]), interpolation=cv2.INTER_NEAREST)
 
         # Move the pattern to the middle of the cloth while keeping it centered horizontally
@@ -345,6 +353,9 @@ class PatternMode:
         self.prev_motion_patch = None
         self.last_motion_diff = 0.0
         self.cloth_motion_active = False
+        self.last_motion_centroid = None
+        self.motion_vector_x = 0.0
+        self.motion_vector_y = 0.0
         self.centerline_progress_idx = 0
         self.centerline_progress_initialized = False
         self.needle_on_pattern = True
@@ -394,6 +405,9 @@ class PatternMode:
         if cam_frame is None or cam_frame.size == 0:
             self.cloth_motion_active = False
             self.last_motion_diff = 0.0
+            self.last_motion_centroid = None
+            self.motion_vector_x = 0.0
+            self.motion_vector_y = 0.0
             return
 
         gray = cv2.cvtColor(cam_frame, cv2.COLOR_BGR2GRAY)
@@ -410,6 +424,9 @@ class PatternMode:
         if patch.size == 0 or patch.shape[0] < 8 or patch.shape[1] < 8:
             self.cloth_motion_active = False
             self.last_motion_diff = 0.0
+            self.last_motion_centroid = None
+            self.motion_vector_x = 0.0
+            self.motion_vector_y = 0.0
             return
 
         patch = cv2.GaussianBlur(patch, (5, 5), 0)
@@ -418,10 +435,32 @@ class PatternMode:
             self.prev_motion_patch = patch
             self.cloth_motion_active = False
             self.last_motion_diff = 0.0
+            self.last_motion_centroid = None
+            self.motion_vector_x = 0.0
+            self.motion_vector_y = 0.0
             return
 
         diff = cv2.absdiff(patch, self.prev_motion_patch)
         self.last_motion_diff = float(np.mean(diff))
+
+        # Estimate local motion direction from the centroid shift of changed pixels.
+        motion_thresh = max(1.0, self.motion_diff_threshold * 1.2)
+        _, motion_mask = cv2.threshold(diff, motion_thresh, 255, cv2.THRESH_BINARY)
+        motion_pixels = int(np.count_nonzero(motion_mask))
+        if motion_pixels >= 20:
+            ys, xs = np.where(motion_mask > 0)
+            centroid = np.array([float(np.mean(xs)), float(np.mean(ys))], dtype=np.float32)
+            if self.last_motion_centroid is not None:
+                raw_dx = float(centroid[0] - self.last_motion_centroid[0])
+                raw_dy = float(centroid[1] - self.last_motion_centroid[1])
+                blend = 0.35
+                self.motion_vector_x = (1.0 - blend) * self.motion_vector_x + blend * raw_dx
+                self.motion_vector_y = (1.0 - blend) * self.motion_vector_y + blend * raw_dy
+            self.last_motion_centroid = centroid
+        else:
+            self.motion_vector_x *= 0.7
+            self.motion_vector_y *= 0.7
+
         self.prev_motion_patch = patch
 
         if self.last_motion_diff >= self.motion_diff_threshold:
@@ -430,6 +469,34 @@ class PatternMode:
             self.motion_grace_counter = max(0, self.motion_grace_counter - 1)
 
         self.cloth_motion_active = self.motion_grace_counter > 0
+
+    def _infer_centerline_step_direction(self, centerline_path, current_idx):
+        """Infer +1/-1 movement along centerline from local cloth motion."""
+        if centerline_path is None or len(centerline_path) < 3:
+            return 0
+
+        idx = int(np.clip(current_idx, 0, len(centerline_path) - 1))
+        prev_idx = max(0, idx - 1)
+        next_idx = min(len(centerline_path) - 1, idx + 1)
+        if prev_idx == next_idx:
+            return 0
+
+        tangent = centerline_path[next_idx].astype(np.float32) - centerline_path[prev_idx].astype(np.float32)
+        tan_norm = float(np.linalg.norm(tangent))
+        if tan_norm < 1e-6:
+            return 0
+        tangent /= tan_norm
+
+        motion = np.array([self.motion_vector_x, self.motion_vector_y], dtype=np.float32)
+        motion_mag = float(np.linalg.norm(motion))
+        if motion_mag < self.motion_vector_min_mag:
+            return 0
+
+        projection = float(np.dot(motion, tangent))
+        if abs(projection) < 0.05:
+            return 0
+
+        return 1 if projection > 0 else -1
 
     def run_needle_pipeline(self, cam_frame, pattern_alpha,
                             x_offset, y_offset, actual_w, actual_h,
@@ -580,9 +647,18 @@ class PatternMode:
             if source == "center":
                 if (self.stitch_frame_index - self.last_stitch_frame_index) < self.stitch_cooldown_frames:
                     return
-                if self.last_stitch_point is not None:
+                # In centerline mode we intentionally allow dense adjacent points.
+                # A strict movement check here can deadlock progression on tightly
+                # sampled paths where consecutive points overlap existing circles.
+                use_centerline_mode = (
+                    self.snap_stitches_to_centerline
+                    and centerline_path is not None
+                    and len(centerline_path) > 0
+                )
+                if (not use_centerline_mode) and self.last_stitch_point is not None:
                     lx, ly = self.last_stitch_point
-                    if math.hypot(draw_x - lx, draw_y - ly) < self.min_stitch_move_px:
+                    min_move = float(self.min_stitch_move_px)
+                    if math.hypot(draw_x - lx, draw_y - ly) < min_move:
                         return
 
             if self.completed_stitch_mask is None:
@@ -592,20 +668,37 @@ class PatternMode:
             cv2.circle(self.completed_stitch_mask, (draw_x, draw_y), self.stitch_draw_radius, 255, -1)
             new_pixels = int(np.count_nonzero(self.completed_stitch_mask))
 
-            # Only advance stats/progress when this stitch added new coverage.
-            if new_pixels > prev_pixels:
+            if source == "center":
+                # Record accepted center sample even when no new pixels were
+                # added, so the next frame can progress to the next path point.
                 self.last_stitch_point = (draw_x, draw_y)
                 self.last_stitch_frame_index = self.stitch_frame_index
                 if centerline_path is not None and nearest_idx is not None and len(centerline_path) > 0:
                     max_idx = len(centerline_path) - 1
+                    nearest_idx = int(np.clip(nearest_idx, 0, max_idx))
                     if not self.centerline_progress_initialized:
-                        self.centerline_progress_idx = int(np.clip(nearest_idx, 0, max_idx))
+                        self.centerline_progress_idx = nearest_idx
                         self.centerline_progress_initialized = True
                     else:
-                        self.centerline_progress_idx = max(self.centerline_progress_idx, int(nearest_idx))
-                    # Nudge one point forward after each accepted stitch to avoid
-                    # getting stuck at the same centerline index.
-                    self.centerline_progress_idx = min(max_idx, self.centerline_progress_idx + 1)
+                        current_idx = int(self.centerline_progress_idx)
+                        # Usually we move toward nearest_idx. If nearest_idx ==
+                        # current_idx (common with needle-anchored overlay),
+                        # infer direction from cloth motion to keep progression moving.
+                        delta = nearest_idx - current_idx
+                        if delta == 0:
+                            delta = self._infer_centerline_step_direction(centerline_path, current_idx)
+
+                        step_limit = max(1, int(self.centerline_step_limit))
+                        if delta > step_limit:
+                            delta = step_limit
+                        elif delta < -step_limit:
+                            delta = -step_limit
+
+                        if delta != 0:
+                            self.centerline_progress_idx = int(np.clip(current_idx + delta, 0, max_idx))
+
+            # Only advance stats/progress when this stitch added new coverage.
+            if new_pixels > prev_pixels:
                 self._update_progress_from_mask(pattern_alpha)
                 self.stitches_detected += 1
 
@@ -1039,29 +1132,43 @@ class PatternMode:
                     exp_y = overlay_h // 2
 
                 # Align expected centerline stitch point directly under the red dot.
-                x_offset = int(self.needle_pos_x) - exp_x
-                y_offset = int(self.needle_pos_y) - exp_y
-                x_offset = max(0, min(x_offset, self.camera_width - overlay_w))
-                y_offset = max(0, min(y_offset, self.camera_height - overlay_h))
+                x_offset = int(round(self.needle_pos_x)) - exp_x
+                y_offset = int(round(self.needle_pos_y)) - exp_y
                 trace_y = exp_y
-                
-                overlay_end_x = min(x_offset + overlay_w, self.camera_width)
-                overlay_end_y = min(y_offset + overlay_h, self.camera_height)
-                actual_w = overlay_end_x - x_offset
-                actual_h = overlay_end_y - y_offset
-                
-                if actual_w > 0 and actual_h > 0:
+
+                # Allow the pattern overlay to extend off-screen and crop the
+                # visible portion; this keeps the expected path aligned to the
+                # needle across the entire pattern.
+                dst_x1 = max(0, x_offset)
+                dst_y1 = max(0, y_offset)
+                dst_x2 = min(self.camera_width, x_offset + overlay_w)
+                dst_y2 = min(self.camera_height, y_offset + overlay_h)
+                visible_w = dst_x2 - dst_x1
+                visible_h = dst_y2 - dst_y1
+
+                # Source crop in pattern coordinates for the visible ROI.
+                src_x1 = max(0, -x_offset)
+                src_y1 = max(0, -y_offset)
+                src_x2 = src_x1 + visible_w
+                src_y2 = src_y1 + visible_h
+
+                # Validation should use full pattern coordinates.
+                actual_w = overlay_w
+                actual_h = overlay_h
+
+                if visible_w > 0 and visible_h > 0:
                     corridor_mask = self._get_pattern_corridor_mask(pattern_alpha, actual_w, actual_h)
                     realtime_pattern = self.create_realtime_pattern(pattern_overlay, pattern_alpha, trace_y=trace_y)
-                    
-                    roi = cam_frame[y_offset:overlay_end_y, x_offset:overlay_end_x]
-                    pattern_crop = realtime_pattern[0:actual_h, 0:actual_w] if realtime_pattern is not None else pattern_overlay[0:actual_h, 0:actual_w]
-                    alpha_crop = pattern_alpha[0:actual_h, 0:actual_w]
+
+                    roi = cam_frame[dst_y1:dst_y2, dst_x1:dst_x2]
+                    pattern_src = realtime_pattern if realtime_pattern is not None else pattern_overlay
+                    pattern_crop = pattern_src[src_y1:src_y2, src_x1:src_x2]
+                    alpha_crop = pattern_alpha[src_y1:src_y2, src_x1:src_x2]
                     
                     for c in range(3):
                         roi[:, :, c] = (alpha_crop * pattern_crop[:, :, c] * 0.7 +
                                       (1 - alpha_crop * 0.7) * roi[:, :, c])
-                    cam_frame[y_offset:overlay_end_y, x_offset:overlay_end_x] = roi
+                    cam_frame[dst_y1:dst_y2, dst_x1:dst_x2] = roi
                     
                     self.run_needle_pipeline(
                         detection_frame, pattern_alpha,
@@ -1087,6 +1194,10 @@ class PatternMode:
                         centerline_path=centerline_path,
                         expected_path_idx=expected_path_idx
                     )
+
+                    # Use the updated index immediately for follow validation.
+                    if centerline_path is not None and len(centerline_path) > 0:
+                        expected_path_idx = int(np.clip(self.centerline_progress_idx, 0, len(centerline_path) - 1))
 
                     # Follow-line decision uses center-point color + corridor + order.
                     center_color_match = self._matches_selected_color(
@@ -1136,7 +1247,7 @@ class PatternMode:
             # ─────────────────────────────────────────────────────────────────
 
             # Outside-pattern warning (color-gated + hysteresis stabilized)
-            if follow_check_ready and not self.needle_on_pattern and self.raw_progress >= 2.0:
+            if follow_check_ready and self.needle_confirmed and not self.needle_on_pattern and self.raw_progress >= 2.0:
                 ow_h = 36
                 ow_y = 60 if self.needle_confirmed else 60
                 _ov2 = cam_frame.copy()
@@ -1842,7 +1953,7 @@ class PatternMode:
                      self.COLORS['medium_blue'], 2)
         
         # Progress percentage text
-        progress_text = f"{self.pattern_progress:.0f}%"
+        progress_text = f"{self.raw_progress:.0f}%"
         percent_scale = text_scale(0.62, self.width, self.height, floor=0.56, ceiling=0.74)
         percent_thick = text_thickness(2, self.width, self.height, min_thickness=1, max_thickness=2)
         (prog_w, prog_h), _ = get_text_size(progress_text, FONT_MAIN, percent_scale, percent_thick)
