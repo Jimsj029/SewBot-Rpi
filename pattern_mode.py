@@ -147,6 +147,7 @@ class PatternMode:
         
         # Real-time stitch tracking for progressive coloring
         self.completed_stitch_mask = None  # Accumulated mask of all detected stitches
+        self.missed_stitch_mask = None     # Accumulated mask of off-pattern detections
         self.proximity_radius = 5  # Legacy compatibility radius (kept small)
         self.stitch_draw_radius = 3  # Radius of each accepted stitch stamp
         self.cyan_spread_radius = 2  # Visual cyan expansion around accepted stitches
@@ -161,21 +162,21 @@ class PatternMode:
         self.use_model_stitch_points = False  # Keep tracing tied to the red-dot center
         self.needle_model_imgsz = 320  # needle.onnx expects 320x320 input
 
-        # Motion gate: a valid stitch requires cloth motion near the needle,
-        # preventing static color patches from auto-advancing the pattern.
+        # Motion gate: a valid stitch requires cloth motion near the needle.
         self.require_motion_for_stitch = True
-        self.motion_patch_size = 56
-        self.motion_patch_y_offset = 14
-        self.motion_diff_threshold = 4.5
-        self.motion_grace_frames = 8
-        self.motion_grace_counter = 0
-        self.prev_motion_patch = None
-        self.last_motion_diff = 0.0
         self.cloth_motion_active = False
-        self.last_motion_centroid = None
         self.motion_vector_x = 0.0
         self.motion_vector_y = 0.0
-        self.motion_vector_min_mag = 0.35
+        self.motion_vector_min_mag = 0.3
+        # Lucas-Kanade sparse optical flow for cloth tracking
+        self.of_prev_gray = None        # Previous greyscale frame
+        self.of_points = None           # Tracked feature points (Nx1x2 float32)
+        self.of_roi_half = 80           # Half-side of cloth ROI around needle (px)
+        self.of_min_points = 8          # Re-detect when fewer points survive
+        # Accumulated overlay offset driven entirely by cloth optical flow
+        self.pattern_offset_x = 0.0
+        self.pattern_offset_y = 0.0
+        self.pattern_offset_seeded = False
         self.needle_on_pattern = True  # Whether the needle is currently on a pattern pixel
 
         # Follow-line validation (on/off pattern while sewing)
@@ -223,7 +224,8 @@ class PatternMode:
         self.segment_colors = {
             'completed': (255, 255, 0),    # Cyan in BGR (completed sections)
             'current': (0, 255, 255),      # Yellow in BGR (current section to sew)
-            'upcoming': (100, 100, 100)    # Dim Gray (upcoming sections)
+            'upcoming': (100, 100, 100),   # Dim Gray (upcoming sections)
+            'missed': (0, 0, 255),         # Red in BGR (off-pattern detections)
         }
         
         # Out-of-segment detection
@@ -382,16 +384,18 @@ class PatternMode:
         self.level_completed = False
         # Clear accumulated stitch mask for real-time coloring
         self.completed_stitch_mask = None
+        self.missed_stitch_mask = None
         self.stitch_frame_index = 0
         self.last_stitch_frame_index = -9999
         self.last_stitch_point = None
-        self.motion_grace_counter = 0
-        self.prev_motion_patch = None
-        self.last_motion_diff = 0.0
         self.cloth_motion_active = False
-        self.last_motion_centroid = None
         self.motion_vector_x = 0.0
         self.motion_vector_y = 0.0
+        self.of_prev_gray = None
+        self.of_points = None
+        self.pattern_offset_x = 0.0
+        self.pattern_offset_y = 0.0
+        self.pattern_offset_seeded = False
         self.centerline_progress_idx = 0
         self.centerline_progress_initialized = False
         self.needle_on_pattern = True
@@ -425,6 +429,12 @@ class PatternMode:
             completed_pattern_pixels = np.logical_and(pattern_pixels, proximity_mask > 0)
             colored_overlay[completed_pattern_pixels] = self.segment_colors['completed']
 
+        # Missed stitch mask paints off-pattern detections red.
+        if self.missed_stitch_mask is not None:
+            missed_mask_resized = cv2.resize(self.missed_stitch_mask, (width, height), interpolation=cv2.INTER_NEAREST)
+            missed_pixels = missed_mask_resized > 0
+            colored_overlay[missed_pixels] = self.segment_colors['missed']
+
         return colored_overlay
     
 
@@ -433,78 +443,87 @@ class PatternMode:
     # ──────────────────────────────────────────────────────────────────────────
 
     def _update_needle_optical_flow(self, gray_frame):
-        """No-op: ROI is fixed at NEEDLE_ROI_X/Y — optical flow intentionally disabled."""
+        """No-op: needle position is fixed; cloth motion drives overlay via optical flow."""
         pass
 
-    def _update_cloth_motion_state(self, cam_frame):
-        """Update whether cloth is moving near the needle using frame differencing."""
+    def _update_cloth_optical_flow(self, cam_frame):
+        """Track cloth motion using Lucas-Kanade sparse optical flow.
+
+        Computes the median pixel displacement of cloth texture near the needle.
+        Stores the result in motion_vector_x/y and cloth_motion_active.
+        The caller decides whether to advance the pattern based on this + color.
+        """
         if cam_frame is None or cam_frame.size == 0:
             self.cloth_motion_active = False
-            self.last_motion_diff = 0.0
-            self.last_motion_centroid = None
-            self.motion_vector_x = 0.0
-            self.motion_vector_y = 0.0
             return
 
         gray = cv2.cvtColor(cam_frame, cv2.COLOR_BGR2GRAY)
-        patch_half = self.motion_patch_size // 2
+
         cx = int(self.needle_pos_x)
-        cy = int(self.needle_pos_y + self.motion_patch_y_offset)
+        cy = int(self.needle_pos_y)
+        half = self.of_roi_half
+        rx1 = max(0, cx - half)
+        ry1 = max(0, cy - half)
+        rx2 = min(gray.shape[1], cx + half)
+        ry2 = min(gray.shape[0], cy + half)
 
-        x1 = max(0, cx - patch_half)
-        y1 = max(0, cy - patch_half)
-        x2 = min(gray.shape[1], cx + patch_half)
-        y2 = min(gray.shape[0], cy + patch_half)
-
-        patch = gray[y1:y2, x1:x2]
-        if patch.size == 0 or patch.shape[0] < 8 or patch.shape[1] < 8:
+        # ── First frame or no previous frame: detect features and return ─────
+        if self.of_prev_gray is None:
+            mask = np.zeros_like(gray)
+            mask[ry1:ry2, rx1:rx2] = 255
+            self.of_points = cv2.goodFeaturesToTrack(
+                gray, maxCorners=60, qualityLevel=0.02, minDistance=6, mask=mask)
+            self.of_prev_gray = gray
             self.cloth_motion_active = False
-            self.last_motion_diff = 0.0
-            self.last_motion_centroid = None
-            self.motion_vector_x = 0.0
-            self.motion_vector_y = 0.0
             return
 
-        patch = cv2.GaussianBlur(patch, (5, 5), 0)
-
-        if self.prev_motion_patch is None or self.prev_motion_patch.shape != patch.shape:
-            self.prev_motion_patch = patch
+        # ── Re-detect when tracked set gets too sparse ────────────────────────
+        if self.of_points is None or len(self.of_points) < self.of_min_points:
+            mask = np.zeros_like(gray)
+            mask[ry1:ry2, rx1:rx2] = 255
+            self.of_points = cv2.goodFeaturesToTrack(
+                gray, maxCorners=60, qualityLevel=0.02, minDistance=6, mask=mask)
+            self.of_prev_gray = gray
             self.cloth_motion_active = False
-            self.last_motion_diff = 0.0
-            self.last_motion_centroid = None
-            self.motion_vector_x = 0.0
-            self.motion_vector_y = 0.0
             return
 
-        diff = cv2.absdiff(patch, self.prev_motion_patch)
-        self.last_motion_diff = float(np.mean(diff))
+        # ── Track: previous frame → current frame ────────────────────────────
+        new_pts, status, _ = cv2.calcOpticalFlowPyrLK(
+            self.of_prev_gray, gray,
+            self.of_points, None,
+            winSize=(15, 15),
+            maxLevel=3,
+            criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03),
+        )
 
-        # Estimate local motion direction from the centroid shift of changed pixels.
-        motion_thresh = max(1.0, self.motion_diff_threshold * 1.2)
-        _, motion_mask = cv2.threshold(diff, motion_thresh, 255, cv2.THRESH_BINARY)
-        motion_pixels = int(np.count_nonzero(motion_mask))
-        if motion_pixels >= 20:
-            ys, xs = np.where(motion_mask > 0)
-            centroid = np.array([float(np.mean(xs)), float(np.mean(ys))], dtype=np.float32)
-            if self.last_motion_centroid is not None:
-                raw_dx = float(centroid[0] - self.last_motion_centroid[0])
-                raw_dy = float(centroid[1] - self.last_motion_centroid[1])
-                blend = 0.35
-                self.motion_vector_x = (1.0 - blend) * self.motion_vector_x + blend * raw_dx
-                self.motion_vector_y = (1.0 - blend) * self.motion_vector_y + blend * raw_dy
-            self.last_motion_centroid = centroid
-        else:
-            self.motion_vector_x *= 0.7
-            self.motion_vector_y *= 0.7
+        if new_pts is None or status is None:
+            self.of_points = None
+            self.of_prev_gray = gray
+            self.cloth_motion_active = False
+            return
 
-        self.prev_motion_patch = patch
+        good_old = self.of_points[status.flatten() == 1]
+        good_new  = new_pts[status.flatten() == 1]
 
-        if self.last_motion_diff >= self.motion_diff_threshold:
-            self.motion_grace_counter = self.motion_grace_frames
-        else:
-            self.motion_grace_counter = max(0, self.motion_grace_counter - 1)
+        if len(good_new) < 3:
+            self.of_points = None
+            self.of_prev_gray = gray
+            self.cloth_motion_active = False
+            return
 
-        self.cloth_motion_active = self.motion_grace_counter > 0
+        # ── Median displacement — robust to outliers ──────────────────────────
+        displacements = good_new.reshape(-1, 2) - good_old.reshape(-1, 2)
+        dx = float(np.median(displacements[:, 0]))
+        dy = float(np.median(displacements[:, 1]))
+
+        blend = 0.5
+        self.motion_vector_x = (1.0 - blend) * self.motion_vector_x + blend * dx
+        self.motion_vector_y = (1.0 - blend) * self.motion_vector_y + blend * dy
+
+        self.cloth_motion_active = math.hypot(self.motion_vector_x, self.motion_vector_y) >= self.motion_vector_min_mag
+
+        self.of_points    = good_new.reshape(-1, 1, 2)
+        self.of_prev_gray = gray
 
     def _infer_centerline_step_direction(self, centerline_path, current_idx):
         """Infer +1/-1 movement along centerline from local cloth motion."""
@@ -674,6 +693,13 @@ class PatternMode:
 
         print(f"🪡 [{source}] cam=({cx_cam:.0f},{cy_cam:.0f})  "
               f"pat=({px},{py})  corridor={on_corridor}  order={order_valid}")
+
+        if not is_valid_stitch:
+            # Color detected but outside the pattern — paint missed mask
+            if self.missed_stitch_mask is None:
+                self.missed_stitch_mask = np.zeros((pat_h, pat_w), dtype=np.uint8)
+            cv2.circle(self.missed_stitch_mask, (px, py), self.stitch_draw_radius, 255, -1)
+            return
 
         if is_valid_stitch:
             draw_x, draw_y = px, py
@@ -1164,7 +1190,7 @@ class PatternMode:
             detection_frame = cam_frame.copy()
             hsv_detection_frame = cv2.cvtColor(detection_frame, cv2.COLOR_BGR2HSV)
             self.stitch_frame_index += 1
-            self._update_cloth_motion_state(detection_frame)
+            self._update_cloth_optical_flow(detection_frame)
             follow_check_ready = False
             follow_on_corridor = True
             follow_order_valid = True
@@ -1172,7 +1198,7 @@ class PatternMode:
             # Load pattern mask
             pattern_overlay, pattern_alpha = self.load_blueprint(self.current_level)
 
-            # Overlay pattern anchored to needle — no cloth detection needed
+            # Pattern overlay with fixed needle/red-dot and cloth-driven movement
             if pattern_overlay is not None and pattern_alpha is not None:
                 overlay_h, overlay_w = pattern_overlay.shape[:2]
 
@@ -1180,32 +1206,108 @@ class PatternMode:
                 expected_path_idx = None
                 if centerline_path is not None and len(centerline_path) > 0:
                     max_idx = len(centerline_path) - 1
-                    if not self.centerline_progress_initialized:
-                        # Seed once: fresh start → path[0] (now leftmost due to min(xs));
-                        # resuming mid-level → seed from raw_progress %.
-                        if self.raw_progress <= 0.0:
-                            self.centerline_progress_idx = 0
-                        else:
-                            self.centerline_progress_idx = int(np.clip(
-                                round(self.raw_progress / 100.0 * max_idx),
-                                0,
-                                max_idx,
-                            ))
-                        self.centerline_progress_initialized = True
-                    else:
-                        self.centerline_progress_idx = int(np.clip(self.centerline_progress_idx, 0, max_idx))
 
+                    # Seed overlay offset once so the starting pattern point sits under the red dot.
+                    if not self.pattern_offset_seeded:
+                        if self.raw_progress <= 0.0:
+                            seed_idx = 0
+                        else:
+                            seed_idx = int(np.clip(round(self.raw_progress / 100.0 * max_idx), 0, max_idx))
+                        self.centerline_progress_idx = seed_idx
+                        self.pattern_offset_x = float(self.needle_pos_x - centerline_path[seed_idx][0])
+                        self.pattern_offset_y = float(self.needle_pos_y - centerline_path[seed_idx][1])
+                        self.pattern_offset_seeded = True
+                        self.centerline_progress_initialized = True
+
+                    # Move pattern in true 2D only when cloth motion + correct thread color are detected.
+                    moved_with_color = False
+                    if self.cloth_motion_active:
+                        color_ok = self._matches_selected_color(
+                            detection_frame, self.needle_pos_x, self.needle_pos_y,
+                            hsv_frame=hsv_detection_frame,
+                        )
+                        if color_ok:
+                            self.pattern_offset_x += float(self.motion_vector_x)
+                            self.pattern_offset_y += float(self.motion_vector_y)
+                            moved_with_color = True
+
+                    # Red dot is fixed; overlay offset tracks cloth translation.
+                    x_offset = int(round(self.pattern_offset_x))
+                    y_offset = int(round(self.pattern_offset_y))
+
+                    # Needle position in pattern space at current (pre-lock) offset.
+                    raw_needle_in_pat_x = int(np.clip(self.needle_pos_x - x_offset, 0, overlay_w - 1))
+                    raw_needle_in_pat_y = int(np.clip(self.needle_pos_y - y_offset, 0, overlay_h - 1))
+
+                    # Lock target is nearest real pattern-mask pixel so slanted/right
+                    # sections are reachable (not constrained to a row-based centerline).
+                    pattern_points_yx = np.column_stack(np.where(pattern_alpha > self.pattern_alpha_threshold))
+                    if pattern_points_yx.size > 0:
+                        py = pattern_points_yx[:, 0].astype(np.float32)
+                        px = pattern_points_yx[:, 1].astype(np.float32)
+                        d2 = (px - float(raw_needle_in_pat_x)) ** 2 + (py - float(raw_needle_in_pat_y)) ** 2
+                        nearest_pt_idx = int(np.argmin(d2))
+                        exp_y = int(pattern_points_yx[nearest_pt_idx][0])
+                        exp_x = int(pattern_points_yx[nearest_pt_idx][1])
+                    else:
+                        # Defensive fallback if mask unexpectedly has no active pixels.
+                        exp_x = raw_needle_in_pat_x
+                        exp_y = raw_needle_in_pat_y
+
+                    # Keep centerline index as a validation/progress reference only.
+                    needle_vec = np.array([exp_x, exp_y], dtype=np.float32)
+                    deltas = centerline_path.astype(np.float32) - needle_vec
+                    dist_sq = np.sum(deltas * deltas, axis=1)
+                    self.centerline_progress_idx = int(np.argmin(dist_sq))
                     expected_path_idx = self.centerline_progress_idx
-                    exp_x = int(centerline_path[expected_path_idx][0])
-                    exp_y = int(centerline_path[expected_path_idx][1])
+
+                    # Re-lock pattern so the expected path point stays under the fixed red dot.
+                    x_offset = int(round(self.needle_pos_x)) - exp_x
+                    y_offset = int(round(self.needle_pos_y)) - exp_y
+                    self.pattern_offset_x = float(x_offset)
+                    self.pattern_offset_y = float(y_offset)
+
+                    # Needle position in pattern space after lock (used downstream).
+                    needle_in_pat_x = int(np.clip(self.needle_pos_x - x_offset, 0, overlay_w - 1))
+                    needle_in_pat_y = int(np.clip(self.needle_pos_y - y_offset, 0, overlay_h - 1))
+
+                    # Credit/penalize only when motion and selected thread color are both valid.
+                    if moved_with_color:
+                        pat_h, pat_w = pattern_alpha.shape[:2]
+                        on_mask = pattern_alpha[raw_needle_in_pat_y, raw_needle_in_pat_x] > self.pattern_alpha_threshold
+                        if on_mask:
+                            if self.completed_stitch_mask is None:
+                                self.completed_stitch_mask = np.zeros((pat_h, pat_w), dtype=np.uint8)
+                            cv2.circle(
+                                self.completed_stitch_mask,
+                                (exp_x, exp_y),
+                                self.stitch_draw_radius,
+                                255,
+                                -1,
+                            )
+                            self._update_progress_from_mask(pattern_alpha)
+                        else:
+                            if self.missed_stitch_mask is None:
+                                self.missed_stitch_mask = np.zeros((pat_h, pat_w), dtype=np.uint8)
+                            cv2.circle(
+                                self.missed_stitch_mask,
+                                (raw_needle_in_pat_x, raw_needle_in_pat_y),
+                                self.stitch_draw_radius,
+                                255,
+                                -1,
+                            )
                 else:
                     self.centerline_progress_initialized = False
+                    self.pattern_offset_seeded = False
                     exp_x = overlay_w // 2
                     exp_y = overlay_h // 2
+                    x_offset = int(round(self.needle_pos_x)) - exp_x
+                    y_offset = int(round(self.needle_pos_y)) - exp_y
 
-                # Align expected centerline stitch point directly under the red dot.
-                x_offset = int(round(self.needle_pos_x)) - exp_x
-                y_offset = int(round(self.needle_pos_y)) - exp_y
+                # Fallback anchoring when centerline is unavailable.
+                if centerline_path is None or len(centerline_path) == 0:
+                    x_offset = int(round(self.needle_pos_x)) - exp_x
+                    y_offset = int(round(self.needle_pos_y)) - exp_y
                 trace_y = exp_y
 
                 # Allow the pattern overlay to extend off-screen and crop the
@@ -1245,22 +1347,8 @@ class PatternMode:
                     self.run_needle_pipeline(
                         detection_frame, pattern_alpha,
                         x_offset, y_offset, actual_w, actual_h,
-                        run_detection=True,
+                        run_detection=False,
                         hsv_frame=hsv_detection_frame,
-                        expected_trace_y=trace_y,
-                        corridor_mask=corridor_mask,
-                        centerline_path=centerline_path,
-                        expected_path_idx=expected_path_idx
-                    )
-
-                    # Always register the red-dot (needle centre) as a stitch candidate.
-                    # This makes tracing directly follow expected thread-color detection
-                    # at the centre point, even if model detections are noisy/missed.
-                    self._register_stitch(
-                        self.needle_pos_x, self.needle_pos_y,
-                        detection_frame, pattern_alpha,
-                        x_offset, y_offset, actual_w, actual_h,
-                        source="center", hsv_frame=hsv_detection_frame,
                         expected_trace_y=trace_y,
                         corridor_mask=corridor_mask,
                         centerline_path=centerline_path,
@@ -1382,6 +1470,14 @@ class PatternMode:
                             cv2.drawContours(cam_frame, [cnt], -1, marker_color, 1)
 
             cv2.circle(cam_frame, (int(self.needle_pos_x), int(self.needle_pos_y)), 5, marker_color, -1)
+
+            # Draw cloth outline
+            _, cloth_contour = self._detect_cloth_by_color(cam_frame)
+            if cloth_contour is not None:
+                cloth_cfg = self.cloth_color_profiles[self.selected_cloth_color]
+                outline_color = cloth_cfg.get('preview_bgr', (0, 255, 255))
+                cv2.drawContours(cam_frame, [cloth_contour], -1, outline_color, 2, cv2.LINE_AA)
+
             marker_scale = text_scale(0.52, self.width, self.height, floor=0.46, ceiling=0.62)
             marker_thick = text_thickness(1, self.width, self.height, min_thickness=1, max_thickness=2)
             marker_scale = fit_text_scale(marker_text, FONT_MAIN, self.camera_width - col_x1 - 6, marker_scale, marker_thick, min_scale=0.4)
