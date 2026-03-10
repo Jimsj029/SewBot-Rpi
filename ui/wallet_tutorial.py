@@ -7,6 +7,25 @@ import os
 import sys
 import time
 
+try:
+    from .typography import (
+        FONT_MAIN,
+        text_scale,
+        text_thickness,
+        get_text_size,
+        fit_text_scale,
+        draw_text,
+    )
+except ImportError:
+    from typography import (
+        FONT_MAIN,
+        text_scale,
+        text_thickness,
+        get_text_size,
+        fit_text_scale,
+        draw_text,
+    )
+
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from music_manager import get_music_manager
@@ -52,13 +71,12 @@ FONTS = {
 
 # Crisp font for all wallet tutorial text – DUPLEX renders much cleaner than
 # TRIPLEX on low-resolution screens (no thin serifs to pixelate).
-UI_FONT = cv2.FONT_HERSHEY_DUPLEX
+UI_FONT = FONT_MAIN
 
 
 def _put_text(img, text, x, y, scale, color, thickness):
     """Draw text with a 1-px black outline so it reads against any background."""
-    cv2.putText(img, text, (x + 1, y + 1), UI_FONT, scale, (0, 0, 0), thickness + 2, cv2.LINE_AA)
-    cv2.putText(img, text, (x, y),         UI_FONT, scale, color,     thickness,     cv2.LINE_AA)
+    draw_text(img, text, x, y, scale, color, thickness, font=UI_FONT)
 
 # Per-step instructions shown in "Your Turn" practice screen
 STEP_INSTRUCTIONS = {
@@ -611,11 +629,13 @@ class WalletTutorialPlayer:
         cv2.rectangle(img, (x, y), (x + w, y + h), border_color, 2)
         
         # Text
-        font_scale = 0.75
-        thickness = 2
+        font_scale = text_scale(0.82, self.width, self.height, floor=0.74, ceiling=0.95)
+        thickness = text_thickness(2, self.width, self.height, min_thickness=2, max_thickness=3)
         text = btn['text']
 
-        (text_w, text_h), baseline = cv2.getTextSize(text, UI_FONT, font_scale, thickness)
+        font_scale = fit_text_scale(text, UI_FONT, w - 14, font_scale, thickness, min_scale=0.65)
+
+        (text_w, text_h), baseline = get_text_size(text, UI_FONT, font_scale, thickness)
         text_x = x + (w - text_w) // 2
         text_y = y + (h + text_h) // 2
 
@@ -678,18 +698,20 @@ class WalletTutorialPlayer:
             # Tutorial text
             # Title
             title = "WALLET TUTORIAL VIDEO"
-            font_scale = 1.1
-            thickness = 2
-            (text_w, text_h), _ = cv2.getTextSize(title, UI_FONT, font_scale, thickness)
+            font_scale = text_scale(1.15, self.width, self.height, floor=1.0, ceiling=1.32)
+            thickness = text_thickness(2, self.width, self.height, min_thickness=2, max_thickness=3)
+            font_scale = fit_text_scale(title, UI_FONT, video_w - 50, font_scale, thickness, min_scale=0.88)
+            (text_w, text_h), _ = get_text_size(title, UI_FONT, font_scale, thickness)
             text_x = center_x - text_w // 2
             text_y = center_y - 60
             _put_text(img, title, text_x, text_y, font_scale, COLORS['text_accent'], thickness)
 
             # Subtitle
             subtitle = "(No Video File Found)"
-            font_scale = 0.7
-            thickness = 2
-            (text_w, text_h), _ = cv2.getTextSize(subtitle, UI_FONT, font_scale, thickness)
+            font_scale = text_scale(0.78, self.width, self.height, floor=0.7, ceiling=0.9)
+            thickness = text_thickness(2, self.width, self.height, min_thickness=1, max_thickness=2)
+            font_scale = fit_text_scale(subtitle, UI_FONT, video_w - 50, font_scale, thickness, min_scale=0.62)
+            (text_w, text_h), _ = get_text_size(subtitle, UI_FONT, font_scale, thickness)
             text_x = center_x - text_w // 2
             text_y = center_y - 30
             _put_text(img, subtitle, text_x, text_y, font_scale, COLORS['text_secondary'], thickness)
@@ -765,10 +787,11 @@ class WalletTutorialPlayer:
         else:
             # Completed or skipped
             title = "WALLET TUTORIAL COMPLETED" if self.completed else "WALLET TUTORIAL"
-            font_scale = 1.4
-            thickness = 3
+            font_scale = text_scale(1.42, self.width, self.height, floor=1.2, ceiling=1.65)
+            thickness = text_thickness(3, self.width, self.height, min_thickness=2, max_thickness=4)
+            font_scale = fit_text_scale(title, UI_FONT, self.width - 80, font_scale, thickness, min_scale=0.95)
 
-            (text_w, text_h), _ = cv2.getTextSize(title, UI_FONT, font_scale, thickness)
+            (text_w, text_h), _ = get_text_size(title, UI_FONT, font_scale, thickness)
             text_x = (self.width - text_w) // 2
             text_y = self.height // 3
 
@@ -788,10 +811,11 @@ class WalletTutorialPlayer:
         else:
             text = f"Wallet Step {self.current_step} of {self.total_steps - 2}"
 
-        font_scale = 0.85
-        thickness = 2
+        font_scale = text_scale(0.9, self.width, self.height, floor=0.78, ceiling=1.04)
+        thickness = text_thickness(2, self.width, self.height, min_thickness=2, max_thickness=3)
+        font_scale = fit_text_scale(text, UI_FONT, self.width - 220, font_scale, thickness, min_scale=0.7)
 
-        (text_w, text_h), baseline = cv2.getTextSize(text, UI_FONT, font_scale, thickness)
+        (text_w, text_h), baseline = get_text_size(text, UI_FONT, font_scale, thickness)
         text_x = (self.width - text_w) // 2
         text_y = 20 + (50 + text_h) // 2
 
@@ -813,12 +837,12 @@ class WalletTutorialPlayer:
 
         lines = STEP_INSTRUCTIONS.get(self.current_step, [])
 
-        OVERLAY_FONT = cv2.FONT_HERSHEY_SIMPLEX
-        inst_scale   = 0.62
-        inst_thick   = 1
+        overlay_font = UI_FONT
+        inst_scale = text_scale(0.7, self.width, self.height, floor=0.64, ceiling=0.82)
+        inst_thick = text_thickness(2, self.width, self.height, min_thickness=1, max_thickness=2)
         line_spacing = 26
 
-        (_, inst_h), _ = cv2.getTextSize("Ag", OVERLAY_FONT, inst_scale, inst_thick)
+        (_, inst_h), _ = get_text_size("Ag", overlay_font, inst_scale, inst_thick)
 
         # Total block height for all lines, centred in the gap above the video
         block_h = len(lines) * line_spacing - (line_spacing - inst_h)
@@ -829,22 +853,32 @@ class WalletTutorialPlayer:
         center_x = video_x + video_w // 2
 
         for line in lines:
-            (lw, _), _ = cv2.getTextSize(line, OVERLAY_FONT, inst_scale, inst_thick)
+            fitted_scale = fit_text_scale(line, overlay_font, video_w - 50, inst_scale, inst_thick, min_scale=0.58)
+            (lw, _), _ = get_text_size(line, overlay_font, fitted_scale, inst_thick)
             lx = center_x - lw // 2
-            cv2.putText(img, line, (lx + 1, cur_y + 1), OVERLAY_FONT,
-                        inst_scale, (0, 0, 0), inst_thick + 4, cv2.LINE_AA)
-            cv2.putText(img, line, (lx, cur_y), OVERLAY_FONT,
-                        inst_scale, COLORS['text_secondary'], inst_thick + 1, cv2.LINE_AA)
+            draw_text(
+                img,
+                line,
+                lx,
+                cur_y,
+                fitted_scale,
+                COLORS['text_secondary'],
+                max(1, inst_thick + 1),
+                font=overlay_font,
+                outline_color=(0, 0, 0),
+                outline_extra=2,
+            )
             cur_y += line_spacing
 
     def draw_your_turn(self, img, camera_frame):
         """Draw the 'Your Turn' practice screen with webcam feed"""
         # ── Title ────────────────────────────────────────────────────────────
         title = f"Your Turn - Practice Step {self.current_step}"
-        title_scale = 0.95
-        title_thick = 2
+        title_scale = text_scale(1.0, self.width, self.height, floor=0.86, ceiling=1.12)
+        title_thick = text_thickness(2, self.width, self.height, min_thickness=2, max_thickness=3)
+        title_scale = fit_text_scale(title, UI_FONT, self.width - 120, title_scale, title_thick, min_scale=0.78)
 
-        (text_w, text_h), _ = cv2.getTextSize(title, UI_FONT, title_scale, title_thick)
+        (text_w, text_h), _ = get_text_size(title, UI_FONT, title_scale, title_thick)
         text_x = (self.width - text_w) // 2
         text_y = 38
 
@@ -862,15 +896,16 @@ class WalletTutorialPlayer:
         _put_text(img, title, text_x, text_y, title_scale, COLORS['text_accent'], title_thick)
 
         # ── Step instructions ─────────────────────────────────────────────
-        inst_scale = 0.62
-        inst_thick = 2
+        inst_scale = text_scale(0.7, self.width, self.height, floor=0.62, ceiling=0.82)
+        inst_thick = text_thickness(2, self.width, self.height, min_thickness=1, max_thickness=2)
         lines = STEP_INSTRUCTIONS.get(self.current_step, ["Practice what you learned in the video."])
         line_spacing = 22
         cur_y = text_y + text_h + 26
         for line in lines:
-            (lw, lh), _ = cv2.getTextSize(line, UI_FONT, inst_scale, inst_thick)
+            fitted_scale = fit_text_scale(line, UI_FONT, self.width - 120, inst_scale, inst_thick, min_scale=0.58)
+            (lw, lh), _ = get_text_size(line, UI_FONT, fitted_scale, inst_thick)
             lx = (self.width - lw) // 2
-            _put_text(img, line, lx, cur_y, inst_scale, COLORS['text_secondary'], inst_thick)
+            _put_text(img, line, lx, cur_y, fitted_scale, COLORS['text_secondary'], inst_thick)
             cur_y += line_spacing
         last_inst_y = cur_y
 
@@ -912,9 +947,9 @@ class WalletTutorialPlayer:
             
             # Show "Opening camera..." message
             msg = "Opening camera..."
-            font_scale_msg = 0.75
-            thickness_msg = 2
-            (msg_w, msg_h), _ = cv2.getTextSize(msg, UI_FONT, font_scale_msg, thickness_msg)
+            font_scale_msg = text_scale(0.82, self.width, self.height, floor=0.72, ceiling=0.94)
+            thickness_msg = text_thickness(2, self.width, self.height, min_thickness=2, max_thickness=3)
+            (msg_w, msg_h), _ = get_text_size(msg, UI_FONT, font_scale_msg, thickness_msg)
             msg_x = camera_x + (camera_w - msg_w) // 2
             msg_y = camera_y + (camera_h + msg_h) // 2
             _put_text(img, msg, msg_x, msg_y, font_scale_msg, COLORS['text_primary'], thickness_msg)
@@ -961,8 +996,10 @@ class WalletTutorialPlayer:
                               (0, 60, 180), -1)
                 cv2.addWeighted(overlay, 0.78, img, 0.22, 0, img)
                 warn_txt = "!  SEWING NEEDLE NOT CENTRED"
-                warn_scale, warn_thick = 0.62, 2
-                (ww, wh), _ = cv2.getTextSize(warn_txt, UI_FONT, warn_scale, warn_thick)
+                warn_scale = text_scale(0.72, self.width, self.height, floor=0.64, ceiling=0.84)
+                warn_thick = text_thickness(2, self.width, self.height, min_thickness=2, max_thickness=3)
+                warn_scale = fit_text_scale(warn_txt, UI_FONT, camera_w - 20, warn_scale, warn_thick, min_scale=0.58)
+                (ww, wh), _ = get_text_size(warn_txt, UI_FONT, warn_scale, warn_thick)
                 wx = camera_x + (camera_w - ww) // 2
                 wy = warn_y + (warn_h + wh) // 2
                 _put_text(img, warn_txt, wx, wy, warn_scale, (0, 220, 255), warn_thick)

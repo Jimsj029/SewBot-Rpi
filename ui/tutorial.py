@@ -7,6 +7,25 @@ import os
 import sys
 import time
 
+try:
+    from .typography import (
+        FONT_MAIN,
+        text_scale,
+        text_thickness,
+        get_text_size,
+        fit_text_scale,
+        draw_text,
+    )
+except ImportError:
+    from typography import (
+        FONT_MAIN,
+        text_scale,
+        text_thickness,
+        get_text_size,
+        fit_text_scale,
+        draw_text,
+    )
+
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from music_manager import get_music_manager
@@ -41,6 +60,13 @@ COLORS = {
 FONTS = {
     'title_size': 2.5
 }
+
+UI_FONT = FONT_MAIN
+
+
+def _put_text(img, text, x, y, scale, color, thickness):
+    """Draw outlined text for consistent readability."""
+    draw_text(img, text, x, y, scale, color, thickness, font=UI_FONT)
 
 
 class TutorialPlayer:
@@ -434,17 +460,17 @@ class TutorialPlayer:
         cv2.rectangle(img, (x, y), (x + w, y + h), border_color, 2)
         
         # Text
-        font = cv2.FONT_HERSHEY_TRIPLEX
-        font_scale = 0.8
-        thickness = 2
+        font_scale = text_scale(0.82, self.width, self.height, floor=0.74, ceiling=0.94)
+        thickness = text_thickness(2, self.width, self.height, min_thickness=2, max_thickness=3)
         text = btn['text']
+
+        font_scale = fit_text_scale(text, UI_FONT, w - 14, font_scale, thickness, min_scale=0.66)
         
-        (text_w, text_h), baseline = cv2.getTextSize(text, font, font_scale, thickness)
+        (text_w, text_h), baseline = get_text_size(text, UI_FONT, font_scale, thickness)
         text_x = x + (w - text_w) // 2
         text_y = y + (h + text_h) // 2
         
-        cv2.putText(img, text, (text_x, text_y), font, font_scale, 
-                   COLORS['text_primary'], thickness)
+        _put_text(img, text, text_x, text_y, font_scale, COLORS['text_primary'], thickness)
     
     def draw_video_frame(self, img):
         """Draw actual video frame or placeholder"""
@@ -498,27 +524,25 @@ class TutorialPlayer:
             cv2.circle(img, (center_x, center_y), radius + 10, COLORS['cyan'], 1)
             
             # Tutorial text
-            font = cv2.FONT_HERSHEY_TRIPLEX
-            
             # Title
             title = "TUTORIAL VIDEO"
-            font_scale = 1.2
-            thickness = 2
-            (text_w, text_h), _ = cv2.getTextSize(title, font, font_scale, thickness)
+            font_scale = text_scale(1.2, self.width, self.height, floor=1.02, ceiling=1.35)
+            thickness = text_thickness(2, self.width, self.height, min_thickness=2, max_thickness=3)
+            font_scale = fit_text_scale(title, UI_FONT, video_w - 50, font_scale, thickness, min_scale=0.9)
+            (text_w, text_h), _ = get_text_size(title, UI_FONT, font_scale, thickness)
             text_x = center_x - text_w // 2
             text_y = center_y - 60
-            cv2.putText(img, title, (text_x, text_y), font, font_scale, 
-                       COLORS['text_accent'], thickness)
+            _put_text(img, title, text_x, text_y, font_scale, COLORS['text_accent'], thickness)
             
             # Subtitle
             subtitle = "(No Video File Found)"
-            font_scale = 0.7
-            thickness = 1
-            (text_w, text_h), _ = cv2.getTextSize(subtitle, font, font_scale, thickness)
+            font_scale = text_scale(0.76, self.width, self.height, floor=0.7, ceiling=0.88)
+            thickness = text_thickness(2, self.width, self.height, min_thickness=1, max_thickness=2)
+            font_scale = fit_text_scale(subtitle, UI_FONT, video_w - 50, font_scale, thickness, min_scale=0.62)
+            (text_w, text_h), _ = get_text_size(subtitle, UI_FONT, font_scale, thickness)
             text_x = center_x - text_w // 2
             text_y = center_y - 30
-            cv2.putText(img, subtitle, (text_x, text_y), font, font_scale, 
-                       COLORS['text_secondary'], thickness)
+            _put_text(img, subtitle, text_x, text_y, font_scale, COLORS['text_secondary'], thickness)
         
         # Progress bar
         progress = self.video_frame / self.max_frames if self.max_frames > 0 else 0
@@ -588,17 +612,16 @@ class TutorialPlayer:
             
         else:
             # Completed or skipped
-            font = cv2.FONT_HERSHEY_TRIPLEX
             title = "TUTORIAL COMPLETED" if self.completed else "TUTORIAL"
-            font_scale = 1.5
-            thickness = 3
+            font_scale = text_scale(1.5, self.width, self.height, floor=1.25, ceiling=1.7)
+            thickness = text_thickness(3, self.width, self.height, min_thickness=2, max_thickness=4)
+            font_scale = fit_text_scale(title, UI_FONT, self.width - 80, font_scale, thickness, min_scale=1.0)
             
-            (text_w, text_h), _ = cv2.getTextSize(title, font, font_scale, thickness)
+            (text_w, text_h), _ = get_text_size(title, UI_FONT, font_scale, thickness)
             text_x = (self.width - text_w) // 2
             text_y = self.height // 3
             
-            cv2.putText(img, title, (text_x, text_y), font, font_scale, 
-                       COLORS['text_accent'], thickness)
+            _put_text(img, title, text_x, text_y, font_scale, COLORS['text_accent'], thickness)
             
             # Draw replay and continue buttons
             self.draw_button(img, self.replay_button, COLORS['button_normal'])
@@ -606,12 +629,12 @@ class TutorialPlayer:
     
     def draw_step_indicator(self, img):
         """Draw step indicator showing current progress (Step 1/5, etc.)"""
-        font = cv2.FONT_HERSHEY_TRIPLEX
         text = f"Step {self.current_step + 1} of {self.total_steps}"
-        font_scale = 0.8
-        thickness = 2
+        font_scale = text_scale(0.88, self.width, self.height, floor=0.76, ceiling=0.98)
+        thickness = text_thickness(2, self.width, self.height, min_thickness=2, max_thickness=3)
+        font_scale = fit_text_scale(text, UI_FONT, self.width - 220, font_scale, thickness, min_scale=0.68)
         
-        (text_w, text_h), baseline = cv2.getTextSize(text, font, font_scale, thickness)
+        (text_w, text_h), baseline = get_text_size(text, UI_FONT, font_scale, thickness)
         # Keep centered horizontally, align vertically with skip all button
         text_x = (self.width - text_w) // 2
         text_y = 20 + (50 + text_h) // 2  # Same Y position as skip all button
@@ -630,8 +653,7 @@ class TutorialPlayer:
                      COLORS['cyan'], 2)
         
         # Text
-        cv2.putText(img, text, (text_x, text_y), font, font_scale, 
-                   COLORS['text_accent'], thickness)
+        _put_text(img, text, text_x, text_y, font_scale, COLORS['text_accent'], thickness)
     
     def cleanup(self):
         """Release video capture and audio resources"""
