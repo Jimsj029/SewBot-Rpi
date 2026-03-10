@@ -25,37 +25,55 @@ class PatternMode:
         # Pattern variables
         self.current_level = 1
         self.current_level_tracking = 1  # Track which level stats belong to
-        self.uniform_width = 200
-        self.uniform_height = 300
+        self.uniform_width = 216   # 144 * 1.50 = 216 (50% increase)
+        self.uniform_height = 270  # 180 * 1.50 = 270 (50% increase)
         self.alpha_blend = 0.9
         self.glow_phase = 0
         
         # Level info display at top center (aligned with back button)
         self.level_display_y = 60
         
-        # Camera display area (centered, moved higher)
-        self.camera_width = 560
-        self.camera_height = 420
-        self.camera_x = 216  # Centered horizontally (1000 - 560) // 2
-        self.camera_y = 120  # Moved up since no level buttons
-        
-        # Score/Stats panel (right side of camera)
-        self.score_panel_x = 800
-        self.score_panel_y = 190
-        self.score_panel_width = 200
-        self.score_panel_height = 155
-        
-        # Back button (top left)
-        self.back_button = {'x': 20, 'y': 20, 'w': 120, 'h': 50}
-        
-        # Evaluate button (below stats panel)
-        self.evaluate_button = {'x': 800, 'y': 350, 'w': 200, 'h': 50}
+        # ── LAYOUT ───────────────────────────────────────────────────────────────
+        # Adjust these values to reposition/resize each panel.
+        # cloth panel Y and evaluate button Y are derived automatically.
 
-        # Color detection selector (right side, top)
-        self.color_panel_x = 800
-        self.color_panel_y = 115
-        self.color_panel_width = 200
-        self.color_panel_height = 70
+        # Camera
+        self.camera_x      = 216
+        self.camera_y      = 120
+        self.camera_width  = 560
+        self.camera_height = 420
+
+        # Left panel — Thread Color
+        self.color_panel_x      = 8
+        self.color_panel_y      = 115
+        self.color_panel_width  = 185
+        self.color_panel_height = 115
+
+        # Left panel — Cloth Color (auto-positioned below Thread Color)
+        _cloth_gap = 8
+        self.cloth_color_panel_x      = self.color_panel_x
+        self.cloth_color_panel_y      = self.color_panel_y + self.color_panel_height + _cloth_gap
+        self.cloth_color_panel_width  = self.color_panel_width
+        self.cloth_color_panel_height = 110
+
+        # Right panel — Stats
+        self.score_panel_x      = 800
+        self.score_panel_y      = 115
+        self.score_panel_width  = 210
+        self.score_panel_height = 310
+
+        # Evaluate button (auto-positioned below Stats panel)
+        _eval_gap = 8
+        self.evaluate_button = {
+            'x': self.score_panel_x,
+            'y': self.score_panel_y + self.score_panel_height + _eval_gap,
+            'w': self.score_panel_width,
+            'h': 50,
+        }
+
+        # Back button
+        self.back_button = {'x': 20, 'y': 20, 'w': 120, 'h': 50}
+        # ── END LAYOUT ───────────────────────────────────────────────────────────
         self.selected_detection_color = 'white'
         self.color_profiles = {
             'white': {
@@ -79,12 +97,20 @@ class PatternMode:
                 ],
                 'min_ratio': 0.15,
             },
+            'black': {
+                'label': 'BLACK',
+                'preview_bgr': (30, 30, 30),
+                'hsv_ranges': [
+                    ((0, 0, 5), (179, 100, 52)),
+                ],
+                'min_ratio': 0.15,
+            },
         }
         self.color_buttons = {}
 
-        # Confidence controls (below evaluate button)
-        self.conf_panel_x = 800
-        self.conf_panel_y = 405
+        # Confidence controls (kept for click-handler compatibility, hidden)
+        self.conf_panel_x = -999
+        self.conf_panel_y = -999
         self.conf_panel_width = 200
         self.conf_panel_height = 65
         self.conf_minus_button = {'x': 0, 'y': 0, 'w': 0, 'h': 0}
@@ -133,7 +159,7 @@ class PatternMode:
         self.last_stitch_frame_index = -9999
         self.last_stitch_point = None
         self.use_model_stitch_points = False  # Keep tracing tied to the red-dot center
-        self.needle_model_imgsz = 256  # needle.onnx expects 256x256 input
+        self.needle_model_imgsz = 320  # needle.onnx expects 320x320 input
 
         # Motion gate: a valid stitch requires cloth motion near the needle,
         # preventing static color patches from auto-advancing the pattern.
@@ -222,28 +248,34 @@ class PatternMode:
             'red': {
                 'label': 'RED',
                 'preview_bgr': (0, 0, 220),
-                # Wide hue range catches bright red, dark red, terracotta,
-                # and brownish-red cloth under varying lighting.
                 'hsv_ranges': [
-                    ((0,  50, 35), (15, 255, 255)),   # red / terracotta
-                    ((155, 50, 35), (179, 255, 255)), # wraparound red
+                    ((0,  50, 35), (15, 255, 255)),
+                    ((155, 50, 35), (179, 255, 255)),
                 ],
             },
             'black': {
                 'label': 'BLACK',
                 'preview_bgr': (30, 30, 30),
-                # Min value 5 avoids dead pixels; saturation up to 100
-                # handles fabric texture; value ceiling 52 = truly dark.
                 'hsv_ranges': [
                     ((0, 0, 5), (179, 100, 52)),
                 ],
             },
+            'white': {
+                'label': 'WHITE',
+                'preview_bgr': (240, 240, 240),
+                'hsv_ranges': [
+                    ((0, 0, 180), (179, 40, 255)),
+                ],
+            },
+            'gray': {
+                'label': 'GRAY',
+                'preview_bgr': (140, 140, 140),
+                'hsv_ranges': [
+                    ((0, 0, 60), (179, 50, 175)),
+                ],
+            },
         }
         self.cloth_color_buttons = {}
-        self.cloth_color_panel_x = 800
-        self.cloth_color_panel_y = 475   # below confidence panel
-        self.cloth_color_panel_width = 200
-        self.cloth_color_panel_height = 70
 
         # Cloth bbox tracking
         self.smooth_cloth_bbox = None  # Smoothed bbox for stable overlay
@@ -307,6 +339,10 @@ class PatternMode:
         
         # Resize the mask to the desired dimensions
         mask = cv2.resize(mask, (self.uniform_width, self.uniform_height))
+
+        # Mirror the pattern horizontally for specific levels
+        if level in (4, 5):
+            mask = cv2.flip(mask, 1)
 
         # Cut the binary mask in half (keep top half)
         mask = mask[:mask.shape[0] // 2, :]
@@ -762,24 +798,60 @@ class PatternMode:
         This is a lightweight skeleton-style center extraction: for each row that
         contains pattern pixels, choose the x-position nearest the previous row's
         center so the path remains continuous.
+        
+        For levels 4 & 5, starts from the absolute leftmost x across the entire pattern.
         """
         pat_crop = pattern_alpha[:actual_h, :actual_w]
         pat_binary = (pat_crop > self.pattern_alpha_threshold).astype(np.uint8)
         path_points = []
         prev_x = None
 
-        for y in range(actual_h):
-            xs = np.where(pat_binary[y] > 0)[0]
-            if xs.size == 0:
-                continue
-
-            if prev_x is None:
-                x = int(np.median(xs))
-            else:
+        # For levels 4 & 5, find the global leftmost x and start there
+        if self.current_level in (4, 5):
+            all_xs = []
+            row_data = []
+            for y in range(actual_h):
+                xs = np.where(pat_binary[y] > 0)[0]
+                if xs.size > 0:
+                    all_xs.extend(xs)
+                    row_data.append((y, xs))
+            
+            if not row_data:
+                return None
+            
+            global_min_x = int(np.min(all_xs))
+            
+            # Find the first row that contains this leftmost x
+            start_y = None
+            for y, xs in row_data:
+                if global_min_x in xs:
+                    start_y = y
+                    prev_x = global_min_x
+                    path_points.append((global_min_x, y))
+                    break
+            
+            # Continue from that row
+            for y in range(start_y + 1 if start_y is not None else 0, actual_h):
+                xs = np.where(pat_binary[y] > 0)[0]
+                if xs.size == 0:
+                    continue
                 x = int(xs[np.argmin(np.abs(xs - prev_x))])
+                path_points.append((x, y))
+                prev_x = x
+        else:
+            # Standard path building for levels 1-3
+            for y in range(actual_h):
+                xs = np.where(pat_binary[y] > 0)[0]
+                if xs.size == 0:
+                    continue
 
-            path_points.append((x, y))
-            prev_x = x
+                if prev_x is None:
+                    x = int(np.min(xs))  # Start from leftmost pixel in first row
+                else:
+                    x = int(xs[np.argmin(np.abs(xs - prev_x))])
+
+                path_points.append((x, y))
+                prev_x = x
 
         if not path_points:
             return None
@@ -954,20 +1026,17 @@ class PatternMode:
         # Draw camera feed
         self.draw_camera_feed(frame, camera_frame)
         
-        # Draw score/stats panel
+        # Draw score/stats panel (right) — includes legend + detected color
         self.draw_score_panel(frame)
         
-        # Draw evaluate button
+        # Draw evaluate button (right, below stats)
         self.draw_evaluate_button(frame)
 
-        # Draw selectable color filter controls
-        self.draw_color_selector(frame)
+        # Draw thread colour panel (left, top)
+        self.draw_thread_color_panel(frame)
 
-        # Draw confidence controls
-        self.draw_confidence_controls(frame)
-
-        # Draw cloth colour selector
-        self.draw_cloth_color_selector(frame)
+        # Draw cloth colour panel (left, below thread)
+        self.draw_cloth_color_panel(frame)
         
         # Draw evaluation results if evaluated
         if self.is_evaluated:
@@ -1112,13 +1181,16 @@ class PatternMode:
                 if centerline_path is not None and len(centerline_path) > 0:
                     max_idx = len(centerline_path) - 1
                     if not self.centerline_progress_initialized:
-                        # Seed once from current raw progress; afterwards, progression
-                        # is driven by accepted stitches, not area percentage.
-                        self.centerline_progress_idx = int(np.clip(
-                            round(self.raw_progress / 100.0 * max_idx),
-                            0,
-                            max_idx,
-                        ))
+                        # Seed once: fresh start → path[0] (now leftmost due to min(xs));
+                        # resuming mid-level → seed from raw_progress %.
+                        if self.raw_progress <= 0.0:
+                            self.centerline_progress_idx = 0
+                        else:
+                            self.centerline_progress_idx = int(np.clip(
+                                round(self.raw_progress / 100.0 * max_idx),
+                                0,
+                                max_idx,
+                            ))
                         self.centerline_progress_initialized = True
                     else:
                         self.centerline_progress_idx = int(np.clip(self.centerline_progress_idx, 0, max_idx))
@@ -1333,9 +1405,6 @@ class PatternMode:
             if self.out_of_segment_warning:
                 self.draw_warning_overlay(frame)
             
-            # Draw color legend below camera view
-            self.draw_pattern_legend(frame)
-        
         # Draw corner accents
         corner_size = 25
         corner_thickness = 3
@@ -1357,46 +1426,30 @@ class PatternMode:
                 (self.camera_x + self.camera_width + 15, self.camera_y + self.camera_height + 15 - corner_size), self.COLORS['cyan'], corner_thickness)
     
     def draw_pattern_legend(self, frame):
-        """Draw legend showing what each pattern color means"""
-        # Position: below camera, aligned left
-        legend_y = self.camera_y + self.camera_height + 35
-        
-        # Start legend from left side of camera with small padding
-        legend_x = self.camera_x + 30
-        
-        # Legend items - updated for real-time coloring
+        """Draw legend (Completed / To Sew) below the confidence panel on the left side."""
+        legend_x = 18
+        row_y = 576
+
         legend_items = [
             ("Completed", self.segment_colors['completed']),
-            ("To Sew", self.segment_colors['current'])
+            ("To Sew",    self.segment_colors['current']),
         ]
-        
-        # Draw each legend item
-        item_spacing = 140
+        box_size = 12
+        label_scale = text_scale(0.50, self.width, self.height, floor=0.44, ceiling=0.58)
+        label_thick = text_thickness(1, self.width, self.height, min_thickness=1, max_thickness=2)
+        item_spacing = 98
+
         for i, (label, color) in enumerate(legend_items):
             item_x = legend_x + i * item_spacing
-            
-            # Draw color box
-            box_size = 15
-            cv2.rectangle(frame, (item_x, legend_y - box_size + 3), 
-                        (item_x + box_size, legend_y + 3), 
-                        color, -1)
-            cv2.rectangle(frame, (item_x, legend_y - box_size + 3), 
-                        (item_x + box_size, legend_y + 3), 
-                        self.COLORS['medium_blue'], 1)
-            
-            # Draw label - larger font
-            label_scale = text_scale(0.66, self.width, self.height, floor=0.58, ceiling=0.76)
-            label_thick = text_thickness(2, self.width, self.height, min_thickness=1, max_thickness=2)
-            self._put_text(frame, label, item_x + box_size + 8, legend_y, label_scale, self.COLORS['text_secondary'], label_thick)
+            cv2.rectangle(frame, (item_x, row_y - box_size + 2),
+                          (item_x + box_size, row_y + 2), color, -1)
+            cv2.rectangle(frame, (item_x, row_y - box_size + 2),
+                          (item_x + box_size, row_y + 2), self.COLORS['medium_blue'], 1)
+            self._put_text(frame, label, item_x + box_size + 5, row_y,
+                           label_scale, self.COLORS['text_secondary'], label_thick)
 
-        target = self.color_profiles[self.selected_detection_color]['label']
-        detect_text = f"Detecting: {target}"
-        detect_scale = text_scale(0.62, self.width, self.height, floor=0.54, ceiling=0.72)
-        detect_thick = text_thickness(2, self.width, self.height, min_thickness=1, max_thickness=2)
-        self._put_text(frame, detect_text, legend_x, legend_y + 30, detect_scale, self.COLORS['text_primary'], detect_thick)
-
-    def draw_color_selector(self, frame):
-        """Draw color selection buttons for stitch filtering."""
+    def draw_combined_color_panel(self, frame):
+        """Draw DETECT COLOR + CLOTH COLOR in a single panel on the left side."""
         x = self.color_panel_x
         y = self.color_panel_y
         w = self.color_panel_width
@@ -1411,46 +1464,99 @@ class PatternMode:
 
         header_scale = text_scale(0.5, self.width, self.height, floor=0.46, ceiling=0.58)
         header_thick = text_thickness(1, self.width, self.height, min_thickness=1, max_thickness=2)
-        self._put_text(frame, "DETECT COLOR", x + 16, y + 22, header_scale, self.COLORS['text_secondary'], header_thick)
 
-        labels = ['white', 'yellow', 'red']
-        btn_w = 58
-        btn_h = 34
-        start_x = x + 10
-        btn_y = y + 28
-        gap = 6
+        # ── DETECT COLOR ─────────────────────────────────────────────────
+        self._put_text(frame, "DETECT COLOR", x + 14, y + 22, header_scale, self.COLORS['text_secondary'], header_thick)
+
+        detect_labels = ['white', 'yellow', 'red']
+        d_btn_w = 56
+        d_btn_h = 28
+        d_gap = 7
+        d_total_w = len(detect_labels) * d_btn_w + (len(detect_labels) - 1) * d_gap
+        d_start_x = x + (w - d_total_w) // 2
+        d_btn_y = y + 28
 
         self.color_buttons = {}
-        for idx, key in enumerate(labels):
-            bx = start_x + idx * (btn_w + gap)
-            by = btn_y
+        for idx, key in enumerate(detect_labels):
+            bx = d_start_x + idx * (d_btn_w + d_gap)
+            by = d_btn_y
             is_selected = key == self.selected_detection_color
             cfg = self.color_profiles[key]
 
             border = self.COLORS['glow_cyan'] if is_selected else self.COLORS['medium_blue']
-            cv2.rectangle(frame, (bx, by), (bx + btn_w, by + btn_h), border, 2)
-
+            cv2.rectangle(frame, (bx, by), (bx + d_btn_w, by + d_btn_h), border, 2)
             fill = frame.copy()
             fill_alpha = 0.6 if is_selected else 0.35
-            cv2.rectangle(fill, (bx + 2, by + 2), (bx + btn_w - 2, by + btn_h - 2), self.COLORS['button_normal'], -1)
+            cv2.rectangle(fill, (bx + 2, by + 2), (bx + d_btn_w - 2, by + d_btn_h - 2), self.COLORS['button_normal'], -1)
             cv2.addWeighted(fill, fill_alpha, frame, 1 - fill_alpha, 0, frame)
-
-            cv2.circle(frame, (bx + 11, by + btn_h // 2), 6, cfg['preview_bgr'], -1)
-            cv2.circle(frame, (bx + 11, by + btn_h // 2), 6, self.COLORS['text_primary'], 1)
-            letter_scale = text_scale(0.58, self.width, self.height, floor=0.52, ceiling=0.66)
+            cv2.circle(frame, (bx + 10, by + d_btn_h // 2), 5, cfg['preview_bgr'], -1)
+            cv2.circle(frame, (bx + 10, by + d_btn_h // 2), 5, self.COLORS['text_primary'], 1)
+            letter_scale = text_scale(0.54, self.width, self.height, floor=0.48, ceiling=0.62)
             letter_thick = text_thickness(2, self.width, self.height, min_thickness=1, max_thickness=2)
-            self._put_text(frame, cfg['label'][0], bx + 22, by + 23, letter_scale, self.COLORS['text_primary'], letter_thick)
+            self._put_text(frame, cfg['label'][0], bx + 21, by + 20, letter_scale, self.COLORS['text_primary'], letter_thick)
+            self.color_buttons[key] = {'x': bx, 'y': by, 'w': d_btn_w, 'h': d_btn_h}
 
-            self.color_buttons[key] = {'x': bx, 'y': by, 'w': btn_w, 'h': btn_h}
+        # ── Divider ───────────────────────────────────────────────────────
+        div_y = d_btn_y + d_btn_h + 9
+        cv2.line(frame, (x + 12, div_y), (x + w - 12, div_y), self.COLORS['medium_blue'], 1)
+
+        # ── CLOTH COLOR ───────────────────────────────────────────────────
+        cloth_header_y = div_y + 16
+        self._put_text(frame, "CLOTH COLOR", x + 14, cloth_header_y, header_scale, self.COLORS['text_secondary'], header_thick)
+
+        cloth_labels = list(self.cloth_color_profiles.keys())  # red, black, white, gray
+        c_btn_w = 42
+        c_btn_h = 28
+        c_gap = 4
+        c_total_w = len(cloth_labels) * c_btn_w + (len(cloth_labels) - 1) * c_gap
+        c_start_x = x + (w - c_total_w) // 2
+        c_btn_y = cloth_header_y + 8
+
+        self.cloth_color_buttons = {}
+        for idx, key in enumerate(cloth_labels):
+            bx = c_start_x + idx * (c_btn_w + c_gap)
+            by = c_btn_y
+            is_selected = key == self.selected_cloth_color
+            cfg = self.cloth_color_profiles[key]
+
+            border = self.COLORS['glow_cyan'] if is_selected else self.COLORS['medium_blue']
+            cv2.rectangle(frame, (bx, by), (bx + c_btn_w, by + c_btn_h), border, 2)
+            fill = frame.copy()
+            fill_alpha = 0.6 if is_selected else 0.35
+            cv2.rectangle(fill, (bx + 2, by + 2), (bx + c_btn_w - 2, by + c_btn_h - 2), self.COLORS['button_normal'], -1)
+            cv2.addWeighted(fill, fill_alpha, frame, 1 - fill_alpha, 0, frame)
+            cv2.circle(frame, (bx + 10, by + c_btn_h // 2), 5, cfg['preview_bgr'], -1)
+            cv2.circle(frame, (bx + 10, by + c_btn_h // 2), 5, self.COLORS['text_primary'], 1)
+            cloth_scale = text_scale(0.40, self.width, self.height, floor=0.36, ceiling=0.46)
+            cloth_thick = text_thickness(1, self.width, self.height, min_thickness=1, max_thickness=2)
+            # First 2 chars so buttons stay narrow (RE / BL / WH / GR)
+            short = cfg['label'][:2]
+            self._put_text(frame, short, bx + 18, by + 20, cloth_scale, self.COLORS['text_primary'], cloth_thick)
+            self.cloth_color_buttons[key] = {'x': bx, 'y': by, 'w': c_btn_w, 'h': c_btn_h}
+
+        # ── Conflict notice ───────────────────────────────────────────────
+        notice_y = c_btn_y + c_btn_h + 14
+        if self.selected_detection_color == self.selected_cloth_color:
+            flash = 0.65 + 0.35 * abs(math.sin(self.glow_phase * 3))
+            warn_color = tuple(int(c * flash) for c in (0, 100, 255))  # orange
+            notice_scale = text_scale(0.44, self.width, self.height, floor=0.40, ceiling=0.52)
+            notice_thick = text_thickness(1, self.width, self.height, min_thickness=1, max_thickness=2)
+            notice_text = "! DETECT = CLOTH COLOR"
+            (nw, _), _ = get_text_size(notice_text, FONT_MAIN, notice_scale, notice_thick)
+            self._put_text(frame, notice_text, x + (w - nw) // 2, notice_y, notice_scale, warn_color, notice_thick)
 
     def draw_cloth_color_selector(self, frame):
-        """Draw cloth colour selector buttons (RED / BLACK)."""
-        x = self.cloth_color_panel_x
-        y = self.cloth_color_panel_y
-        w = self.cloth_color_panel_width
-        h = self.cloth_color_panel_height
+        """Merged into draw_combined_color_panel — kept for compatibility."""
+        pass
 
-        pulse = 0.35 + 0.25 * abs(math.sin(self.glow_phase * 0.85))
+    def draw_thread_color_panel(self, frame):
+        """Draw THREAD (detect) COLOR panel on the left side (4 buttons, 2 per row)."""
+        x = self.color_panel_x
+        y = self.color_panel_y
+        w = self.color_panel_width
+        h = self.color_panel_height
+
+        pulse = 0.35 + 0.25 * abs(math.sin(self.glow_phase * 0.9))
         self.draw_glow_rect(frame, x, y, w, h, self.COLORS['bright_blue'], pulse)
 
         panel_overlay = frame.copy()
@@ -1459,37 +1565,91 @@ class PatternMode:
 
         header_scale = text_scale(0.5, self.width, self.height, floor=0.46, ceiling=0.58)
         header_thick = text_thickness(1, self.width, self.height, min_thickness=1, max_thickness=2)
-        self._put_text(frame, "CLOTH COLOR", x + 22, y + 22, header_scale, self.COLORS['text_secondary'], header_thick)
+        self._put_text(frame, "THREAD COLOR", x + 14, y + 20, header_scale, self.COLORS['text_secondary'], header_thick)
 
-        labels = list(self.cloth_color_profiles.keys())
-        btn_w = 84
-        btn_h = 34
-        start_x = x + 10
-        btn_y = y + 28
-        gap = 12
+        rows = [['white', 'yellow'], ['red', 'black']]
+        btn_w = 80
+        btn_h = 30
+        gap = 8
+        row_gap = 7
+        start_x = x + (w - 2 * btn_w - gap) // 2
+
+        self.color_buttons = {}
+        for row_idx, row_keys in enumerate(rows):
+            btn_y = y + 30 + row_idx * (btn_h + row_gap)
+            for col_idx, key in enumerate(row_keys):
+                bx = start_x + col_idx * (btn_w + gap)
+                by = btn_y
+                is_selected = key == self.selected_detection_color
+                cfg = self.color_profiles[key]
+
+                border = self.COLORS['glow_cyan'] if is_selected else self.COLORS['medium_blue']
+                cv2.rectangle(frame, (bx, by), (bx + btn_w, by + btn_h), border, 2)
+                fill = frame.copy()
+                fill_alpha = 0.6 if is_selected else 0.35
+                cv2.rectangle(fill, (bx + 2, by + 2), (bx + btn_w - 2, by + btn_h - 2), self.COLORS['button_normal'], -1)
+                cv2.addWeighted(fill, fill_alpha, frame, 1 - fill_alpha, 0, frame)
+                cv2.circle(frame, (bx + 10, by + btn_h // 2), 5, cfg['preview_bgr'], -1)
+                cv2.circle(frame, (bx + 10, by + btn_h // 2), 5, self.COLORS['text_primary'], 1)
+                letter_scale = text_scale(0.48, self.width, self.height, floor=0.42, ceiling=0.56)
+                letter_thick = text_thickness(1, self.width, self.height, min_thickness=1, max_thickness=2)
+                self._put_text(frame, cfg['label'][:2], bx + 18, by + 21, letter_scale, self.COLORS['text_primary'], letter_thick)
+                self.color_buttons[key] = {'x': bx, 'y': by, 'w': btn_w, 'h': btn_h}
+
+    def draw_cloth_color_panel(self, frame):
+        """Draw CLOTH COLOR panel on the left side (4 buttons, 2 per row). Disabled if same as thread color."""
+        x = self.cloth_color_panel_x
+        y = self.cloth_color_panel_y
+        w = self.cloth_color_panel_width
+        h = self.cloth_color_panel_height
+
+        pulse = 0.35 + 0.25 * abs(math.sin(self.glow_phase * 0.9))
+        self.draw_glow_rect(frame, x, y, w, h, self.COLORS['bright_blue'], pulse)
+
+        panel_overlay = frame.copy()
+        cv2.rectangle(panel_overlay, (x + 2, y + 2), (x + w - 2, y + h - 2), self.COLORS['dark_blue'], -1)
+        cv2.addWeighted(panel_overlay, 0.82, frame, 0.18, 0, frame)
+
+        header_scale = text_scale(0.5, self.width, self.height, floor=0.46, ceiling=0.58)
+        header_thick = text_thickness(1, self.width, self.height, min_thickness=1, max_thickness=2)
+        self._put_text(frame, "CLOTH COLOR", x + 14, y + 20, header_scale, self.COLORS['text_secondary'], header_thick)
+
+        rows = [['red', 'black'], ['white', 'gray']]
+        btn_w = 80
+        btn_h = 30
+        gap = 8
+        row_gap = 7
+        start_x = x + (w - 2 * btn_w - gap) // 2
 
         self.cloth_color_buttons = {}
-        for idx, key in enumerate(labels):
-            bx = start_x + idx * (btn_w + gap)
-            by = btn_y
-            is_selected = key == self.selected_cloth_color
-            cfg = self.cloth_color_profiles[key]
+        for row_idx, row_keys in enumerate(rows):
+            btn_y = y + 30 + row_idx * (btn_h + row_gap)
+            for col_idx, key in enumerate(row_keys):
+                bx = start_x + col_idx * (btn_w + gap)
+                by = btn_y
+                is_selected = key == self.selected_cloth_color
+                is_disabled = key == self.selected_detection_color
+                cfg = self.cloth_color_profiles[key]
 
-            border = self.COLORS['glow_cyan'] if is_selected else self.COLORS['medium_blue']
-            cv2.rectangle(frame, (bx, by), (bx + btn_w, by + btn_h), border, 2)
-
-            fill = frame.copy()
-            fill_alpha = 0.6 if is_selected else 0.35
-            cv2.rectangle(fill, (bx + 2, by + 2), (bx + btn_w - 2, by + btn_h - 2), self.COLORS['button_normal'], -1)
-            cv2.addWeighted(fill, fill_alpha, frame, 1 - fill_alpha, 0, frame)
-
-            cv2.circle(frame, (bx + 11, by + btn_h // 2), 6, cfg['preview_bgr'], -1)
-            cv2.circle(frame, (bx + 11, by + btn_h // 2), 6, self.COLORS['text_primary'], 1)
-            cloth_scale = text_scale(0.46, self.width, self.height, floor=0.42, ceiling=0.54)
-            cloth_thick = text_thickness(1, self.width, self.height, min_thickness=1, max_thickness=2)
-            self._put_text(frame, cfg['label'], bx + 22, by + 23, cloth_scale, self.COLORS['text_primary'], cloth_thick)
-
-            self.cloth_color_buttons[key] = {'x': bx, 'y': by, 'w': btn_w, 'h': btn_h}
+                if is_disabled:
+                    border = (60, 60, 60)
+                elif is_selected:
+                    border = self.COLORS['glow_cyan']
+                else:
+                    border = self.COLORS['medium_blue']
+                cv2.rectangle(frame, (bx, by), (bx + btn_w, by + btn_h), border, 2)
+                fill = frame.copy()
+                fill_alpha = 0.15 if is_disabled else (0.6 if is_selected else 0.35)
+                cv2.rectangle(fill, (bx + 2, by + 2), (bx + btn_w - 2, by + btn_h - 2), self.COLORS['button_normal'], -1)
+                cv2.addWeighted(fill, fill_alpha, frame, 1 - fill_alpha, 0, frame)
+                dot_color = (50, 50, 50) if is_disabled else cfg['preview_bgr']
+                cv2.circle(frame, (bx + 10, by + btn_h // 2), 5, dot_color, -1)
+                cv2.circle(frame, (bx + 10, by + btn_h // 2), 5, (80, 80, 80) if is_disabled else self.COLORS['text_primary'], 1)
+                text_color = (70, 70, 70) if is_disabled else self.COLORS['text_primary']
+                cloth_scale = text_scale(0.48, self.width, self.height, floor=0.42, ceiling=0.56)
+                cloth_thick = text_thickness(1, self.width, self.height, min_thickness=1, max_thickness=2)
+                self._put_text(frame, cfg['label'][:2], bx + 18, by + 21, cloth_scale, text_color, cloth_thick)
+                self.cloth_color_buttons[key] = {'x': bx, 'y': by, 'w': btn_w, 'h': btn_h, 'disabled': is_disabled}
 
     def draw_confidence_controls(self, frame):
         """Draw clickable controls for confidence threshold."""
@@ -1869,102 +2029,95 @@ class PatternMode:
         self.stitches_detected = len(detected_stitch_masks)
     
     def draw_score_panel(self, frame):
-        """Draw the score/stats panel on the right side"""
+        """Draw the score/stats panel on the right side — includes progress, legend, detected color."""
         x, y, w, h = self.score_panel_x, self.score_panel_y, self.score_panel_width, self.score_panel_height
         
         # Panel border with glow
         pulse = 0.4 + 0.3 * abs(math.sin(self.glow_phase * 0.7))
         self.draw_glow_rect(frame, x, y, w, h, self.COLORS['bright_blue'], pulse)
         
-        # Panel background (semi-transparent)
+        # Panel background
         overlay = frame.copy()
         cv2.rectangle(overlay, (x + 3, y + 3), (x + w - 3, y + h - 3), self.COLORS['dark_blue'], -1)
         cv2.addWeighted(overlay, 0.8, frame, 0.2, 0, frame)
         
-        # Title "STATS"
+        # Title
         title_font_scale = text_scale(0.92, self.width, self.height, floor=0.82, ceiling=1.05)
         title_thickness = text_thickness(2, self.width, self.height, min_thickness=2, max_thickness=3)
         title_text = "STATS"
         (title_w, title_h), _ = get_text_size(title_text, FONT_DISPLAY, title_font_scale, title_thickness)
         title_x = x + (w - title_w) // 2
-        title_y = y + 40
-        draw_text(
-            frame,
-            title_text,
-            title_x,
-            title_y,
-            title_font_scale,
-            self.COLORS['bright_blue'],
-            title_thickness,
-            font=FONT_DISPLAY,
-            outline_color=self.COLORS['glow_cyan'],
-            outline_extra=2,
-        )
+        title_y = y + 38
+        draw_text(frame, title_text, title_x, title_y, title_font_scale,
+                  self.COLORS['bright_blue'], title_thickness, font=FONT_DISPLAY,
+                  outline_color=self.COLORS['glow_cyan'], outline_extra=2)
         
-        # Draw horizontal divider
         cv2.line(frame, (x + 15, title_y + 15), (x + w - 15, title_y + 15), self.COLORS['medium_blue'], 2)
         
-        # Stats content
-        content_x = x + 20
-        start_y = title_y + 45
-        label_scale = text_scale(0.62, self.width, self.height, floor=0.56, ceiling=0.74)
+        content_x = x + 18
+        label_scale = text_scale(0.56, self.width, self.height, floor=0.50, ceiling=0.66)
         label_thick = text_thickness(2, self.width, self.height, min_thickness=1, max_thickness=2)
-        
-        # Progress bar (moved up since accuracy/score removed)
-        progress_y = start_y + 20
+
+        # ── Progress bar ─────────────────────────────────────────────────────
+        progress_y = title_y + 48
         self._put_text(frame, "PROGRESS", content_x, progress_y, label_scale, self.COLORS['text_secondary'], label_thick)
-        
-        # Progress bar background (divided into 4 segments)
-        bar_y = progress_y + 15
-        bar_width = w - 40
-        bar_height = 20
-        segment_width = (bar_width - 4) // 4
-        
-        # Draw 4 segment boxes
-        for seg in range(1, 5):
-            seg_x = content_x + 2 + (seg - 1) * segment_width
-            
-            # Determine segment color based on progress milestones
-            if self.pattern_progress >= seg * 25:
-                # Completed segment - cyan
-                seg_color = self.segment_colors['completed']
-            elif seg == self.current_segment:
-                # Current segment - yellow with pulse
-                pulse = 0.5 + 0.5 * abs(math.sin(self.glow_phase * 2))
-                seg_color = tuple(int(c * pulse) for c in self.segment_colors['current'])
-            else:
-                # Upcoming segment - gray
-                seg_color = self.segment_colors['upcoming']
-            
-            # Draw segment
-            overlay_bar = frame.copy()
-            cv2.rectangle(overlay_bar, (seg_x, bar_y + 2), 
-                        (seg_x + segment_width - 2, bar_y + bar_height - 2), 
-                        seg_color, -1)
-            cv2.addWeighted(overlay_bar, 0.7, frame, 0.3, 0, frame)
-            
-            # Draw segment border
-            cv2.rectangle(frame, (seg_x, bar_y + 2), 
-                        (seg_x + segment_width - 2, bar_y + bar_height - 2), 
-                        self.COLORS['medium_blue'], 1)
-        
-        # Draw outer border
-        cv2.rectangle(frame, (content_x, bar_y), (content_x + bar_width, bar_y + bar_height), 
-                     self.COLORS['medium_blue'], 2)
-        
-        # Progress percentage text
-        progress_text = f"{self.raw_progress:.0f}%"
-        percent_scale = text_scale(0.62, self.width, self.height, floor=0.56, ceiling=0.74)
-        percent_thick = text_thickness(2, self.width, self.height, min_thickness=1, max_thickness=2)
-        (prog_w, prog_h), _ = get_text_size(progress_text, FONT_MAIN, percent_scale, percent_thick)
-        self._put_text(frame, progress_text, content_x + (bar_width - prog_w) // 2, bar_y + 16, percent_scale, self.COLORS['text_primary'], percent_thick)
-        
-        # Segment indicator text
-        segment_text_y = bar_y + bar_height + 18
-        segment_label = f"SEGMENT {self.current_segment}/4"
-        segment_scale = text_scale(0.54, self.width, self.height, floor=0.5, ceiling=0.64)
-        segment_thick = text_thickness(2, self.width, self.height, min_thickness=1, max_thickness=2)
-        self._put_text(frame, segment_label, content_x, segment_text_y, segment_scale, self.COLORS['text_secondary'], segment_thick)
+        bar_y = progress_y + 14
+        bar_width = w - 36
+        bar_height = 22
+        cv2.rectangle(frame, (content_x, bar_y), (content_x + bar_width, bar_y + bar_height), (30, 20, 10), -1)
+        fill_w = int(bar_width * max(0.0, min(1.0, self.raw_progress / 100.0)))
+        if fill_w > 0:
+            ov_bar = frame.copy()
+            cv2.rectangle(ov_bar, (content_x + 2, bar_y + 2),
+                          (content_x + fill_w - 2, bar_y + bar_height - 2),
+                          self.segment_colors['completed'], -1)
+            cv2.addWeighted(ov_bar, 0.85, frame, 0.15, 0, frame)
+        cv2.rectangle(frame, (content_x, bar_y), (content_x + bar_width, bar_y + bar_height),
+                      self.COLORS['medium_blue'], 2)
+        pct_text = f"{self.raw_progress:.1f}%"
+        pct_scale = text_scale(0.52, self.width, self.height, floor=0.46, ceiling=0.60)
+        pct_thick = text_thickness(2, self.width, self.height, min_thickness=1, max_thickness=2)
+        (pct_w, pct_h), _ = get_text_size(pct_text, FONT_MAIN, pct_scale, pct_thick)
+        self._put_text(frame, pct_text, content_x + (bar_width - pct_w) // 2,
+                       bar_y + (bar_height + pct_h) // 2, pct_scale, self.COLORS['text_primary'], pct_thick)
+
+        cv2.line(frame, (x + 15, bar_y + bar_height + 12), (x + w - 15, bar_y + bar_height + 12),
+                 self.COLORS['medium_blue'], 1)
+
+        # ── Legend ────────────────────────────────────────────────────────────
+        leg_y = bar_y + bar_height + 30
+        self._put_text(frame, "LEGEND", content_x, leg_y, label_scale, self.COLORS['text_secondary'], label_thick)
+        legend_items = [
+            ("Completed", self.segment_colors['completed']),
+            ("To Sew",    self.segment_colors['current']),
+        ]
+        box_size = 13
+        leg_scale = text_scale(0.50, self.width, self.height, floor=0.44, ceiling=0.58)
+        leg_thick = text_thickness(1, self.width, self.height, min_thickness=1, max_thickness=2)
+        for i, (lbl, col) in enumerate(legend_items):
+            item_y = leg_y + 18 + i * 22
+            cv2.rectangle(frame, (content_x, item_y - box_size + 2),
+                          (content_x + box_size, item_y + 2), col, -1)
+            cv2.rectangle(frame, (content_x, item_y - box_size + 2),
+                          (content_x + box_size, item_y + 2), self.COLORS['medium_blue'], 1)
+            self._put_text(frame, lbl, content_x + box_size + 7, item_y,
+                           leg_scale, self.COLORS['text_secondary'], leg_thick)
+
+        cv2.line(frame, (x + 15, leg_y + 18 + len(legend_items) * 22 + 4),
+                 (x + w - 15, leg_y + 18 + len(legend_items) * 22 + 4),
+                 self.COLORS['medium_blue'], 1)
+
+        # ── Detected color indicator ──────────────────────────────────────────
+        det_y = leg_y + 18 + len(legend_items) * 22 + 22
+        self._put_text(frame, "DETECTED COLOR", content_x, det_y, label_scale, self.COLORS['text_secondary'], label_thick)
+        det_cfg = self.color_profiles[self.selected_detection_color]
+        det_val_y = det_y + 20
+        cv2.circle(frame, (content_x + 8, det_val_y - 6), 7, det_cfg['preview_bgr'], -1)
+        cv2.circle(frame, (content_x + 8, det_val_y - 6), 7, self.COLORS['medium_blue'], 1)
+        val_scale = text_scale(0.58, self.width, self.height, floor=0.52, ceiling=0.66)
+        val_thick = text_thickness(2, self.width, self.height, min_thickness=1, max_thickness=2)
+        self._put_text(frame, det_cfg['label'], content_x + 22, det_val_y,
+                       val_scale, self.COLORS['text_primary'], val_thick)
     
     def draw_evaluate_button(self, frame):
         """Draw the evaluate button below stats panel"""
@@ -2210,11 +2363,19 @@ class PatternMode:
             if btn['x'] <= x <= btn['x'] + btn['w'] and btn['y'] <= y <= btn['y'] + btn['h']:
                 self.play_button_click_sound()
                 self.selected_detection_color = color_name
+                # Auto-fix cloth if it now conflicts with the new thread color
+                if self.selected_cloth_color == color_name:
+                    for c in self.cloth_color_profiles.keys():
+                        if c != color_name:
+                            self.selected_cloth_color = c
+                            break
                 print(f"🎨 Detection color set to: {self.color_profiles[color_name]['label']}")
                 return None
 
         for color_name, btn in self.cloth_color_buttons.items():
             if btn['x'] <= x <= btn['x'] + btn['w'] and btn['y'] <= y <= btn['y'] + btn['h']:
+                if btn.get('disabled', False):
+                    return None  # blocked — same as thread color
                 self.play_button_click_sound()
                 self.selected_cloth_color = color_name
                 self.smooth_cloth_bbox = None  # reset smoother on cloth colour change

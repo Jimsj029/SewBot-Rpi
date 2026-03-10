@@ -94,7 +94,7 @@ class SewBotApp:
         
         # Mode selection buttons - vertically stacked with descriptions
         button_width = 500
-        button_height = 90
+        button_height = 100
         button_x = (self.width - button_width) // 2
         start_y = 140
         spacing = 20
