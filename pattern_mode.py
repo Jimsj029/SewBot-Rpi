@@ -21,12 +21,20 @@ class PatternMode:
         self.height = height
         self.COLORS = colors
         self.blueprint_folder = blueprint_folder
+
+        # Motion-driven progression tuning
+        self.motion_step_gain = 2.2          # Higher = more centerline steps per motion unit
+        self.motion_step_min_projection = 0.05  # Ignore tiny projected motion along tangent
+        self.allow_reverse_progress = True   # True: backward cloth motion can move index backward
         
         # Pattern variables
         self.current_level = 1
         self.current_level_tracking = 1  # Track which level stats belong to
         self.uniform_width = 216   # 144 * 1.50 = 216 (50% increase)
         self.uniform_height = 270  # 180 * 1.50 = 270 (50% increase)
+        # Pattern width scale: fraction of original mask width to use (0.0 - 1.0).
+        # Default 0.625 (62.5%) preserves previous behaviour; tweak to change mask width.
+        self.pattern_width_scale = 0.625
         self.alpha_blend = 0.9
         self.glow_phase = 0
         
@@ -70,6 +78,13 @@ class PatternMode:
             'w': self.score_panel_width,
             'h': 50,
         }
+        # Button to let user confirm cloth placement and attach mask to cloth
+        self.attach_cloth_button = {
+            'x': self.score_panel_x,
+            'y': self.evaluate_button['y'] + self.evaluate_button['h'] + 8,
+            'w': self.score_panel_width,
+            'h': 40,
+        }
 
         # Back button
         self.back_button = {'x': 20, 'y': 20, 'w': 120, 'h': 50}
@@ -100,10 +115,12 @@ class PatternMode:
             'black': {
                 'label': 'BLACK',
                 'preview_bgr': (30, 30, 30),
+                # Loosened HSV and match ratio for better black detection in
+                # varied lighting. V upper increased, S upper increased.
                 'hsv_ranges': [
-                    ((0, 0, 5), (179, 100, 52)),
+                    ((0, 0, 0), (179, 180, 90)),
                 ],
-                'min_ratio': 0.15,
+                'min_ratio': 0.06,
             },
         }
         self.color_buttons = {}
@@ -173,9 +190,24 @@ class PatternMode:
         self.last_motion_diff = 0.0
         self.cloth_motion_active = False
         self.last_motion_centroid = None
+        self.prev_cloth_color_centroid = None
+        self.last_cloth_mask_ratio = 0.0
+        self.last_cloth_bbox = None
+        self.cloth_motion_min_ratio = 0.015
+        self.cloth_motion_min_shift = 0.35
+        self.cloth_motion_min_area_ratio = 0.01
         self.motion_vector_x = 0.0
         self.motion_vector_y = 0.0
         self.motion_vector_min_mag = 0.35
+        # Relax cloth detection thresholds slightly to be more permissive
+        self.cloth_motion_min_ratio = 0.01
+        self.cloth_motion_min_area_ratio = 0.005
+
+        self.motion_step_gain = 2.2  # Converts projected cloth motion into centerline index steps
+        self.motion_step_min_projection = 0.05  # Ignore tiny along-path projections (noise)
+        self.motion_sideways_gain = 1.2  # Additional gain when moving mostly sideways to the path
+        self.allow_sideways_progress = True  # Count sideways cloth movement as forward progress
+        self.allow_reverse_progress = True  # Allow backward cloth motion to move backward on path
         self.needle_on_pattern = True  # Whether the needle is currently on a pattern pixel
 
         # Follow-line validation (on/off pattern while sewing)
@@ -203,6 +235,32 @@ class PatternMode:
         self.needle_pos_y = float(self.NEEDLE_ROI_Y)
         self.prev_gray    = None   # Grayscale previous frame
         self.of_points    = None   # Lucas-Kanade tracking points
+        # Hole radius inside the needle ROI to keep center unobstructed
+        self.needle_roi_hole_radius = 4
+        # Storage for the raw camera frame (pre-overlay) to restore ROI hole
+        self._last_raw_frame = None
+        # When True, the pattern overlay follows the detected cloth centroid
+        # rather than staying fixed to the camera centre. This is latched on
+        # first successful cloth detection so the mask 'sticks' to the cloth.
+        self.mask_attached_to_cloth = False
+        # If attached, this stores the anchor point (x,y) in camera-frame
+        # coordinates where the mask should be centered (usually cloth centroid).
+        self.mask_anchor = None
+        # When START is pressed we record the initial cloth centroid and an
+        # initial overlay anchor (usually the camera centre). Subsequent
+        # cloth movement will translate the overlay relative to this initial
+        # seed so the mask keeps its initial size/scale even if cloth
+        # moves partly out of frame.
+        self.mask_initial_cloth_centroid = None
+        self.mask_initial_anchor = None
+        self.mask_initial_cloth_bbox = None
+        # Initial expected pattern point (centerline) recorded at START
+        # so overlay offsets don't change as centerline index advances.
+        self.mask_initial_expected_point = None
+        # Exponential smoothing for cloth centroid to reduce jitter while
+        # the mask is attached. Alpha in (0,1] where higher is more responsive.
+        self._cloth_centroid_ema = None
+        self._cloth_centroid_ema_alpha = 0.45
 
         # ── Column ROI – wallet-style needle centring guide ───────────────────
         self.ROI_CENTER_X         = 272   # Column horizontal centre (camera-frame px)
@@ -256,9 +314,12 @@ class PatternMode:
             'black': {
                 'label': 'BLACK',
                 'preview_bgr': (30, 30, 30),
+                # Loosened HSV to include darker grays under varied lighting
                 'hsv_ranges': [
-                    ((0, 0, 5), (179, 100, 52)),
+                    ((0, 0, 0), (179, 180, 90)),
                 ],
+                # Minimum fraction of sampled patch required to declare a match
+                'min_ratio': 0.06,
             },
             'white': {
                 'label': 'WHITE',
@@ -276,6 +337,11 @@ class PatternMode:
             },
         }
         self.cloth_color_buttons = {}
+
+        # Sampling radius (px) when checking for thread colour at the needle
+        # Reduce this to avoid overly large samples turning pixels cyan prematurely.
+        # Lowered to 3 per user request.
+        self.color_sample_radius = 3
 
         # Cloth bbox tracking
         self.smooth_cloth_bbox = None  # Smoothed bbox for stable overlay
@@ -329,39 +395,54 @@ class PatternMode:
             self.reset_progress()
             self.current_level_tracking = level
         
+        # Prefer exact filename, but allow flexible labeled filenames.
         mask_path = os.path.join(self.blueprint_folder, f'level{level}_mask.png')
         if not os.path.exists(mask_path):
-            return None, None
-        
+            # Search for any png file that contains the level token or label
+            candidates = [f for f in os.listdir(self.blueprint_folder)
+                          if os.path.isfile(os.path.join(self.blueprint_folder, f))]
+            found = None
+            level_str = str(level)
+            for fn in candidates:
+                if f"level{level_str}" in fn or level_str in fn:
+                    found = fn
+                    break
+            if found is None:
+                for fn in candidates:
+                    if fn.lower().endswith('.png'):
+                        found = fn
+                        break
+            if found is None:
+                return None, None
+            mask_path = os.path.join(self.blueprint_folder, found)
+
         mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
         if mask is None:
             return None, None
-        
-        # Resize the mask to the desired dimensions
-        mask = cv2.resize(mask, (self.uniform_width, self.uniform_height))
 
-        # Mirror the pattern horizontally for specific levels
-        if level in (4, 5):
+        # Resize to the uniform canvas size (keep full mask height)
+        mask = cv2.resize(mask, (self.uniform_width, self.uniform_height), interpolation=cv2.INTER_NEAREST)
+
+        # Mirror the pattern horizontally for specific levels if required
+        if isinstance(level, int) and level in (4, 5):
             mask = cv2.flip(mask, 1)
 
-        # Cut the binary mask in half (keep top half)
-        mask = mask[:mask.shape[0] // 2, :]
-
-        # Base width is 50%; increase it by 25% => 62.5% of original width.
-        new_w = int(round(mask.shape[1] * 0.625))
+        # Base width scaling while preserving full height
+        new_w = int(round(mask.shape[1] * float(self.pattern_width_scale)))
         new_w = max(1, min(mask.shape[1], new_w))
-        mask = cv2.resize(mask, (new_w, mask.shape[0]), interpolation=cv2.INTER_NEAREST)
+        if new_w != mask.shape[1]:
+            mask = cv2.resize(mask, (new_w, mask.shape[0]), interpolation=cv2.INTER_NEAREST)
 
-        # Move the pattern to the middle of the cloth while keeping it centered horizontally
+        # Center mask inside canonical uniform canvas
         top_offset = (self.uniform_height - mask.shape[0]) // 2
         left_offset = (self.uniform_width - mask.shape[1]) // 2
         centered_mask = np.zeros((self.uniform_height, self.uniform_width), dtype=mask.dtype)
         centered_mask[top_offset:top_offset + mask.shape[0], left_offset:left_offset + mask.shape[1]] = mask
         mask = centered_mask
-        
-        # Convert mask to white overlay (pattern lines)
+
+        # Convert mask to white overlay (pattern lines) and alpha
         overlay = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
-        alpha = mask / 255.0
+        alpha = (mask.astype(np.float32) / 255.0)
         
         return overlay, alpha
     
@@ -390,6 +471,9 @@ class PatternMode:
         self.last_motion_diff = 0.0
         self.cloth_motion_active = False
         self.last_motion_centroid = None
+        self.prev_cloth_color_centroid = None
+        self.last_cloth_mask_ratio = 0.0
+        self.last_cloth_bbox = None
         self.motion_vector_x = 0.0
         self.motion_vector_y = 0.0
         self.centerline_progress_idx = 0
@@ -418,10 +502,17 @@ class PatternMode:
 
         # Completed stitch mask paints nearby blueprint pixels cyan.
         if self.completed_stitch_mask is not None:
+            # Resize completed mask to pattern overlay size (nearest to keep pixels)
             completed_mask_resized = cv2.resize(self.completed_stitch_mask, (width, height), interpolation=cv2.INTER_NEAREST)
-            kernel_size = max(3, self.cyan_spread_radius * 2 + 1)
+
+            # Use a more generous dilation so small detected stitches more
+            # reliably propagate cyan across the visible blueprint. This
+            # helps when detections are sparse or sampling is noisy.
+            kernel_radius = max(self.cyan_spread_radius * 3, self.progress_spread_radius, 3)
+            kernel_size = int(max(3, kernel_radius * 2 + 1))
             kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
-            proximity_mask = cv2.dilate(completed_mask_resized, kernel, iterations=1)
+            # Perform two dilation passes for stronger coverage
+            proximity_mask = cv2.dilate(completed_mask_resized, kernel, iterations=2)
             completed_pattern_pixels = np.logical_and(pattern_pixels, proximity_mask > 0)
             colored_overlay[completed_pattern_pixels] = self.segment_colors['completed']
 
@@ -437,74 +528,105 @@ class PatternMode:
         pass
 
     def _update_cloth_motion_state(self, cam_frame):
-        """Update whether cloth is moving near the needle using frame differencing."""
+        """Track cloth motion by following selected cloth color across the full frame."""
         if cam_frame is None or cam_frame.size == 0:
             self.cloth_motion_active = False
             self.last_motion_diff = 0.0
             self.last_motion_centroid = None
+            self.prev_cloth_color_centroid = None
+            self.last_cloth_mask_ratio = 0.0
+            self.last_cloth_bbox = None
             self.motion_vector_x = 0.0
             self.motion_vector_y = 0.0
             return
 
-        gray = cv2.cvtColor(cam_frame, cv2.COLOR_BGR2GRAY)
-        patch_half = self.motion_patch_size // 2
-        cx = int(self.needle_pos_x)
-        cy = int(self.needle_pos_y + self.motion_patch_y_offset)
+        blurred = cv2.GaussianBlur(cam_frame, (7, 7), 0)
+        hsv = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
+        cloth_mask = self._get_cloth_color_mask(blurred, hsv_patch=hsv)
+        kernel_sm = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+        kernel_lg = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (21, 21))
+        cloth_mask = cv2.morphologyEx(cloth_mask, cv2.MORPH_OPEN, kernel_sm)
+        cloth_mask = cv2.morphologyEx(cloth_mask, cv2.MORPH_CLOSE, kernel_lg)
 
-        x1 = max(0, cx - patch_half)
-        y1 = max(0, cy - patch_half)
-        x2 = min(gray.shape[1], cx + patch_half)
-        y2 = min(gray.shape[0], cy + patch_half)
+        mask_pixels = int(np.count_nonzero(cloth_mask))
+        total_pixels = max(1, cloth_mask.shape[0] * cloth_mask.shape[1])
+        self.last_cloth_mask_ratio = float(mask_pixels) / float(total_pixels)
 
-        patch = gray[y1:y2, x1:x2]
-        if patch.size == 0 or patch.shape[0] < 8 or patch.shape[1] < 8:
-            self.cloth_motion_active = False
-            self.last_motion_diff = 0.0
-            self.last_motion_centroid = None
-            self.motion_vector_x = 0.0
-            self.motion_vector_y = 0.0
-            return
+        contours, _ = cv2.findContours(cloth_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        largest = max(contours, key=cv2.contourArea) if contours else None
+        min_area = float(total_pixels) * float(self.cloth_motion_min_area_ratio)
 
-        patch = cv2.GaussianBlur(patch, (5, 5), 0)
+        moved = False
+        if (
+            largest is not None
+            and cv2.contourArea(largest) >= min_area
+            and self.last_cloth_mask_ratio >= self.cloth_motion_min_ratio
+            and mask_pixels >= 20
+        ):
+            bx, by, bw, bh = cv2.boundingRect(largest)
+            self.last_cloth_bbox = (bx, by, bx + bw, by + bh)
+            m = cv2.moments(largest)
+            if m["m00"] == 0:
+                raw_centroid = np.array([float(bx + bw * 0.5), float(by + bh * 0.5)], dtype=np.float32)
+            else:
+                raw_centroid = np.array([float(m["m10"] / m["m00"]), float(m["m01"] / m["m00"])], dtype=np.float32)
 
-        if self.prev_motion_patch is None or self.prev_motion_patch.shape != patch.shape:
-            self.prev_motion_patch = patch
-            self.cloth_motion_active = False
-            self.last_motion_diff = 0.0
-            self.last_motion_centroid = None
-            self.motion_vector_x = 0.0
-            self.motion_vector_y = 0.0
-            return
+            # Update EMA-smoothed centroid to reduce jitter. Use raw_centroid
+            # to seed the EMA when needed.
+            alpha = float(self._cloth_centroid_ema_alpha)
+            if self._cloth_centroid_ema is None:
+                self._cloth_centroid_ema = raw_centroid.copy()
+            else:
+                try:
+                    self._cloth_centroid_ema = (1.0 - alpha) * self._cloth_centroid_ema + alpha * raw_centroid
+                except Exception:
+                    self._cloth_centroid_ema = raw_centroid.copy()
 
-        diff = cv2.absdiff(patch, self.prev_motion_patch)
-        self.last_motion_diff = float(np.mean(diff))
+            centroid = self._cloth_centroid_ema
+            self.last_motion_centroid = centroid
 
-        # Estimate local motion direction from the centroid shift of changed pixels.
-        motion_thresh = max(1.0, self.motion_diff_threshold * 1.2)
-        _, motion_mask = cv2.threshold(diff, motion_thresh, 255, cv2.THRESH_BINARY)
-        motion_pixels = int(np.count_nonzero(motion_mask))
-        if motion_pixels >= 20:
-            ys, xs = np.where(motion_mask > 0)
-            centroid = np.array([float(np.mean(xs)), float(np.mean(ys))], dtype=np.float32)
-            if self.last_motion_centroid is not None:
-                raw_dx = float(centroid[0] - self.last_motion_centroid[0])
-                raw_dy = float(centroid[1] - self.last_motion_centroid[1])
+            if self.prev_cloth_color_centroid is not None:
+                raw_dx = float(centroid[0] - self.prev_cloth_color_centroid[0])
+                raw_dy = float(centroid[1] - self.prev_cloth_color_centroid[1])
+                self.last_motion_diff = float(math.hypot(raw_dx, raw_dy))
                 blend = 0.35
                 self.motion_vector_x = (1.0 - blend) * self.motion_vector_x + blend * raw_dx
                 self.motion_vector_y = (1.0 - blend) * self.motion_vector_y + blend * raw_dy
-            self.last_motion_centroid = centroid
+                moved = self.last_motion_diff >= self.cloth_motion_min_shift
+            else:
+                self.last_motion_diff = 0.0
+
+            self.prev_cloth_color_centroid = centroid.copy()
+            # Do NOT auto-latch the mask here. The user must explicitly
+            # press START to show/attach the pattern overlay. Keep
+            # `last_motion_centroid` for optional anchoring when START is
+            # pressed, but don't change `mask_attached_to_cloth` automatically.
         else:
+            self.last_motion_diff = 0.0
+            self.last_motion_centroid = None
+            self.prev_cloth_color_centroid = None
+            self.last_cloth_bbox = None
             self.motion_vector_x *= 0.7
             self.motion_vector_y *= 0.7
 
-        self.prev_motion_patch = patch
-
-        if self.last_motion_diff >= self.motion_diff_threshold:
+        if moved:
             self.motion_grace_counter = self.motion_grace_frames
         else:
             self.motion_grace_counter = max(0, self.motion_grace_counter - 1)
 
         self.cloth_motion_active = self.motion_grace_counter > 0
+
+    def _get_cloth_color_mask(self, bgr_patch, hsv_patch=None):
+        """Build binary mask for the currently selected cloth color in a BGR patch."""
+        cfg = self.cloth_color_profiles[self.selected_cloth_color]
+        if hsv_patch is None:
+            hsv_patch = cv2.cvtColor(bgr_patch, cv2.COLOR_BGR2HSV)
+        mask = np.zeros(hsv_patch.shape[:2], dtype=np.uint8)
+        for low, high in cfg['hsv_ranges']:
+            low_np = np.array(low, dtype=np.uint8)
+            high_np = np.array(high, dtype=np.uint8)
+            mask = cv2.bitwise_or(mask, cv2.inRange(hsv_patch, low_np, high_np))
+        return mask
 
     def _infer_centerline_step_direction(self, centerline_path, current_idx):
         """Infer +1/-1 movement along centerline from local cloth motion."""
@@ -533,6 +655,52 @@ class PatternMode:
             return 0
 
         return 1 if projection > 0 else -1
+
+    def _infer_centerline_step_delta(self, centerline_path, current_idx):
+        """Infer signed multi-step movement along centerline from cloth motion."""
+        if centerline_path is None or len(centerline_path) < 3:
+            return 0
+
+        idx = int(np.clip(current_idx, 0, len(centerline_path) - 1))
+        prev_idx = max(0, idx - 1)
+        next_idx = min(len(centerline_path) - 1, idx + 1)
+        if prev_idx == next_idx:
+            return 0
+
+        tangent = centerline_path[next_idx].astype(np.float32) - centerline_path[prev_idx].astype(np.float32)
+        tan_norm = float(np.linalg.norm(tangent))
+        if tan_norm < 1e-6:
+            return 0
+        tangent /= tan_norm
+
+        motion = np.array([self.motion_vector_x, self.motion_vector_y], dtype=np.float32)
+        motion_mag = float(np.linalg.norm(motion))
+        if motion_mag < self.motion_vector_min_mag:
+            return 0
+
+        projection = float(np.dot(motion, tangent))
+        min_proj = float(self.motion_step_min_projection)
+        if abs(projection) < min_proj:
+            if not self.allow_sideways_progress:
+                return 0
+            # Sideways fallback: when cloth clearly moves but along-path projection
+            # is weak, still advance so horizontal movement can progress tracing.
+            sideways_mag = math.sqrt(max(0.0, motion_mag * motion_mag - projection * projection))
+            if sideways_mag < self.motion_vector_min_mag:
+                return 0
+            signed_steps = int(round(sideways_mag * float(self.motion_sideways_gain)))
+            if signed_steps <= 0:
+                signed_steps = 1
+            return signed_steps
+
+        signed_steps = int(round(projection * float(self.motion_step_gain)))
+        if signed_steps == 0:
+            signed_steps = 1 if projection > 0 else -1
+
+        if not self.allow_reverse_progress and signed_steps < 0:
+            return 0
+
+        return signed_steps
 
     def run_needle_pipeline(self, cam_frame, pattern_alpha,
                             x_offset, y_offset, actual_w, actual_h,
@@ -573,6 +741,34 @@ class PatternMode:
         roi = cam_frame[ry1:ry2, rx1:rx2]
         if roi.size == 0:
             return
+
+        # Restore a small circular 'hole' in the ROI centre from the raw
+        # pre-overlay frame so the detector sees the unobstructed camera
+        # pixels at the needle centre. Uses the last saved raw frame if available.
+        try:
+            if self._last_raw_frame is not None:
+                raw_h, raw_w = self._last_raw_frame.shape[:2]
+                # Clip coordinates to available raw frame
+                sx1 = max(0, rx1)
+                sy1 = max(0, ry1)
+                sx2 = min(raw_w, rx2)
+                sy2 = min(raw_h, ry2)
+                if sx2 > sx1 and sy2 > sy1:
+                    src_block = self._last_raw_frame[sy1:sy2, sx1:sx2]
+                    dst_block = roi[sy1 - ry1:sy2 - ry1, sx1 - rx1:sx2 - rx1]
+                    # Build circular mask in ROI coordinates
+                    h_blk, w_blk = dst_block.shape[:2]
+                    cx = w_blk // 2
+                    cy = h_blk // 2
+                    rr = int(max(1, min(cx, cy, int(self.needle_roi_hole_radius))))
+                    yy, xx = np.ogrid[:h_blk, :w_blk]
+                    circle = ((yy - cy) ** 2 + (xx - cx) ** 2) <= (rr * rr)
+                    # Apply mask: copy pixels where circle is True
+                    dst_block[circle] = src_block[circle]
+                    # Write back into roi (and cam_frame slice will reflect since roi is a view)
+                    roi[sy1 - ry1:sy2 - ry1, sx1 - rx1:sx2 - rx1] = dst_block
+        except Exception:
+            pass
 
         try:
             # Run needle model at its required ONNX input size.
@@ -654,7 +850,10 @@ class PatternMode:
         if not self._matches_selected_color(cam_frame, cx_cam, cy_cam, hsv_frame=hsv_frame):
             return
 
-        if source == "center" and self.require_motion_for_stitch and not self.cloth_motion_active:
+        # If the user has detected thread colour at the needle, allow
+        # accepting the stitch even when cloth motion is weak. This makes
+        # the painting continuous when colour detection is present.
+        if source == "center" and self.require_motion_for_stitch and not self.cloth_motion_active and not getattr(self, 'last_color_match', False):
             return
 
         pat_h, pat_w = pattern_alpha.shape[:2]
@@ -675,13 +874,21 @@ class PatternMode:
         print(f"🪡 [{source}] cam=({cx_cam:.0f},{cy_cam:.0f})  "
               f"pat=({px},{py})  corridor={on_corridor}  order={order_valid}")
 
+        # If color is detected at the sample but pattern validators rejected
+        # the point (e.g., order_valid), allow acceptance when the sample is
+        # on the corridor and color match is strong. This prevents stalls.
+        if not is_valid_stitch and getattr(self, 'last_color_match', False) and on_corridor:
+            is_valid_stitch = True
+            order_valid = True
+
         if is_valid_stitch:
             draw_x, draw_y = px, py
             if self.snap_stitches_to_centerline and centerline_path is not None and len(centerline_path) > 0:
                 draw_x, draw_y = snapped_x, snapped_y
 
             if source == "center":
-                if (self.stitch_frame_index - self.last_stitch_frame_index) < self.stitch_cooldown_frames:
+                # Allow bypass of cooldown when we have a strong color match
+                if (self.stitch_frame_index - self.last_stitch_frame_index) < self.stitch_cooldown_frames and not getattr(self, 'last_color_match', False):
                     return
                 # In centerline mode we intentionally allow dense adjacent points.
                 # A strict movement check here can deadlock progression on tightly
@@ -694,15 +901,51 @@ class PatternMode:
                 if (not use_centerline_mode) and self.last_stitch_point is not None:
                     lx, ly = self.last_stitch_point
                     min_move = float(self.min_stitch_move_px)
-                    if math.hypot(draw_x - lx, draw_y - ly) < min_move:
+                    # Bypass minimum-move gate when thread colour is present
+                    if not getattr(self, 'last_color_match', False) and math.hypot(draw_x - lx, draw_y - ly) < min_move:
                         return
 
-            if self.completed_stitch_mask is None:
-                self.completed_stitch_mask = np.zeros((pat_h, pat_w), dtype=np.uint8)
+                # Ensure we store stitches in the canonical uniform-resolution
+                # mask to keep visuals consistent between ROI-model updates and
+                # center-sampled registrations.
+                if self.completed_stitch_mask is None:
+                    self.completed_stitch_mask = np.zeros((self.uniform_height, self.uniform_width), dtype=np.uint8)
 
-            prev_pixels = int(np.count_nonzero(self.completed_stitch_mask))
-            cv2.circle(self.completed_stitch_mask, (draw_x, draw_y), self.stitch_draw_radius, 255, -1)
-            new_pixels = int(np.count_nonzero(self.completed_stitch_mask))
+                prev_pixels = int(np.count_nonzero(self.completed_stitch_mask))
+
+                # Map pattern-space draw coordinates (px,py) into uniform mask
+                # in case pattern overlay size differs from `uniform_*` dims.
+                try:
+                    scale_x = float(self.uniform_width) / float(pat_w)
+                    scale_y = float(self.uniform_height) / float(pat_h)
+                except Exception:
+                    scale_x = 1.0
+                    scale_y = 1.0
+
+                ux = int(np.clip(round(draw_x * scale_x), 0, self.uniform_width - 1))
+                uy = int(np.clip(round(draw_y * scale_y), 0, self.uniform_height - 1))
+
+                # Scale draw radius to uniform coord space (min 1). If color
+                # is matched, use a slightly larger stamp to ensure new pixels
+                # are created so progress advances continuously.
+                base_r = max(1, int(round(self.stitch_draw_radius * max(scale_x, scale_y))))
+                if getattr(self, 'last_color_match', False):
+                    ur = max(base_r, int(round(base_r * 1.5)))
+                else:
+                    ur = base_r
+                cv2.circle(self.completed_stitch_mask, (ux, uy), ur, 255, -1)
+                # Also add a larger filled stamp to improve visual coverage so
+                # single-point detections more reliably turn blueprint pixels
+                # cyan after dilation. The extra radius scales with cyan_spread.
+                try:
+                    extra_r = int(max(0, self.cyan_spread_radius * 3))
+                    if getattr(self, 'last_color_match', False):
+                        extra_r = max(extra_r, int(self.cyan_spread_radius * 4))
+                    if extra_r > 0:
+                        cv2.circle(self.completed_stitch_mask, (ux, uy), ur + extra_r, 255, -1)
+                except Exception:
+                    pass
+                new_pixels = int(np.count_nonzero(self.completed_stitch_mask))
 
             if source == "center":
                 # Record accepted center sample even when no new pixels were
@@ -717,12 +960,11 @@ class PatternMode:
                         self.centerline_progress_initialized = True
                     else:
                         current_idx = int(self.centerline_progress_idx)
-                        # Usually we move toward nearest_idx. If nearest_idx ==
-                        # current_idx (common with needle-anchored overlay),
-                        # infer direction from cloth motion to keep progression moving.
-                        delta = nearest_idx - current_idx
-                        if delta == 0:
-                            delta = self._infer_centerline_step_direction(centerline_path, current_idx)
+                        # Primary driver: cloth motion projected along centerline.
+                        # Fallback to nearest index to avoid deadlocks when motion is weak.
+                        motion_delta = self._infer_centerline_step_delta(centerline_path, current_idx)
+                        nearest_delta = nearest_idx - current_idx
+                        delta = motion_delta if motion_delta != 0 else nearest_delta
 
                         step_limit = max(1, int(self.centerline_step_limit))
                         if delta > step_limit:
@@ -742,7 +984,7 @@ class PatternMode:
         """Return True when the sampled stitch area matches the currently selected color."""
         color_cfg = self.color_profiles[self.selected_detection_color]
 
-        sample_radius = 7
+        sample_radius = getattr(self, 'color_sample_radius', 3)
         x = int(cx_cam)
         y = int(cy_cam)
         x1 = max(0, x - sample_radius)
@@ -943,11 +1185,13 @@ class PatternMode:
 
         # Update segmented visual progress (one-way ratchet)
         rp = self.raw_progress
-        if   rp >= 70: new_seg, new_prog = 5, 100.0
-        elif rp >= 45: new_seg, new_prog = 4,  75.0
-        elif rp >= 25: new_seg, new_prog = 3,  50.0
-        elif rp >= 12: new_seg, new_prog = 2,  25.0
-        else:          new_seg, new_prog = 1,   0.0
+        # Require nearly-complete coverage to mark level finished. Map into
+        # one-way segments: 25/50/75/100 (100 only when raw_progress >= 100).
+        if   rp >= 100: new_seg, new_prog = 5, 100.0
+        elif rp >= 75:  new_seg, new_prog = 4,  75.0
+        elif rp >= 50:  new_seg, new_prog = 3,  50.0
+        elif rp >= 25:  new_seg, new_prog = 2,  25.0
+        else:           new_seg, new_prog = 1,   0.0
 
         if new_seg > self.highest_segment_reached:
             self.highest_segment_reached = new_seg
@@ -959,6 +1203,20 @@ class PatternMode:
         else:
             self.current_segment  = self.highest_segment_reached
             self.pattern_progress = (self.highest_segment_reached - 1) * 25.0
+
+        # Auto-hide mask when progress reaches 100% (user-requested behavior)
+        try:
+            if (self.raw_progress >= 100.0 or self.pattern_progress >= 100.0) and self.mask_attached_to_cloth:
+                self.mask_attached_to_cloth = False
+                self.mask_anchor = None
+                # Clear initial mask state as well
+                self.mask_initial_anchor = None
+                self.mask_initial_cloth_centroid = None
+                self.mask_initial_cloth_bbox = None
+                self.mask_initial_expected_point = None
+                print("📌 Mask hidden: pattern complete (100%)")
+        except Exception:
+            pass
 
     # ──────────────────────────────────────────────────────────────────────────
 
@@ -1031,6 +1289,8 @@ class PatternMode:
         
         # Draw evaluate button (right, below stats)
         self.draw_evaluate_button(frame)
+        # Draw attach cloth button (below evaluate)
+        self.draw_attach_cloth_button(frame)
 
         # Draw thread colour panel (left, top)
         self.draw_thread_color_panel(frame)
@@ -1162,9 +1422,15 @@ class PatternMode:
         else:
             cam_frame = cv2.resize(camera_frame, (self.camera_width, self.camera_height))
             detection_frame = cam_frame.copy()
+            # Keep raw pre-overlay frame for ROI hole restoration in detection pipeline
+            self._last_raw_frame = detection_frame.copy()
             hsv_detection_frame = cv2.cvtColor(detection_frame, cv2.COLOR_BGR2HSV)
             self.stitch_frame_index += 1
             self._update_cloth_motion_state(detection_frame)
+
+            # For the needle ROI detection we restore a small hole so the
+            # detector sees the raw camera pixels. Also compute follow state
+            # variables only after cloth update.
             follow_check_ready = False
             follow_on_corridor = True
             follow_order_valid = True
@@ -1173,7 +1439,9 @@ class PatternMode:
             pattern_overlay, pattern_alpha = self.load_blueprint(self.current_level)
 
             # Overlay pattern anchored to needle — no cloth detection needed
-            if pattern_overlay is not None and pattern_alpha is not None:
+            # Only show/apply the pattern overlay when the user has
+            # explicitly attached the mask to the cloth (START pressed).
+            if pattern_overlay is not None and pattern_alpha is not None and self.mask_attached_to_cloth:
                 overlay_h, overlay_w = pattern_overlay.shape[:2]
 
                 centerline_path = self._build_centerline_path(pattern_alpha, overlay_w, overlay_h)
@@ -1203,9 +1471,81 @@ class PatternMode:
                     exp_x = overlay_w // 2
                     exp_y = overlay_h // 2
 
-                # Align expected centerline stitch point directly under the red dot.
-                x_offset = int(round(self.needle_pos_x)) - exp_x
-                y_offset = int(round(self.needle_pos_y)) - exp_y
+                # If mask is attached to cloth, record an initial expected
+                # centerline point on first draw so later centerline index
+                # advances (from thread-color detections) do not shift the
+                # visible overlay. Subsequent draws will use this frozen
+                # expected point when computing offsets.
+                if self.mask_attached_to_cloth:
+                    if self.mask_initial_expected_point is None:
+                        try:
+                            self.mask_initial_expected_point = (int(exp_x), int(exp_y))
+                        except Exception:
+                            self.mask_initial_expected_point = (exp_x, exp_y)
+
+                # Anchor pattern to the camera centre (fixed). Compute offsets
+                # so the pattern's expected point maps to the camera centre.
+                cam_cx = self.camera_width // 2
+                cam_cy = self.camera_height // 2
+                # On fresh start, move the red-dot to the camera centre so
+                # the starting point of the mask is at screen centre.
+                if not self.centerline_progress_initialized:
+                    # Do not force the needle to the camera centre here;
+                    # keep needle tracking free so user can move it independently.
+                    pass
+
+                # Determine anchor point for the overlay. New behavior:
+                # - On START we record an initial cloth centroid and an initial
+                #   anchor (camera centre). The overlay will remain the same
+                #   size as when START was pressed and will translate by the
+                #   cloth movement delta: anchor = initial_anchor + (curr_centroid - initial_centroid).
+                # - If no initial centroid exists, fall back to live centroid
+                #   or the explicit mask_anchor.
+                anchor_x = cam_cx
+                anchor_y = cam_cy
+                if self.mask_attached_to_cloth:
+                    # Preferred path: if we have an initial cloth centroid,
+                    # translate the overlay relative to that seed so size stays fixed.
+                    if self.mask_initial_cloth_centroid is not None:
+                        base_x, base_y = (self.mask_initial_anchor if self.mask_initial_anchor is not None else (cam_cx, cam_cy))
+                        if self.last_motion_centroid is not None:
+                            try:
+                                dx = float(self.last_motion_centroid[0]) - float(self.mask_initial_cloth_centroid[0])
+                                dy = float(self.last_motion_centroid[1]) - float(self.mask_initial_cloth_centroid[1])
+                                anchor_x = int(round(base_x + dx))
+                                anchor_y = int(round(base_y + dy))
+                            except Exception:
+                                anchor_x, anchor_y = int(base_x), int(base_y)
+                        else:
+                            # No live centroid yet: keep the initial anchor
+                            try:
+                                anchor_x, anchor_y = int(base_x), int(base_y)
+                            except Exception:
+                                anchor_x, anchor_y = cam_cx, cam_cy
+                    else:
+                        # Legacy fallback: prefer live centroid, else explicit anchor
+                        if self.last_motion_centroid is not None:
+                            try:
+                                anchor_x = int(round(float(self.last_motion_centroid[0])))
+                                anchor_y = int(round(float(self.last_motion_centroid[1])))
+                            except Exception:
+                                anchor_x, anchor_y = cam_cx, cam_cy
+                        elif self.mask_anchor is not None:
+                            try:
+                                anchor_x, anchor_y = int(self.mask_anchor[0]), int(self.mask_anchor[1])
+                            except Exception:
+                                anchor_x, anchor_y = cam_cx, cam_cy
+
+                # Do NOT force the needle position to the camera centre here.
+                # The needle should be free to move independently while the
+                # mask remains anchored to the cloth via `mask_anchor`.
+
+                base_exp_x, base_exp_y = exp_x, exp_y
+                if self.mask_attached_to_cloth and self.mask_initial_expected_point is not None:
+                    base_exp_x, base_exp_y = self.mask_initial_expected_point
+
+                x_offset = int(round(anchor_x)) - int(round(base_exp_x))
+                y_offset = int(round(anchor_y)) - int(round(base_exp_y))
                 trace_y = exp_y
 
                 # Allow the pattern overlay to extend off-screen and crop the
@@ -1241,6 +1581,31 @@ class PatternMode:
                         roi[:, :, c] = (alpha_crop * pattern_crop[:, :, c] * 0.7 +
                                       (1 - alpha_crop * 0.7) * roi[:, :, c])
                     cam_frame[dst_y1:dst_y2, dst_x1:dst_x2] = roi
+
+                    # Create a small circular 'hole' at the needle/mask centre by
+                    # restoring original camera pixels from the unmodified copy
+                    # so the center sample isn't occluded by the overlay.
+                    try:
+                        hole_r = 6
+                        nx = int(round(self.needle_pos_x))
+                        ny = int(round(self.needle_pos_y))
+                        if dst_x1 <= nx < dst_x2 and dst_y1 <= ny < dst_y2:
+                            rx = nx - dst_x1
+                            ry = ny - dst_y1
+                            y1 = max(0, ry - hole_r)
+                            y2 = min(visible_h, ry + hole_r + 1)
+                            x1 = max(0, rx - hole_r)
+                            x2 = min(visible_w, rx + hole_r + 1)
+                            if y2 > y1 and x2 > x1:
+                                yy, xx = np.ogrid[y1:y2, x1:x2]
+                                circle_mask = ((yy - ry) ** 2 + (xx - rx) ** 2) <= (hole_r * hole_r)
+                                src_section = detection_frame[dst_y1 + y1:dst_y1 + y2, dst_x1 + x1:dst_x1 + x2]
+                                dst_section = cam_frame[dst_y1 + y1:dst_y1 + y2, dst_x1 + x1:dst_x1 + x2]
+                                if src_section.shape == dst_section.shape:
+                                    dst_section[circle_mask] = src_section[circle_mask]
+                                    cam_frame[dst_y1 + y1:dst_y1 + y2, dst_x1 + x1:dst_x1 + x2] = dst_section
+                    except Exception:
+                        pass
                     
                     self.run_needle_pipeline(
                         detection_frame, pattern_alpha,
@@ -1366,11 +1731,17 @@ class PatternMode:
                         color_highlight = np.zeros((patch_h, patch_w, 3), dtype=np.uint8)
                         color_highlight[:, :] = color_cfg['preview_bgr']
                         patch_roi = cam_frame[by1:by2, bx1:bx2]
-                        blended = cv2.addWeighted(
-                            patch_roi[match_pixels], 0.35, color_highlight[match_pixels], 0.65, 0
-                        )
-                        if blended is not None:
-                            patch_roi[match_pixels] = blended
+                        # When the selected color is detected at the center
+                        # show a full cyan highlight so the stitch point is
+                        # visually unambiguous. Otherwise use a subdued blend.
+                        if self.last_color_match:
+                            patch_roi[match_pixels] = color_highlight[match_pixels]
+                        else:
+                            blended = cv2.addWeighted(
+                                patch_roi[match_pixels], 0.35, color_highlight[match_pixels], 0.65, 0
+                            )
+                            if blended is not None:
+                                patch_roi[match_pixels] = blended
 
                         contour_mask = match_pixels.astype(np.uint8) * 255
                         contours, _ = cv2.findContours(contour_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -1382,6 +1753,128 @@ class PatternMode:
                             cv2.drawContours(cam_frame, [cnt], -1, marker_color, 1)
 
             cv2.circle(cam_frame, (int(self.needle_pos_x), int(self.needle_pos_y)), 5, marker_color, -1)
+
+            # Draw cloth-color tracking bounding box from full-frame detection.
+            if self.last_cloth_bbox is not None:
+                # When an initial bbox exists, freeze its size but allow the
+                # box to translate with cloth motion. Compute the initial
+                # width/height from the seed bbox and move its center by the
+                # delta between the current (smoothed) centroid and the
+                # initial centroid recorded at START.
+                if self.mask_initial_cloth_bbox is not None:
+                    ibx1, iby1, ibx2, iby2 = self.mask_initial_cloth_bbox
+                    iw = int(ibx2 - ibx1)
+                    ih = int(iby2 - iby1)
+                    # Determine movement delta using smoothed centroid when available
+                    dx = 0.0
+                    dy = 0.0
+                    if self.mask_initial_cloth_centroid is not None and self.last_motion_centroid is not None:
+                        try:
+                            dx = float(self.last_motion_centroid[0]) - float(self.mask_initial_cloth_centroid[0])
+                            dy = float(self.last_motion_centroid[1]) - float(self.mask_initial_cloth_centroid[1])
+                        except Exception:
+                            dx = 0.0; dy = 0.0
+                    # Compute new center and bbox
+                    init_cx = (ibx1 + ibx2) / 2.0
+                    init_cy = (iby1 + iby2) / 2.0
+                    cx = int(round(init_cx + dx))
+                    cy = int(round(init_cy + dy))
+                    bx1 = int(round(cx - iw // 2))
+                    by1 = int(round(cy - ih // 2))
+                    bx2 = bx1 + iw
+                    by2 = by1 + ih
+
+                    # Clamp bbox to camera frame while preserving the frozen
+                    # size when possible. If the bbox is larger than the
+                    # camera dimension, it will be clipped to the full frame.
+                    if iw >= self.camera_width:
+                        bx1 = 0
+                        bx2 = self.camera_width
+                    else:
+                        if bx1 < 0:
+                            bx1 = 0
+                            bx2 = iw
+                        if bx2 > self.camera_width:
+                            bx2 = self.camera_width
+                            bx1 = self.camera_width - iw
+
+                    if ih >= self.camera_height:
+                        by1 = 0
+                        by2 = self.camera_height
+                    else:
+                        if by1 < 0:
+                            by1 = 0
+                            by2 = ih
+                        if by2 > self.camera_height:
+                            by2 = self.camera_height
+                            by1 = self.camera_height - ih
+                else:
+                    bx1, by1, bx2, by2 = self.last_cloth_bbox
+                    # Ensure bbox is within camera frame (preserve size when possible)
+                    bw = int(bx2 - bx1)
+                    bh = int(by2 - by1)
+                    if bw <= 0:
+                        bw = 1
+                    if bh <= 0:
+                        bh = 1
+
+                    if bw >= self.camera_width:
+                        bx1 = 0
+                        bx2 = self.camera_width
+                    else:
+                        if bx1 < 0:
+                            bx1 = 0
+                            bx2 = bw
+                        if bx2 > self.camera_width:
+                            bx2 = self.camera_width
+                            bx1 = self.camera_width - bw
+
+                    if bh >= self.camera_height:
+                        by1 = 0
+                        by2 = self.camera_height
+                    else:
+                        if by1 < 0:
+                            by1 = 0
+                            by2 = bh
+                        if by2 > self.camera_height:
+                            by2 = self.camera_height
+                            by1 = self.camera_height - bh
+                cloth_cfg = self.cloth_color_profiles[self.selected_cloth_color]
+                if self.last_cloth_mask_ratio >= self.cloth_motion_min_ratio:
+                    box_color = (0, 220, 0) if self.cloth_motion_active else (0, 180, 255)
+                else:
+                    box_color = (0, 0, 255)
+
+                # Draw bbox and label on the main UI `frame` using camera offsets
+                # so the box can extend beyond the camera crop (e.g., off the
+                # bottom). Coordinates outside the image are clipped by OpenCV.
+                abs_bx1 = int(round(self.camera_x + bx1))
+                abs_by1 = int(round(self.camera_y + by1))
+                abs_bx2 = int(round(self.camera_x + bx2))
+                abs_by2 = int(round(self.camera_y + by2))
+                cv2.rectangle(frame, (abs_bx1, abs_by1), (abs_bx2, abs_by2), box_color, 2)
+
+                cloth_text = (
+                    f"CLOTH {cloth_cfg['label']}: {self.last_cloth_mask_ratio * 100:.0f}%"
+                )
+                cloth_scale = text_scale(0.46, self.width, self.height, floor=0.40, ceiling=0.54)
+                cloth_thick = text_thickness(1, self.width, self.height, min_thickness=1, max_thickness=2)
+                # Text position also in absolute coords
+                text_x = max(6 + self.camera_x, abs_bx1)
+                text_y = max(14 + self.camera_y, abs_by1 - 6)
+                draw_text(
+                    frame,
+                    cloth_text,
+                    text_x,
+                    text_y,
+                    cloth_scale,
+                    box_color,
+                    cloth_thick,
+                    font=FONT_MAIN,
+                    outline_color=(0, 0, 0),
+                    outline_extra=1,
+                )
+
             marker_scale = text_scale(0.52, self.width, self.height, floor=0.46, ceiling=0.62)
             marker_thick = text_thickness(1, self.width, self.height, min_thickness=1, max_thickness=2)
             marker_scale = fit_text_scale(marker_text, FONT_MAIN, self.camera_width - col_x1 - 6, marker_scale, marker_thick, min_scale=0.4)
@@ -2008,6 +2501,18 @@ class PatternMode:
                     self.highest_segment_reached = new_segment
                     self.current_segment = new_segment if new_segment <= 4 else 4
                     self.pattern_progress = new_progress
+                    # Auto-hide mask only when progress truly reaches 100%
+                    try:
+                        if (self.raw_progress >= 100.0 or self.pattern_progress >= 100.0) and self.mask_attached_to_cloth:
+                            self.mask_attached_to_cloth = False
+                            self.mask_anchor = None
+                            self.mask_initial_anchor = None
+                            self.mask_initial_cloth_centroid = None
+                            self.mask_initial_cloth_bbox = None
+                            self.mask_initial_expected_point = None
+                            print("📌 Mask hidden: pattern complete (100%)")
+                    except Exception:
+                        pass
                 # Keep the highest values reached
                 elif self.highest_segment_reached > 1:
                     # Stay at the highest segment reached
@@ -2149,6 +2654,33 @@ class PatternMode:
         text_y = eb['y'] + (eb['h'] + text_h) // 2
         
         self._put_text(frame, text, text_x, text_y, font_scale, self.COLORS['text_primary'], thickness, font=FONT_DISPLAY)
+
+    def draw_attach_cloth_button(self, frame):
+        """Draw a button allowing the user to attach/detach the pattern to the cloth."""
+        b = self.attach_cloth_button
+
+        # Button glow + disabled style when attached
+        pulse = 0.5 + 0.3 * abs(math.sin(self.glow_phase * 1.2))
+        if self.mask_attached_to_cloth:
+            border_color = tuple(int(c * 0.5) for c in self.COLORS['glow_cyan'])
+            fill_color = (20, 60, 20)
+        else:
+            border_color = self.COLORS['medium_blue']
+            fill_color = self.COLORS['button_hover']
+
+        self.draw_glow_rect(frame, b['x'], b['y'], b['w'], b['h'], border_color, pulse)
+
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (b['x'] + 2, b['y'] + 2), (b['x'] + b['w'] - 2, b['y'] + b['h'] - 2), fill_color, -1)
+        cv2.addWeighted(overlay, 0.9, frame, 0.1, 0, frame)
+
+        txt = "STOP" if self.mask_attached_to_cloth else "START"
+        font_scale = text_scale(0.68, self.width, self.height, floor=0.62, ceiling=0.78)
+        thick = text_thickness(2, self.width, self.height, min_thickness=1, max_thickness=2)
+        tw, th = get_text_size(txt, FONT_MAIN, font_scale, thick)[0]
+        tx = b['x'] + (b['w'] - tw) // 2
+        ty = b['y'] + (b['h'] + th) // 2
+        self._put_text(frame, txt, tx, ty, font_scale, self.COLORS['text_primary'], thick)
     
     def draw_evaluation_results(self, frame):
         """Draw evaluation results as a large centered modal window"""
@@ -2356,6 +2888,22 @@ class PatternMode:
         bb = self.back_button
         if bb['x'] <= x <= bb['x'] + bb['w'] and bb['y'] <= y <= bb['y'] + bb['h']:
             self.play_button_click_sound()
+            # Reset all progress and mask state when leaving pattern mode
+            try:
+                self.reset_progress()
+            except Exception:
+                pass
+            # Clear mask attachment and seeding state so returning later is fresh
+            try:
+                self.mask_attached_to_cloth = False
+                self.mask_anchor = None
+                self.mask_initial_anchor = None
+                self.mask_initial_cloth_centroid = None
+                self.mask_initial_cloth_bbox = None
+                self.mask_initial_expected_point = None
+                self.centerline_progress_initialized = False
+            except Exception:
+                pass
             return 'back'
         
         # Check evaluate button (only if not evaluated yet)
@@ -2405,6 +2953,61 @@ class PatternMode:
                 self.play_button_click_sound()
                 self.evaluate_pattern()
                 return None
+
+        # Attach cloth button (toggle attach/detach)
+        ab = self.attach_cloth_button
+        if ab['x'] <= x <= ab['x'] + ab['w'] and ab['y'] <= y <= ab['y'] + ab['h']:
+            self.play_button_click_sound()
+            # Toggle latch; if attaching, seed initial anchor + cloth centroid
+            self.mask_attached_to_cloth = not bool(self.mask_attached_to_cloth)
+            if self.mask_attached_to_cloth:
+                # Record initial anchor (camera centre) so the overlay appears
+                # centered on-screen at START. Record the detected cloth
+                # centroid (or bbox centre) as the reference point. Later
+                # frames translate the overlay by (current_centroid - initial_centroid)
+                # so the mask follows cloth motion but retains the initial size.
+                try:
+                    cam_cx = int(self.camera_width // 2)
+                    cam_cy = int(self.camera_height // 2)
+                except Exception:
+                    cam_cx, cam_cy = 0, 0
+                self.mask_initial_anchor = (cam_cx, cam_cy)
+                self.mask_anchor = (cam_cx, cam_cy)
+                # Save initial cloth centroid (prefer live motion centroid)
+                if self.last_motion_centroid is not None:
+                    try:
+                        mx = float(self.last_motion_centroid[0])
+                        my = float(self.last_motion_centroid[1])
+                        self.mask_initial_cloth_centroid = (mx, my)
+                    except Exception:
+                        self.mask_initial_cloth_centroid = None
+                elif self.last_cloth_bbox is not None:
+                    try:
+                        bx1, by1, bx2, by2 = self.last_cloth_bbox
+                        mx = (bx1 + bx2) / 2.0
+                        my = (by1 + by2) / 2.0
+                        self.mask_initial_cloth_centroid = (mx, my)
+                    except Exception:
+                        self.mask_initial_cloth_centroid = None
+                else:
+                    self.mask_initial_cloth_centroid = None
+                # Also persist the initial bbox so size can be referenced later
+                self.mask_initial_cloth_bbox = tuple(self.last_cloth_bbox) if self.last_cloth_bbox is not None else None
+                # Reset the initial expected point so draw step can capture
+                # the current centerline expected location without later
+                # shifting the overlay when progress advances.
+                self.mask_initial_expected_point = None
+                print("📌 START pressed: mask seeded at camera centre; will follow cloth movement")
+            else:
+                # On STOP: hide the live overlay but keep the initial seed
+                # state so restarting doesn't reset progress or the frozen
+                # bbox/size. Only clear the active anchor so the overlay
+                # disappears visually.
+                self.mask_anchor = None
+                # keep the initial expected point nil so restarting can reseed
+                self.mask_initial_expected_point = None
+                print("📌 STOP pressed: mask hidden (seed retained)")
+            return None
         
         # Check try again button (only if evaluated and failed)
         if self.is_evaluated and not self.level_completed:
