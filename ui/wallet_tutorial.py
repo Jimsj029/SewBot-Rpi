@@ -10,6 +10,7 @@ import time
 try:
     from .typography import (
         FONT_MAIN,
+        FONT_COMPACT,
         text_scale,
         text_thickness,
         get_text_size,
@@ -19,6 +20,7 @@ try:
 except ImportError:
     from typography import (
         FONT_MAIN,
+        FONT_COMPACT,
         text_scale,
         text_thickness,
         get_text_size,
@@ -69,19 +71,18 @@ FONTS = {
     'title_size': 2.5
 }
 
-# Crisp font for all wallet tutorial text – DUPLEX renders much cleaner than
-# TRIPLEX on low-resolution screens (no thin serifs to pixelate).
-UI_FONT = FONT_MAIN
+# Use a lighter face for wallet tutorial text for better readability.
+UI_FONT = FONT_COMPACT
 
 
 def _put_text(img, text, x, y, scale, color, thickness):
     """Draw text with a 1-px black outline so it reads against any background."""
-    draw_text(img, text, x, y, scale, color, thickness, font=UI_FONT)
+    draw_text(img, text, x, y, scale, color, thickness, font=UI_FONT, outline_extra=1)
 
 # Per-step instructions shown in "Your Turn" practice screen
 STEP_INSTRUCTIONS = {
-    1:  ["Take a 12x24 cm piece of cloth, fold it in half,",
-         "and stitch along the open edge to close it."],
+    1:  ["Fold a 12x24 cm cloth in half,",
+         "then stitch the open side closed."],
     2:  ["Turn the stitched cloth inside out so that",
          "the seam is positioned on the inside."],
     3:  ["Reinforce the seam by stitching again along the same line."],
@@ -645,9 +646,11 @@ class WalletTutorialPlayer:
         """Draw actual video frame or placeholder"""
         # Video area - lowered to leave room for step instructions above
         video_margin = 50
-        video_x = video_margin
         video_y = 145  # Extra space above video for step instruction text
-        video_w = self.width - 2 * video_margin
+        # Keep the frame narrower so it visually matches the centered
+        # instruction text block above it.
+        video_w = max(480, min(self.width - 2 * video_margin, int(self.width * 0.58)))
+        video_x = (self.width - video_w) // 2
         video_h = self.height - video_y - video_margin - 100
         
         # Dark background for video
@@ -836,11 +839,16 @@ class WalletTutorialPlayer:
             return
 
         lines = STEP_INSTRUCTIONS.get(self.current_step, [])
+        if not lines:
+            return
 
-        overlay_font = UI_FONT
+        overlay_font = FONT_COMPACT
         inst_scale = text_scale(0.7, self.width, self.height, floor=0.64, ceiling=0.82)
-        inst_thick = text_thickness(2, self.width, self.height, min_thickness=1, max_thickness=2)
+        inst_thick = text_thickness(1, self.width, self.height, min_thickness=1, max_thickness=2)
         line_spacing = 26
+        # Keep instruction width narrower than the full video width so the
+        # text block matches the centered visual focus area.
+        instruction_w = max(420, min(video_w - 140, int(video_w * 0.64)))
 
         (_, inst_h), _ = get_text_size("Ag", overlay_font, inst_scale, inst_thick)
 
@@ -853,7 +861,7 @@ class WalletTutorialPlayer:
         center_x = video_x + video_w // 2
 
         for line in lines:
-            fitted_scale = fit_text_scale(line, overlay_font, video_w - 50, inst_scale, inst_thick, min_scale=0.58)
+            fitted_scale = fit_text_scale(line, overlay_font, instruction_w, inst_scale, inst_thick, min_scale=0.58)
             (lw, _), _ = get_text_size(line, overlay_font, fitted_scale, inst_thick)
             lx = center_x - lw // 2
             draw_text(
@@ -862,11 +870,11 @@ class WalletTutorialPlayer:
                 lx,
                 cur_y,
                 fitted_scale,
-                COLORS['text_secondary'],
-                max(1, inst_thick + 1),
+                COLORS['text_primary'],
+                max(1, inst_thick),
                 font=overlay_font,
                 outline_color=(0, 0, 0),
-                outline_extra=2,
+                outline_extra=1,
             )
             cur_y += line_spacing
 
@@ -897,15 +905,27 @@ class WalletTutorialPlayer:
 
         # ── Step instructions ─────────────────────────────────────────────
         inst_scale = text_scale(0.7, self.width, self.height, floor=0.62, ceiling=0.82)
-        inst_thick = text_thickness(2, self.width, self.height, min_thickness=1, max_thickness=2)
+        inst_thick = text_thickness(1, self.width, self.height, min_thickness=1, max_thickness=2)
         lines = STEP_INSTRUCTIONS.get(self.current_step, ["Practice what you learned in the video."])
+        instruction_w = max(360, min(self.width - 220, int(self.width * 0.58)))
         line_spacing = 22
         cur_y = text_y + text_h + 26
         for line in lines:
-            fitted_scale = fit_text_scale(line, UI_FONT, self.width - 120, inst_scale, inst_thick, min_scale=0.58)
-            (lw, lh), _ = get_text_size(line, UI_FONT, fitted_scale, inst_thick)
+            fitted_scale = fit_text_scale(line, FONT_COMPACT, instruction_w, inst_scale, inst_thick, min_scale=0.58)
+            (lw, lh), _ = get_text_size(line, FONT_COMPACT, fitted_scale, inst_thick)
             lx = (self.width - lw) // 2
-            _put_text(img, line, lx, cur_y, fitted_scale, COLORS['text_secondary'], inst_thick)
+            draw_text(
+                img,
+                line,
+                lx,
+                cur_y,
+                fitted_scale,
+                COLORS['text_primary'],
+                max(1, inst_thick),
+                font=FONT_COMPACT,
+                outline_color=(0, 0, 0),
+                outline_extra=1,
+            )
             cur_y += line_spacing
         last_inst_y = cur_y
 

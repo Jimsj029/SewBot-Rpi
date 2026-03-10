@@ -14,8 +14,8 @@ class ModeSelection:
         
         # Button properties
         self.button_width = 280
-        self.button_height = 120
-        self.button_spacing = 60
+        self.button_height = 200
+        self.button_spacing = 80
         
         # Calculate button positions (side by side)
         total_width = self.button_width * 2 + self.button_spacing
