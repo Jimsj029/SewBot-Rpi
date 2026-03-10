@@ -45,7 +45,7 @@ class PatternMode:
 
         # Left panel — Thread Color
         self.color_panel_x      = 8
-        self.color_panel_y      = 115
+        self.color_panel_y      = 215
         self.color_panel_width  = 185
         self.color_panel_height = 115
 
@@ -58,7 +58,7 @@ class PatternMode:
 
         # Right panel — Stats
         self.score_panel_x      = 800
-        self.score_panel_y      = 115
+        self.score_panel_y      = 145
         self.score_panel_width  = 210
         self.score_panel_height = 310
 
@@ -2086,7 +2086,7 @@ class PatternMode:
 
         # ── Legend ────────────────────────────────────────────────────────────
         leg_y = bar_y + bar_height + 30
-        self._put_text(frame, "LEGEND", content_x, leg_y, label_scale, self.COLORS['text_secondary'], label_thick)
+        self._put_text(frame, "", content_x, leg_y, label_scale, self.COLORS['text_secondary'], label_thick)
         legend_items = [
             ("Completed", self.segment_colors['completed']),
             ("To Sew",    self.segment_colors['current']),
@@ -2107,17 +2107,6 @@ class PatternMode:
                  (x + w - 15, leg_y + 18 + len(legend_items) * 22 + 4),
                  self.COLORS['medium_blue'], 1)
 
-        # ── Detected color indicator ──────────────────────────────────────────
-        det_y = leg_y + 18 + len(legend_items) * 22 + 22
-        self._put_text(frame, "DETECTED COLOR", content_x, det_y, label_scale, self.COLORS['text_secondary'], label_thick)
-        det_cfg = self.color_profiles[self.selected_detection_color]
-        det_val_y = det_y + 20
-        cv2.circle(frame, (content_x + 8, det_val_y - 6), 7, det_cfg['preview_bgr'], -1)
-        cv2.circle(frame, (content_x + 8, det_val_y - 6), 7, self.COLORS['medium_blue'], 1)
-        val_scale = text_scale(0.58, self.width, self.height, floor=0.52, ceiling=0.66)
-        val_thick = text_thickness(2, self.width, self.height, min_thickness=1, max_thickness=2)
-        self._put_text(frame, det_cfg['label'], content_x + 22, det_val_y,
-                       val_scale, self.COLORS['text_primary'], val_thick)
     
     def draw_evaluate_button(self, frame):
         """Draw the evaluate button below stats panel"""
