@@ -32,13 +32,13 @@ except ImportError:
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from music_manager import get_music_manager
 
-# Try to import YOLO for needle centring detection
+# Direct ONNX Runtime for needle centring detection (no ultralytics overhead)
 try:
-    from ultralytics import YOLO as _YOLO
-    YOLO_AVAILABLE = True
+    import onnxruntime as ort
+    ORT_AVAILABLE = True
 except ImportError:
-    YOLO_AVAILABLE = False
-    print("YOLO not available – needle centring detection disabled")
+    ORT_AVAILABLE = False
+    print("onnxruntime not available – needle centring detection disabled")
 
 # Try to import pygame for audio playback
 try:
@@ -1049,16 +1049,23 @@ class WalletTutorialPlayer:
         if roi_crop.size == 0:
             return False
         try:
-            results = self.needle_model(
-                roi_crop, conf=self.NEEDLE_CONF_THRESHOLD, verbose=False)
-            if results and results[0].boxes is not None and len(results[0].boxes) > 0:
-                roi_w = x2 - x1
-                boxes = results[0].boxes
-                confs = boxes.conf.cpu().numpy()
-                best  = int(np.argmax(confs))
-                xyxy  = boxes[best].xyxy[0].cpu().numpy()
-                cx    = (xyxy[0] + xyxy[2]) / 2.0
-                return abs(cx - roi_w / 2.0) <= self.NEEDLE_CENTER_TOLERANCE
+            imgsz = self._needle_imgsz
+            roi_h_c, roi_w_c = roi_crop.shape[:2]
+            inp = cv2.resize(roi_crop, (imgsz, imgsz))
+            inp = cv2.cvtColor(inp, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+            inp = np.transpose(inp, (2, 0, 1))[np.newaxis]  # [1, 3, H, W]
+            preds = self.needle_model.run(None, {self.needle_input_name: inp})[0]
+            # YOLOv8 ONNX output: [1, 4+nc, anchors] → transpose to [anchors, 4+nc]
+            preds = preds[0].T  # [anchors, 5] for a 1-class model
+            scores = preds[:, 4]
+            mask = scores >= self.NEEDLE_CONF_THRESHOLD
+            if not np.any(mask):
+                return False
+            filtered = preds[mask]
+            best = int(np.argmax(filtered[:, 4]))
+            cx_320 = float(filtered[best, 0])
+            cx_roi = cx_320 / imgsz * roi_w_c
+            return abs(cx_roi - roi_w_c / 2.0) <= self.NEEDLE_CENTER_TOLERANCE
         except Exception as e:
             print(f"Needle check error: {e}")
         return False

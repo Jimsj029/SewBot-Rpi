@@ -3,7 +3,7 @@ import numpy as np
 import math
 import gc
 import os
-from ultralytics import YOLO
+import onnxruntime as ort
 from music_manager import get_music_manager
 from ui.typography import (
     FONT_MAIN,
@@ -299,6 +299,8 @@ class PatternMode:
         # Use helper so we can lazy-load/unload at runtime when the
         # needle detection toggle is used.
         self.needle_model = None
+        self.needle_input_name = None
+        self.needle_output_name = None
         try:
             if self.needle_detection_enabled:
                 self.load_needle_model(models_dir=models_dir)
@@ -335,16 +337,23 @@ class PatternMode:
             needle_model_path = os.path.join(models_dir, 'needle.onnx')
             if os.path.exists(needle_model_path):
                 print(f"Loading needle detection model: {needle_model_path}")
-                self.needle_model = YOLO(needle_model_path, task='detect')
-                print(f"✓ Needle detection model loaded successfully!")
-                if hasattr(self.needle_model, 'names'):
-                    for idx, name in self.needle_model.names.items():
-                        print(f"    Class {idx}: {name}")
-                # Lightweight smoke test
-                test_img = np.zeros((64, 64, 3), dtype=np.uint8)
+                sess_opts = ort.SessionOptions()
+                sess_opts.inter_op_num_threads = 2
+                sess_opts.intra_op_num_threads = 2
+                self.needle_model = ort.InferenceSession(
+                    needle_model_path,
+                    sess_options=sess_opts,
+                    providers=['CPUExecutionProvider'])
+                self.needle_input_name  = self.needle_model.get_inputs()[0].name
+                self.needle_output_name = self.needle_model.get_outputs()[0].name
+                print(f"✓ Needle detection model loaded (ONNX Runtime direct)")
+                print(f"    Input:  {self.needle_input_name}  {self.needle_model.get_inputs()[0].shape}")
+                print(f"    Output: {self.needle_output_name} {self.needle_model.get_outputs()[0].shape}")
+                # Lightweight warm-up run
+                _warmup = np.zeros((1, 3, self.needle_model_imgsz, self.needle_model_imgsz), dtype=np.float32)
                 try:
-                    self.needle_model(test_img, conf=self.confidence_threshold, verbose=False)
-                    print("  ✓ Needle model test successful!")
+                    self.needle_model.run(None, {self.needle_input_name: _warmup})
+                    print("  ✓ Needle model warm-up successful!")
                 except Exception:
                     pass
             else:
@@ -1204,15 +1213,23 @@ class PatternMode:
         if roi_crop.size == 0:
             return False
         try:
-            results = self.needle_model(roi_crop, conf=self.NEEDLE_CONF_THRESHOLD, verbose=False)
-            if results and results[0].boxes is not None and len(results[0].boxes) > 0:
-                roi_w = x2 - x1
-                boxes = results[0].boxes
-                confs = boxes.conf.cpu().numpy()
-                best  = int(np.argmax(confs))
-                xyxy  = boxes[best].xyxy[0].cpu().numpy()
-                cx    = (xyxy[0] + xyxy[2]) / 2.0
-                return abs(cx - roi_w / 2.0) <= self.NEEDLE_CENTER_TOLERANCE
+            imgsz = self.needle_model_imgsz
+            roi_h_c, roi_w_c = roi_crop.shape[:2]
+            inp = cv2.resize(roi_crop, (imgsz, imgsz))
+            inp = cv2.cvtColor(inp, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+            inp = np.transpose(inp, (2, 0, 1))[np.newaxis]  # [1, 3, H, W]
+            preds = self.needle_model.run(None, {self.needle_input_name: inp})[0]
+            # YOLOv8 ONNX output: [1, 4+nc, anchors] → transpose to [anchors, 4+nc]
+            preds = preds[0].T  # [anchors, 5] for a 1-class model
+            scores = preds[:, 4]
+            mask = scores >= self.NEEDLE_CONF_THRESHOLD
+            if not np.any(mask):
+                return False
+            filtered = preds[mask]
+            best = int(np.argmax(filtered[:, 4]))
+            cx_320 = float(filtered[best, 0])
+            cx_roi = cx_320 / imgsz * roi_w_c
+            return abs(cx_roi - roi_w_c / 2.0) <= self.NEEDLE_CENTER_TOLERANCE
         except Exception as e:
             print(f"Needle column check error: {e}")
         return False
