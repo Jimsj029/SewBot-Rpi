@@ -88,6 +88,10 @@ class SewBotApp:
         self.camera_initializing = False
         self.camera_detected = False
         self.camera_status_message = "Checking camera..."
+        self.camera_lock = threading.Lock()
+        self.latest_camera_frame = None
+        self.camera_thread = None
+        self.camera_thread_running = False
         
         # Button positions
         self.start_button = {'x': (self.width - 300) // 2, 'y': self.height // 2 + 50, 'w': 300, 'h': 80}
@@ -432,14 +436,20 @@ class SewBotApp:
                     # Optimize camera settings for performance
                     # Set buffer size to 1 to reduce latency
                     self.camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                    self.camera.set(cv2.CAP_PROP_FPS, 60)
+                    self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                    self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
                     
                     # Test if we can actually read a frame
                     ret, frame = self.camera.read()
                     if ret:
+                        with self.camera_lock:
+                            self.latest_camera_frame = frame.copy()
                         actual_w = int(self.camera.get(cv2.CAP_PROP_FRAME_WIDTH))
                         actual_h = int(self.camera.get(cv2.CAP_PROP_FRAME_HEIGHT))
                         print(f"  Camera opened successfully with {backend_name}!")
                         print(f"  Resolution: {actual_w}x{actual_h}")
+                        self.start_camera_thread()
                         self.camera_initializing = False
                         return
                     else:
@@ -449,11 +459,38 @@ class SewBotApp:
             print("  Error: Could not open camera with any backend")
             self.camera = None
             self.camera_initializing = False
+
+    def _camera_capture_loop(self):
+        while self.camera_thread_running and self.camera is not None and self.camera.isOpened():
+            ret, frame = self.camera.read()
+            if not ret:
+                continue
+            with self.camera_lock:
+                self.latest_camera_frame = frame
+
+    def start_camera_thread(self):
+        if self.camera is None or self.camera_thread_running:
+            return
+        self.camera_thread_running = True
+        self.camera_thread = threading.Thread(target=self._camera_capture_loop, daemon=True)
+        self.camera_thread.start()
+
+    def get_latest_camera_frame(self):
+        with self.camera_lock:
+            if self.latest_camera_frame is None:
+                return None
+            return self.latest_camera_frame.copy()
     
     def release_camera(self):
+        self.camera_thread_running = False
+        if self.camera_thread is not None:
+            self.camera_thread.join(timeout=1.0)
+            self.camera_thread = None
         if self.camera is not None:
             self.camera.release()
             self.camera = None
+        with self.camera_lock:
+            self.latest_camera_frame = None
             print("Camera released")
     
     def draw_glow_rect(self, img, x, y, w, h, color, glow_intensity):
@@ -678,10 +715,7 @@ class SewBotApp:
         # Get camera frame if in your_turn mode
         camera_frame = None
         if self.wallet_tutorial_player.your_turn_mode:
-            if self.camera is not None and self.camera.isOpened():
-                ret, camera_frame = self.camera.read()
-                if not ret:
-                    camera_frame = None
+            camera_frame = self.get_latest_camera_frame()
         
         # Draw wallet tutorial player (pass camera frame)
         self.wallet_tutorial_player.draw(frame, camera_frame)
@@ -817,11 +851,7 @@ class SewBotApp:
                     self.draw_level_selection(frame)
                 elif self.state == 'pattern':
                     # Get camera frame
-                    camera_frame = None
-                    if self.camera is not None and self.camera.isOpened():
-                        ret, camera_frame = self.camera.read()
-                        if not ret:
-                            camera_frame = None
+                    camera_frame = self.get_latest_camera_frame()
                     
                     # Draw pattern mode
                     self.pattern_mode.draw(frame, camera_frame, self.grid_background)

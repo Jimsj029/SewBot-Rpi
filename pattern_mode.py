@@ -181,13 +181,20 @@ class PatternMode:
         # Lucas-Kanade sparse optical flow for cloth tracking
         self.of_prev_gray = None        # Previous greyscale frame
         self.of_points = None           # Tracked feature points (Nx1x2 float32)
-        self.of_roi_half = 80           # Half-side of cloth ROI around needle (px)
+        self.of_roi_half = 64           # Smaller ROI cuts per-frame LK cost on RPi
         self.of_min_points = 8          # Re-detect when fewer points survive
+        self.of_max_corners = 40        # Fewer corners keeps LK tracking lighter
+        self.of_max_level = 2           # Shallower pyramid is cheaper than level 3
+        self.cloth_flow_interval = 2    # Update cloth flow every 2 frames
+        self._cloth_flow_counter = 0
         # Accumulated overlay offset driven entirely by cloth optical flow
         self.pattern_offset_x = 0.0
         self.pattern_offset_y = 0.0
         self.pattern_offset_seeded = False
         self.needle_on_pattern = True  # Whether the needle is currently on a pattern pixel
+
+        # Cache processed blueprint overlays so we do not hit disk every frame.
+        self._blueprint_cache = {}
 
         # Follow-line validation (on/off pattern while sewing)
         self.pattern_alpha_threshold = 0.5
@@ -383,6 +390,11 @@ class PatternMode:
         if level != self.current_level_tracking:
             self.reset_progress()
             self.current_level_tracking = level
+
+        cache_key = (level, self.uniform_width, self.uniform_height)
+        cached = self._blueprint_cache.get(cache_key)
+        if cached is not None:
+            return cached
         
         mask_path = os.path.join(self.blueprint_folder, f'level{level}_mask.png')
         if not os.path.exists(mask_path):
@@ -417,8 +429,9 @@ class PatternMode:
         # Convert mask to white overlay (pattern lines)
         overlay = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
         alpha = mask / 255.0
-        
-        return overlay, alpha
+
+        self._blueprint_cache[cache_key] = (overlay, alpha)
+        return self._blueprint_cache[cache_key]
     
     def reset_progress(self):
         """Reset progress tracking for a new level"""
@@ -446,6 +459,7 @@ class PatternMode:
         self.motion_vector_y = 0.0
         self.of_prev_gray = None
         self.of_points = None
+        self._cloth_flow_counter = 0
         self.pattern_offset_x = 0.0
         self.pattern_offset_y = 0.0
         self.pattern_offset_seeded = False
@@ -525,7 +539,7 @@ class PatternMode:
             mask = np.zeros_like(gray)
             mask[ry1:ry2, rx1:rx2] = 255
             self.of_points = cv2.goodFeaturesToTrack(
-                gray, maxCorners=60, qualityLevel=0.02, minDistance=6, mask=mask)
+                gray, maxCorners=self.of_max_corners, qualityLevel=0.02, minDistance=6, mask=mask)
             self.of_prev_gray = gray
             self.cloth_motion_active = False
             return
@@ -535,7 +549,7 @@ class PatternMode:
             mask = np.zeros_like(gray)
             mask[ry1:ry2, rx1:rx2] = 255
             self.of_points = cv2.goodFeaturesToTrack(
-                gray, maxCorners=60, qualityLevel=0.02, minDistance=6, mask=mask)
+                gray, maxCorners=self.of_max_corners, qualityLevel=0.02, minDistance=6, mask=mask)
             self.of_prev_gray = gray
             self.cloth_motion_active = False
             return
@@ -545,7 +559,7 @@ class PatternMode:
             self.of_prev_gray, gray,
             self.of_points, None,
             winSize=(15, 15),
-            maxLevel=3,
+            maxLevel=self.of_max_level,
             criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03),
         )
 
@@ -1264,7 +1278,9 @@ class PatternMode:
             detection_frame = cam_frame.copy()
             hsv_detection_frame = cv2.cvtColor(detection_frame, cv2.COLOR_BGR2HSV)
             self.stitch_frame_index += 1
-            self._update_cloth_optical_flow(detection_frame)
+            self._cloth_flow_counter = (self._cloth_flow_counter + 1) % self.cloth_flow_interval
+            if self._cloth_flow_counter == 0:
+                self._update_cloth_optical_flow(detection_frame)
             follow_check_ready = False
             follow_on_corridor = True
             follow_order_valid = True
