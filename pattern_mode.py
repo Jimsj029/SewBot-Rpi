@@ -1155,6 +1155,9 @@ class PatternMode:
         """Crop the column ROI and run needle.onnx to check needle centring.
         Returns True when the highest-confidence detection centre-X is within
         NEEDLE_CENTER_TOLERANCE pixels of the column's horizontal midpoint."""
+        # Skip heavy model check when needle detection is disabled to save CPU/GPU.
+        if not getattr(self, 'needle_detection_enabled', True):
+            return False
         if self.needle_model is None:
             return False
         h, w = cam_frame.shape[:2]
