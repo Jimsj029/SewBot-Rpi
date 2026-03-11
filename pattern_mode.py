@@ -1428,6 +1428,104 @@ class PatternMode:
             self.stitch_frame_index += 1
             self._update_cloth_motion_state(detection_frame)
 
+            # Draw the detected cloth bounding box directly on the camera
+            # feed. If an initial bbox was recorded at START, preserve that
+            # size and translate it by the centroid delta so the box remains
+            # frozen in size but follows cloth movement.
+            try:
+                if self.last_cloth_bbox is not None:
+                    if self.mask_initial_cloth_bbox is not None:
+                        ibx1, iby1, ibx2, iby2 = self.mask_initial_cloth_bbox
+                        iw = int(ibx2 - ibx1)
+                        ih = int(iby2 - iby1)
+                        dx = 0.0
+                        dy = 0.0
+                        if self.mask_initial_cloth_centroid is not None and self.last_motion_centroid is not None:
+                            try:
+                                dx = float(self.last_motion_centroid[0]) - float(self.mask_initial_cloth_centroid[0])
+                                dy = float(self.last_motion_centroid[1]) - float(self.mask_initial_cloth_centroid[1])
+                            except Exception:
+                                dx = 0.0; dy = 0.0
+                        init_cx = (ibx1 + ibx2) / 2.0
+                        init_cy = (iby1 + iby2) / 2.0
+                        cx = int(round(init_cx + dx))
+                        cy = int(round(init_cy + dy))
+                        bx1 = int(round(cx - iw // 2))
+                        by1 = int(round(cy - ih // 2))
+                        bx2 = bx1 + iw
+                        by2 = by1 + ih
+
+                        # Clamp while preserving frozen size when possible
+                        if iw >= self.camera_width:
+                            bx1 = 0
+                            bx2 = self.camera_width
+                        else:
+                            if bx1 < 0:
+                                bx1 = 0
+                                bx2 = iw
+                            if bx2 > self.camera_width:
+                                bx2 = self.camera_width
+                                bx1 = self.camera_width - iw
+
+                        if ih >= self.camera_height:
+                            by1 = 0
+                            by2 = self.camera_height
+                        else:
+                            if by1 < 0:
+                                by1 = 0
+                                by2 = ih
+                            if by2 > self.camera_height:
+                                by2 = self.camera_height
+                                by1 = self.camera_height - ih
+                    else:
+                        bx1, by1, bx2, by2 = self.last_cloth_bbox
+                        bw = int(bx2 - bx1)
+                        bh = int(by2 - by1)
+                        if bw <= 0:
+                            bw = 1
+                        if bh <= 0:
+                            bh = 1
+
+                        if bw >= self.camera_width:
+                            bx1 = 0
+                            bx2 = self.camera_width
+                        else:
+                            if bx1 < 0:
+                                bx1 = 0
+                                bx2 = bw
+                            if bx2 > self.camera_width:
+                                bx2 = self.camera_width
+                                bx1 = self.camera_width - bw
+
+                        if bh >= self.camera_height:
+                            by1 = 0
+                            by2 = self.camera_height
+                        else:
+                            if by1 < 0:
+                                by1 = 0
+                                by2 = bh
+                            if by2 > self.camera_height:
+                                by2 = self.camera_height
+                                by1 = self.camera_height - bh
+
+                    cloth_cfg = self.cloth_color_profiles.get(self.selected_cloth_color, None)
+                    if self.last_cloth_mask_ratio >= self.cloth_motion_min_ratio:
+                        box_color = (0, 220, 0) if self.cloth_motion_active else (0, 180, 255)
+                    else:
+                        box_color = (0, 0, 255)
+
+                    if bx2 > bx1 and by2 > by1:
+                        cv2.rectangle(cam_frame, (int(bx1), int(by1)), (int(bx2), int(by2)), box_color, 2)
+                        try:
+                            label = f"{cloth_cfg['label']}: {self.last_cloth_mask_ratio * 100:.0f}%" if cloth_cfg is not None else f"CLOTH: {self.last_cloth_mask_ratio * 100:.0f}%"
+                            lbl_scale = text_scale(0.42, self.width, self.height, floor=0.36, ceiling=0.5)
+                            lbl_thick = text_thickness(1, self.width, self.height, min_thickness=1, max_thickness=2)
+                            draw_text(cam_frame, label, int(bx1) + 6, max(int(by1) + 14, 14), lbl_scale, box_color, lbl_thick, font=FONT_MAIN, outline_color=(0, 0, 0), outline_extra=1)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
             # For the needle ROI detection we restore a small hole so the
             # detector sees the raw camera pixels. Also compute follow state
             # variables only after cloth update.
