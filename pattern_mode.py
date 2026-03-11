@@ -137,8 +137,6 @@ class PatternMode:
         self._color_overlay_counter = 0
         self._cloth_outline_counter = 0
         self.cached_cloth_contour = None
-        self.low_fps_lockout = False
-        self.low_fps_value = 0.0
         
         # Try again button (centered in modal) - will be calculated dynamically
         self.try_again_button = {'x': 0, 'y': 0, 'w': 200, 'h': 60}
@@ -1205,25 +1203,6 @@ class PatternMode:
         # Use grid background
         frame[:] = grid_background
 
-        if self.low_fps_lockout:
-            self.draw_back_button(frame)
-            self.draw_camera_feed(frame, camera_frame)
-            overlay = frame.copy()
-            box_y = max(90, self.camera_y + 16)
-            box_h = 118
-            cv2.rectangle(
-                overlay,
-                (self.camera_x + 8, box_y),
-                (self.camera_x + self.camera_width - 8, box_y + box_h),
-                (0, 0, 170),
-                -1,
-            )
-            cv2.addWeighted(overlay, 0.78, frame, 0.22, 0, frame)
-            self._put_text(frame, "UNSAFE PERFORMANCE DETECTED", self.camera_x + 24, box_y + 34, 0.9, (255, 255, 255), 2)
-            self._put_text(frame, f"UI FPS TOO LOW: {self.low_fps_value:.1f}", self.camera_x + 24, box_y + 66, 0.72, (255, 220, 120), 2)
-            self._put_text(frame, "STOP SEWING. Guidance paused until performance recovers.", self.camera_x + 24, box_y + 96, 0.62, (255, 255, 255), 1)
-            return
-        
         # Increment glow phase for animations
         self.glow_phase += 0.05
         
