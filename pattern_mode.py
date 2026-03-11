@@ -3,6 +3,7 @@ import numpy as np
 import math
 import gc
 import os
+import threading
 import onnxruntime as ort
 from music_manager import get_music_manager
 from ui.typography import (
@@ -315,6 +316,19 @@ class PatternMode:
         self.needle_model = None
         self.needle_input_name = None
         self.needle_output_name = None
+
+        # ── Background inference thread ───────────────────────────────────────
+        # ONNX takes ~120–180 ms on RPi4.  Running it on the render thread caps
+        # the whole UI to ~5 FPS even at imgsz=160.  Instead, a dedicated daemon
+        # thread runs inference asynchronously; the render loop just reads the
+        # most-recent result without blocking.
+        self._infer_lock      = threading.Lock()   # guards _infer_pending_frame
+        self._infer_event     = threading.Event()  # signal: new frame ready
+        self._infer_stop      = threading.Event()  # signal: shut thread down
+        self._infer_pending_frame = None           # latest frame copy queued for inference
+        self._infer_thread    = None               # the daemon thread
+        # ─────────────────────────────────────────────────────────────────────
+
         try:
             if self.needle_detection_enabled:
                 self.load_needle_model(models_dir=models_dir)
@@ -370,6 +384,9 @@ class PatternMode:
                     print("  ✓ Needle model warm-up successful!")
                 except Exception:
                     pass
+                # Start the background inference thread now that the model is ready.
+                self._start_inference_thread()
+                print("  ✓ Background needle inference thread started")
             else:
                 print(f"⚠ Needle model not found: {needle_model_path}")
                 self.needle_model = None
@@ -379,6 +396,8 @@ class PatternMode:
 
     def unload_needle_model(self):
         """Unload the needle model to free resources."""
+        # Stop the inference thread first so it doesn't hold a reference.
+        self._stop_inference_thread()
         try:
             if getattr(self, 'needle_model', None) is not None:
                 print("Unloading needle detection model to save resources...")
@@ -390,7 +409,73 @@ class PatternMode:
                 gc.collect()
         except Exception:
             pass
-    
+
+    # ── Background inference thread ───────────────────────────────────────────
+
+    def _start_inference_thread(self):
+        """Start the background needle-check inference thread."""
+        if self._infer_thread is not None and self._infer_thread.is_alive():
+            return
+        self._infer_stop.clear()
+        self._infer_event.clear()
+        self._infer_thread = threading.Thread(
+            target=self._inference_loop, daemon=True, name="needle-infer")
+        self._infer_thread.start()
+
+    def _stop_inference_thread(self):
+        """Signal and join the background inference thread."""
+        if self._infer_thread is None:
+            return
+        self._infer_stop.set()
+        self._infer_event.set()   # unblock the waiting thread
+        self._infer_thread.join(timeout=2.0)
+        self._infer_thread = None
+
+    def _inference_loop(self):
+        """Worker: wait for a frame, run _run_needle_check, store result.
+
+        This runs entirely off the render thread, keeping the UI loop
+        unblocked while ONNX inference executes (~120–180 ms on RPi4).
+        """
+        while not self._infer_stop.is_set():
+            # Block until the render loop queues a new frame (or stop signal).
+            signalled = self._infer_event.wait(timeout=0.5)
+            if not signalled:
+                continue
+            self._infer_event.clear()
+            if self._infer_stop.is_set():
+                break
+
+            # Grab the latest pending frame (render loop may have updated it).
+            with self._infer_lock:
+                frame = self._infer_pending_frame
+                self._infer_pending_frame = None
+
+            if frame is None:
+                continue
+
+            # Run the (slow) ONNX needle check.
+            result = self._run_needle_check(frame)
+
+            # Write result back — needle_confirmed is read by the render loop.
+            self.needle_confirmed = result
+
+    def _submit_needle_check(self, cam_frame):
+        """Queue a frame for async needle inference and return immediately.
+
+        Should be called from the render loop instead of _run_needle_check.
+        The result is available in self.needle_confirmed on the next frame.
+        """
+        if self.needle_model is None:
+            return
+        # Make a lightweight copy so the render loop can keep mutating cam_frame.
+        frame_copy = cam_frame.copy()
+        with self._infer_lock:
+            self._infer_pending_frame = frame_copy
+        self._infer_event.set()
+
+    # ── End background inference thread ──────────────────────────────────────
+
     def load_blueprint(self, level):
         """Load binary mask for the pattern"""
         # Reset progress if level changed
@@ -1502,7 +1587,9 @@ class PatternMode:
                 self._needle_check_counter += 1
                 if self._needle_check_counter >= self.NEEDLE_CHECK_INTERVAL:
                     self._needle_check_counter = 0
-                    self.needle_confirmed = self._run_needle_check(cam_frame)
+                    # Submit to background thread — returns immediately.
+                    # needle_confirmed is updated by _inference_loop asynchronously.
+                    self._submit_needle_check(cam_frame)
                 col_x1    = max(0, self.ROI_CENTER_X - self.ROI_COL_WIDTH // 2)
                 col_x2    = min(self.camera_width, self.ROI_CENTER_X + self.ROI_COL_WIDTH // 2)
                 glow_a    = 0.5 + 0.5 * abs(math.sin(self.glow_phase))
