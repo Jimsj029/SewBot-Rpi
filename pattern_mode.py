@@ -1858,7 +1858,7 @@ class PatternMode:
                             cv2.drawContours(cam_frame, [cnt], -1, marker_color, 1)
 
             if self.needle_detection_enabled:
-                cv2.circle(cam_frame, (int(self.needle_pos_x), int(self.needle_pos_y)), 5, marker_color, -1)
+                cv2.circle(cam_frame, (int(self.needle_pos_x), int(self.needle_pos_y)), 5, (0, 0, 255), -1)
 
             # Draw cloth-color tracking bounding box from full-frame detection.
             if self.last_cloth_bbox is not None:
