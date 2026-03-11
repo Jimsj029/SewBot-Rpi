@@ -299,6 +299,8 @@ class PatternMode:
         # Detection settings
         self.confidence_threshold = 0.3  # Lowered for INT8 model (produces lower confidence scores)
         self.iou_threshold = 0.6  # Intersection over Union threshold
+        # Toggle to enable/disable the needle (ONNX) detection pipeline
+        self.needle_detection_enabled = True
         
         # Cloth colour selector
         self.selected_cloth_color = 'red'
@@ -1708,7 +1710,7 @@ class PatternMode:
                     self.run_needle_pipeline(
                         detection_frame, pattern_alpha,
                         x_offset, y_offset, actual_w, actual_h,
-                        run_detection=True,
+                        run_detection=self.needle_detection_enabled,
                         hsv_frame=hsv_detection_frame,
                         expected_trace_y=trace_y,
                         corridor_mask=corridor_mask,
@@ -1752,33 +1754,38 @@ class PatternMode:
                     follow_check_ready = True
 
             # ── Column ROI overlay (wallet-style, needle centring) ────────────
-            self._needle_check_counter += 1
-            if self._needle_check_counter >= self.NEEDLE_CHECK_INTERVAL:
-                self._needle_check_counter = 0
-                self.needle_confirmed = self._run_needle_check(cam_frame)
-            col_x1    = max(0, self.ROI_CENTER_X - self.ROI_COL_WIDTH // 2)
-            col_x2    = min(self.camera_width, self.ROI_CENTER_X + self.ROI_COL_WIDTH // 2)
-            glow_a    = 0.5 + 0.5 * abs(math.sin(self.glow_phase))
-            col_color = tuple(int(c * glow_a) for c in self.ROI_COL_COLOR)
-            cv2.rectangle(cam_frame, (col_x1, 0), (col_x2, self.camera_height), col_color, 2)
-            if not self.needle_confirmed:
-                warn_h  = 44
-                warn_y  = 8
-                _overlay = cam_frame.copy()
-                cv2.rectangle(_overlay, (4, warn_y),
-                              (self.camera_width - 4, warn_y + warn_h),
-                              (0, 60, 180), -1)
-                cv2.addWeighted(_overlay, 0.78, cam_frame, 0.22, 0, cam_frame)
-                warn_txt = "!  SEWING NEEDLE NOT CENTRED"
-                warn_scale, warn_thick = 0.62, 2
-                (ww, wh), _ = cv2.getTextSize(warn_txt, cv2.FONT_HERSHEY_DUPLEX,
-                                               warn_scale, warn_thick)
-                wx = (self.camera_width - ww) // 2
-                wy = warn_y + (warn_h + wh) // 2
-                cv2.putText(cam_frame, warn_txt, (wx + 1, wy + 1), cv2.FONT_HERSHEY_DUPLEX,
-                            warn_scale, (0, 0, 0), warn_thick + 2, cv2.LINE_AA)
-                cv2.putText(cam_frame, warn_txt, (wx, wy), cv2.FONT_HERSHEY_DUPLEX,
-                            warn_scale, (0, 220, 255), warn_thick, cv2.LINE_AA)
+            # When needle detection is disabled, skip drawing the column overlay
+            # and the "needle not centred" notice. Still keep `col_x1` defined
+            # for downstream layout math.
+            col_x1 = 0
+            if self.needle_detection_enabled:
+                self._needle_check_counter += 1
+                if self._needle_check_counter >= self.NEEDLE_CHECK_INTERVAL:
+                    self._needle_check_counter = 0
+                    self.needle_confirmed = self._run_needle_check(cam_frame)
+                col_x1    = max(0, self.ROI_CENTER_X - self.ROI_COL_WIDTH // 2)
+                col_x2    = min(self.camera_width, self.ROI_CENTER_X + self.ROI_COL_WIDTH // 2)
+                glow_a    = 0.5 + 0.5 * abs(math.sin(self.glow_phase))
+                col_color = tuple(int(c * glow_a) for c in self.ROI_COL_COLOR)
+                cv2.rectangle(cam_frame, (col_x1, 0), (col_x2, self.camera_height), col_color, 2)
+                if not self.needle_confirmed:
+                    warn_h  = 44
+                    warn_y  = 8
+                    _overlay = cam_frame.copy()
+                    cv2.rectangle(_overlay, (4, warn_y),
+                                  (self.camera_width - 4, warn_y + warn_h),
+                                  (0, 60, 180), -1)
+                    cv2.addWeighted(_overlay, 0.78, cam_frame, 0.22, 0, cam_frame)
+                    warn_txt = "!  SEWING NEEDLE NOT CENTRED"
+                    warn_scale, warn_thick = 0.62, 2
+                    (ww, wh), _ = cv2.getTextSize(warn_txt, cv2.FONT_HERSHEY_DUPLEX,
+                                                   warn_scale, warn_thick)
+                    wx = (self.camera_width - ww) // 2
+                    wy = warn_y + (warn_h + wh) // 2
+                    cv2.putText(cam_frame, warn_txt, (wx + 1, wy + 1), cv2.FONT_HERSHEY_DUPLEX,
+                                warn_scale, (0, 0, 0), warn_thick + 2, cv2.LINE_AA)
+                    cv2.putText(cam_frame, warn_txt, (wx, wy), cv2.FONT_HERSHEY_DUPLEX,
+                                warn_scale, (0, 220, 255), warn_thick, cv2.LINE_AA)
             # ─────────────────────────────────────────────────────────────────
 
             # Outside-pattern warning (color-gated + hysteresis stabilized)
@@ -1850,7 +1857,8 @@ class PatternMode:
                             cnt[:, :, 1] += by1
                             cv2.drawContours(cam_frame, [cnt], -1, marker_color, 1)
 
-            cv2.circle(cam_frame, (int(self.needle_pos_x), int(self.needle_pos_y)), 5, marker_color, -1)
+            if self.needle_detection_enabled:
+                cv2.circle(cam_frame, (int(self.needle_pos_x), int(self.needle_pos_y)), 5, marker_color, -1)
 
             # Draw cloth-color tracking bounding box from full-frame detection.
             if self.last_cloth_bbox is not None:
@@ -2241,6 +2249,31 @@ class PatternMode:
                 cloth_thick = text_thickness(1, self.width, self.height, min_thickness=1, max_thickness=2)
                 self._put_text(frame, cfg['label'][:2], bx + 18, by + 21, cloth_scale, text_color, cloth_thick)
                 self.cloth_color_buttons[key] = {'x': bx, 'y': by, 'w': btn_w, 'h': btn_h, 'disabled': is_disabled}
+
+        # Needle detection toggle (small control below cloth color buttons)
+        try:
+            toggle_w = min(120, w - 24)
+            toggle_h = 28
+            toggle_x = x + (w - toggle_w) // 2
+            toggle_y = y + 30 + 2 * (btn_h + row_gap)  - 8
+            # Draw border
+            tborder = self.COLORS['medium_blue'] if self.needle_detection_enabled else (80, 80, 80)
+            cv2.rectangle(frame, (toggle_x, toggle_y), (toggle_x + toggle_w, toggle_y + toggle_h), tborder, 2)
+            fill = frame.copy()
+            fill_alpha = 0.45 if self.needle_detection_enabled else 0.18
+            cv2.rectangle(fill, (toggle_x + 2, toggle_y + 2), (toggle_x + toggle_w - 2, toggle_y + toggle_h - 2), self.COLORS['button_normal'], -1)
+            cv2.addWeighted(fill, fill_alpha, frame, 1 - fill_alpha, 0, frame)
+
+            # Label
+            lbl = "NEEDLE DETECTION: ON" if self.needle_detection_enabled else "NEEDLE DETECTION: OFF"
+            lbl_color = (0, 220, 0) if self.needle_detection_enabled else (180, 180, 180)
+            lbl_scale = text_scale(0.40, self.width, self.height, floor=0.36, ceiling=0.5)
+            lbl_thick = text_thickness(1, self.width, self.height, min_thickness=1, max_thickness=2)
+            self._put_text(frame, lbl, toggle_x + 8, toggle_y + 19, lbl_scale, lbl_color, lbl_thick)
+
+            self.needle_toggle_button = {'x': toggle_x, 'y': toggle_y, 'w': toggle_w, 'h': toggle_h}
+        except Exception:
+            self.needle_toggle_button = None
 
     def draw_confidence_controls(self, frame):
         """Draw clickable controls for confidence threshold."""
@@ -3029,6 +3062,14 @@ class PatternMode:
                     self.bbox_history.clear()
                 print(f"🧵 Cloth color set to: {self.cloth_color_profiles[color_name]['label']}")
                 return None
+
+        # Needle detection toggle
+        tb = getattr(self, 'needle_toggle_button', None)
+        if tb is not None and tb['x'] <= x <= tb['x'] + tb['w'] and tb['y'] <= y <= tb['y'] + tb['h']:
+            self.play_button_click_sound()
+            self.needle_detection_enabled = not bool(self.needle_detection_enabled)
+            print(f"🪡 Needle detection {'ENABLED' if self.needle_detection_enabled else 'DISABLED'}")
+            return None
 
         # Check confidence buttons
         if (self.conf_minus_button['x'] <= x <= self.conf_minus_button['x'] + self.conf_minus_button['w'] and
