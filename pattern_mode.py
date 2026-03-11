@@ -131,6 +131,13 @@ class PatternMode:
         self.last_color_match = False
         self.last_color_mask = None
         self.last_color_mask_bounds = None
+        self.color_overlay_interval = 3
+        self.cloth_outline_interval = 4
+        self._color_overlay_counter = 0
+        self._cloth_outline_counter = 0
+        self.cached_cloth_contour = None
+        self.low_fps_lockout = False
+        self.low_fps_value = 0.0
         
         # Try again button (centered in modal) - will be calculated dynamically
         self.try_again_button = {'x': 0, 'y': 0, 'w': 200, 'h': 60}
@@ -463,6 +470,9 @@ class PatternMode:
         self.pattern_offset_x = 0.0
         self.pattern_offset_y = 0.0
         self.pattern_offset_seeded = False
+        self._color_overlay_counter = 0
+        self._cloth_outline_counter = 0
+        self.cached_cloth_contour = None
         self.centerline_progress_idx = 0
         self.centerline_progress_initialized = False
         self.needle_on_pattern = True
@@ -1076,6 +1086,25 @@ class PatternMode:
         """Draw the entire pattern mode interface"""
         # Use grid background
         frame[:] = grid_background
+
+        if self.low_fps_lockout:
+            self.draw_back_button(frame)
+            self.draw_camera_feed(frame, camera_frame)
+            overlay = frame.copy()
+            box_y = max(90, self.camera_y + 16)
+            box_h = 118
+            cv2.rectangle(
+                overlay,
+                (self.camera_x + 8, box_y),
+                (self.camera_x + self.camera_width - 8, box_y + box_h),
+                (0, 0, 170),
+                -1,
+            )
+            cv2.addWeighted(overlay, 0.78, frame, 0.22, 0, frame)
+            self._put_text(frame, "UNSAFE PERFORMANCE DETECTED", self.camera_x + 24, box_y + 34, 0.9, (255, 255, 255), 2)
+            self._put_text(frame, f"UI FPS TOO LOW: {self.low_fps_value:.1f}", self.camera_x + 24, box_y + 66, 0.72, (255, 220, 120), 2)
+            self._put_text(frame, "STOP SEWING. Guidance paused until performance recovers.", self.camera_x + 24, box_y + 96, 0.62, (255, 255, 255), 1)
+            return
         
         # Increment glow phase for animations
         self.glow_phase += 0.05
@@ -1521,8 +1550,6 @@ class PatternMode:
                 cv2.putText(cam_frame, ow_txt, (owx, owy), cv2.FONT_HERSHEY_DUPLEX,
                             ow_scale, (50, 100, 255), ow_thick, cv2.LINE_AA)
 
-            # Mark live selected-color detection at ROI center.
-            self._matches_selected_color(detection_frame, self.needle_pos_x, self.needle_pos_y, hsv_frame=hsv_detection_frame)
             color_cfg = self.color_profiles[self.selected_detection_color]
             if self.last_color_match:
                 if self.require_motion_for_stitch and not self.cloth_motion_active:
@@ -1536,7 +1563,8 @@ class PatternMode:
                 marker_color = (0, 0, 255)
 
             # Highlight matched color pixels in the sampled patch.
-            if self.last_color_mask is not None and self.last_color_mask_bounds is not None:
+            self._color_overlay_counter = (self._color_overlay_counter + 1) % self.color_overlay_interval
+            if self._color_overlay_counter == 0 and self.last_color_mask is not None and self.last_color_mask_bounds is not None:
                 bx1, by1, bx2, by2 = self.last_color_mask_bounds
                 mask = self.last_color_mask
                 patch_h = by2 - by1
@@ -1553,20 +1581,14 @@ class PatternMode:
                         if blended is not None:
                             patch_roi[match_pixels] = blended
 
-                        contour_mask = match_pixels.astype(np.uint8) * 255
-                        contours, _ = cv2.findContours(contour_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                        for cnt in contours:
-                            if cv2.contourArea(cnt) < 4:
-                                continue
-                            cnt[:, :, 0] += bx1
-                            cnt[:, :, 1] += by1
-                            cv2.drawContours(cam_frame, [cnt], -1, marker_color, 1)
-
             if self.needle_detection_enabled:
                 cv2.circle(cam_frame, (int(self.needle_pos_x), int(self.needle_pos_y)), 5, marker_color, -1)
 
                 # Draw cloth outline
-                _, cloth_contour = self._detect_cloth_by_color(cam_frame)
+                self._cloth_outline_counter = (self._cloth_outline_counter + 1) % self.cloth_outline_interval
+                if self._cloth_outline_counter == 0:
+                    _, self.cached_cloth_contour = self._detect_cloth_by_color(cam_frame)
+                cloth_contour = self.cached_cloth_contour
                 if cloth_contour is not None:
                     cloth_cfg = self.cloth_color_profiles[self.selected_cloth_color]
                     outline_color = cloth_cfg.get('preview_bgr', (0, 255, 255))

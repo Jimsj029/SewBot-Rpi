@@ -9,6 +9,7 @@ import math
 import os
 import sys
 import threading
+import time
 
 # Add ui directory to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'ui'))
@@ -92,6 +93,14 @@ class SewBotApp:
         self.latest_camera_frame = None
         self.camera_thread = None
         self.camera_thread_running = False
+        self.last_frame_time = time.perf_counter()
+        self.smoothed_fps = 60.0
+        self.low_fps_frames = 0
+        self.recovered_fps_frames = 0
+        self.unsafe_fps_threshold = 20.0
+        self.recover_fps_threshold = 26.0
+        self.low_fps_hold_frames = 15
+        self.recover_hold_frames = 45
         
         # Button positions
         self.start_button = {'x': (self.width - 300) // 2, 'y': self.height // 2 + 50, 'w': 300, 'h': 80}
@@ -885,6 +894,33 @@ class SewBotApp:
                     elif key == ord('-') or key == ord('_'):  # Decrease confidence threshold
                         self.pattern_mode.confidence_threshold = max(0.1, self.pattern_mode.confidence_threshold - 0.05)
                         print(f"Confidence threshold: {self.pattern_mode.confidence_threshold:.2f}")
+
+                now = time.perf_counter()
+                dt = max(1e-6, now - self.last_frame_time)
+                self.last_frame_time = now
+                instant_fps = 1.0 / dt
+                self.smoothed_fps = self.smoothed_fps * 0.9 + instant_fps * 0.1
+
+                if self.state == 'pattern':
+                    if self.smoothed_fps < self.unsafe_fps_threshold:
+                        self.low_fps_frames += 1
+                        self.recovered_fps_frames = 0
+                    elif self.smoothed_fps > self.recover_fps_threshold:
+                        self.recovered_fps_frames += 1
+                        self.low_fps_frames = 0
+                    else:
+                        self.low_fps_frames = 0
+                        self.recovered_fps_frames = 0
+
+                    if self.low_fps_frames >= self.low_fps_hold_frames:
+                        self.pattern_mode.low_fps_lockout = True
+                        self.pattern_mode.low_fps_value = self.smoothed_fps
+                    elif self.recovered_fps_frames >= self.recover_hold_frames:
+                        self.pattern_mode.low_fps_lockout = False
+                else:
+                    self.low_fps_frames = 0
+                    self.recovered_fps_frames = 0
+                    self.pattern_mode.low_fps_lockout = False
                 
                 # Check window property to detect X button click
                 try:
