@@ -834,7 +834,7 @@ class SewBotApp:
                 
                 # Check if window was closed (X button clicked)
                 # This needs to be checked after imshow
-                key = cv2.waitKey(30) & 0xFF
+                key = cv2.waitKey(1) & 0xFF
                 
                 # Handle keyboard shortcuts
                 if key == ord('f') or key == ord('F'):  # F key to toggle fullscreen
