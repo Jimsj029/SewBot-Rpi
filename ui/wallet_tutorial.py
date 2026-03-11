@@ -178,17 +178,25 @@ class WalletTutorialPlayer:
         self.NEEDLE_CHECK_INTERVAL   = 6      # Run model every N draw-frames (~5 Hz @ 30 fps)
         self._needle_check_counter   = 0      # Frame counter for throttling
         self.needle_model = None
-        if YOLO_AVAILABLE:
+        self.needle_input_name = None
+        self._needle_imgsz = 320
+        if ORT_AVAILABLE:
             try:
                 _needle_path = os.path.join(
                     os.path.dirname(os.path.dirname(__file__)), 'models', 'needle.onnx')
                 if os.path.exists(_needle_path):
-                    self.needle_model = _YOLO(_needle_path, task='detect')
+                    _sess_opts = ort.SessionOptions()
+                    _sess_opts.inter_op_num_threads = 2
+                    _sess_opts.intra_op_num_threads = 2
+                    self.needle_model = ort.InferenceSession(
+                        _needle_path,
+                        sess_options=_sess_opts,
+                        providers=['CPUExecutionProvider'])
+                    self.needle_input_name = self.needle_model.get_inputs()[0].name
                     # Warm-up run so first real frame isn't slow
-                    self.needle_model(
-                        np.zeros((64, 64, 3), dtype=np.uint8),
-                        conf=self.NEEDLE_CONF_THRESHOLD, verbose=False)
-                    print(f"\u2713 Needle centring model loaded: {_needle_path}")
+                    _w = np.zeros((1, 3, self._needle_imgsz, self._needle_imgsz), dtype=np.float32)
+                    self.needle_model.run(None, {self.needle_input_name: _w})
+                    print(f"\u2713 Needle centring model loaded (ONNX Runtime direct): {_needle_path}")
                 else:
                     print(f"\u26a0 needle.onnx not found at {_needle_path}")
             except Exception as _e:
