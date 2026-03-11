@@ -71,6 +71,15 @@ class PatternMode:
             'h': 50,
         }
 
+        # Needle detection toggle button (below evaluate button)
+        self.needle_detection_enabled = True
+        self.needle_toggle_button = {
+            'x': self.evaluate_button['x'],
+            'y': self.evaluate_button['y'] + self.evaluate_button['h'] + 12,
+            'w': self.evaluate_button['w'],
+            'h': 44,
+        }
+
         # Back button
         self.back_button = {'x': 20, 'y': 20, 'w': 120, 'h': 50}
         # ── END LAYOUT ───────────────────────────────────────────────────────────
@@ -1057,6 +1066,12 @@ class PatternMode:
         
         # Draw evaluate button (right, below stats)
         self.draw_evaluate_button(frame)
+
+        # Draw needle detection toggle button
+        try:
+            self.draw_needle_toggle_button(frame)
+        except Exception:
+            pass
 
         # Draw thread colour panel (left, top)
         self.draw_thread_color_panel(frame)
@@ -2234,6 +2249,27 @@ class PatternMode:
         text_y = eb['y'] + (eb['h'] + text_h) // 2
         
         self._put_text(frame, text, text_x, text_y, font_scale, self.COLORS['text_primary'], thickness, font=FONT_DISPLAY)
+
+    def draw_needle_toggle_button(self, frame):
+        """Draw a button that toggles needle detection on/off"""
+        nb = self.needle_toggle_button
+        pulse = 0.35 + 0.25 * abs(math.sin(self.glow_phase * 1.0))
+        self.draw_glow_rect(frame, nb['x'], nb['y'], nb['w'], nb['h'], self.COLORS['medium_blue'], pulse)
+
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (nb['x'] + 2, nb['y'] + 2), (nb['x'] + nb['w'] - 2, nb['y'] + nb['h'] - 2), self.COLORS['button_normal'], -1)
+        cv2.addWeighted(overlay, 0.75, frame, 0.25, 0, frame)
+
+        state_text = "ON" if self.needle_detection_enabled else "OFF"
+        text = f"NEEDLE: {state_text}"
+        txt_col = (0, 200, 0) if self.needle_detection_enabled else (0, 0, 200)
+        font_scale = text_scale(0.64, self.width, self.height, floor=0.56, ceiling=0.74)
+        thickness = text_thickness(2, self.width, self.height, min_thickness=1, max_thickness=2)
+        font_scale = fit_text_scale(text, FONT_MAIN, nb['w'] - 14, font_scale, thickness, min_scale=0.6)
+        (text_w, text_h), _ = get_text_size(text, FONT_MAIN, font_scale, thickness)
+        text_x = nb['x'] + (nb['w'] - text_w) // 2
+        text_y = nb['y'] + (nb['h'] + text_h) // 2
+        self._put_text(frame, text, text_x, text_y, font_scale, txt_col, thickness)
     
     def draw_evaluation_results(self, frame):
         """Draw evaluation results as a large centered modal window"""
@@ -2468,6 +2504,14 @@ class PatternMode:
                     self.bbox_history.clear()
                 print(f"🧵 Cloth color set to: {self.cloth_color_profiles[color_name]['label']}")
                 return None
+
+        # Needle detection toggle button
+        nb = getattr(self, 'needle_toggle_button', None)
+        if nb is not None and nb['x'] <= x <= nb['x'] + nb['w'] and nb['y'] <= y <= nb['y'] + nb['h']:
+            self.play_button_click_sound()
+            self.needle_detection_enabled = not bool(self.needle_detection_enabled)
+            print(f"🪡 Needle detection {'ENABLED' if self.needle_detection_enabled else 'DISABLED'}")
+            return None
 
         # Check confidence buttons
         if (self.conf_minus_button['x'] <= x <= self.conf_minus_button['x'] + self.conf_minus_button['w'] and
