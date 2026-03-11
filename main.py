@@ -91,6 +91,8 @@ class SewBotApp:
         self.camera_status_message = "Checking camera..."
         self.camera_lock = threading.Lock()
         self.latest_camera_frame = None
+        # Camera zoom multiplier (1.0 = no zoom). Values >1.0 zoom in.
+        self.camera_zoom = 1.0
         self.camera_thread = None
         self.camera_thread_running = False
         self.last_frame_time = time.perf_counter()
@@ -358,6 +360,10 @@ class SewBotApp:
                     else:
                         # All levels completed, go back to level selection
                         self.state = 'level_selection'
+                elif result == 'zoom_in':
+                    self.zoom_in()
+                elif result == 'zoom_out':
+                    self.zoom_out()
     
     def detect_camera_at_startup(self):
         """Detect camera availability at app startup"""
@@ -482,7 +488,47 @@ class SewBotApp:
         with self.camera_lock:
             if self.latest_camera_frame is None:
                 return None
-            return self.latest_camera_frame.copy()
+            frame = self.latest_camera_frame.copy()
+
+        # Apply software zoom (center-crop + resize) if needed
+        z = float(getattr(self, 'camera_zoom', 1.0))
+        if z is None or z <= 1.0:
+            return frame
+
+        h, w = frame.shape[:2]
+        # Compute crop size (smaller when zooming in)
+        crop_w = max(1, int(round(w / z)))
+        crop_h = max(1, int(round(h / z)))
+
+        x1 = max(0, (w - crop_w) // 2)
+        y1 = max(0, (h - crop_h) // 2)
+        x2 = x1 + crop_w
+        y2 = y1 + crop_h
+
+        crop = frame[y1:y2, x1:x2]
+        if crop.size == 0:
+            return frame
+        # Resize back to original camera feed size so downstream code remains unchanged
+        zoomed = cv2.resize(crop, (w, h), interpolation=cv2.INTER_LINEAR)
+        return zoomed
+
+    def set_camera_zoom(self, zoom: float):
+        """Set camera zoom multiplier. 1.0 = no zoom. Values >1 zoom in."""
+        try:
+            z = float(zoom)
+        except Exception:
+            return
+        # Clamp reasonable bounds
+        z = max(1.0, min(6.0, z))
+        self.camera_zoom = z
+
+    def zoom_in(self, step: float = 0.1):
+        """Increase zoom by `step`."""
+        self.set_camera_zoom(self.camera_zoom + abs(step))
+
+    def zoom_out(self, step: float = 0.1):
+        """Decrease zoom by `step`."""
+        self.set_camera_zoom(max(1.0, self.camera_zoom - abs(step)))
     
     def release_camera(self):
         self.camera_thread_running = False
@@ -888,6 +934,14 @@ class SewBotApp:
                     elif key == ord('-') or key == ord('_'):  # Decrease confidence threshold
                         self.pattern_mode.confidence_threshold = max(0.1, self.pattern_mode.confidence_threshold - 0.05)
                         print(f"Confidence threshold: {self.pattern_mode.confidence_threshold:.2f}")
+                    elif key == ord(']'):
+                        # Increase needle/pattern motion response (speed)
+                        self.pattern_mode.motion_response = min(5.0, self.pattern_mode.motion_response + 0.1)
+                        print(f"Motion response: {self.pattern_mode.motion_response:.2f}")
+                    elif key == ord('['):
+                        # Decrease needle/pattern motion response (speed)
+                        self.pattern_mode.motion_response = max(0.1, self.pattern_mode.motion_response - 0.1)
+                        print(f"Motion response: {self.pattern_mode.motion_response:.2f}")
 
                 now = time.perf_counter()
                 dt = max(1e-6, now - self.last_frame_time)

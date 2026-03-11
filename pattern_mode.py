@@ -44,6 +44,9 @@ class PatternMode:
         self.camera_y      = 120
         self.camera_width  = 560
         self.camera_height = 420
+        # Camera zoom buttons (drawn over camera feed)
+        self.zoom_in_button = {'x': self.camera_x + self.camera_width - 46, 'y': self.camera_y + 8, 'w': 40, 'h': 36}
+        self.zoom_out_button = {'x': self.camera_x + self.camera_width - 46 - 46, 'y': self.camera_y + 8, 'w': 40, 'h': 36}
 
         # Left panel — Thread Color
         self.color_panel_x      = 8
@@ -73,12 +76,12 @@ class PatternMode:
             'h': 50,
         }
 
-        # Needle detection toggle button (below evaluate button)
+        # Needle detection toggle button (left side, below cloth color panel)
         self.needle_detection_enabled = True
         self.needle_toggle_button = {
-            'x': self.evaluate_button['x'],
-            'y': self.evaluate_button['y'] + self.evaluate_button['h'] + 12,
-            'w': self.evaluate_button['w'],
+            'x': self.cloth_color_panel_x,
+            'y': self.cloth_color_panel_y + self.cloth_color_panel_height + 12,
+            'w': self.cloth_color_panel_width,
             'h': 44,
         }
 
@@ -149,6 +152,9 @@ class PatternMode:
         self.total_score = 0
         self.pattern_progress = 0.0  # 0-100%
         self.raw_progress = 0.0  # Raw actual progress for evaluation
+        # Evaluation metrics
+        self.evaluation_wrong_pct = 0.0  # % of wrong/off-pattern stitches among detections
+        self.final_score = 0.0  # Adjusted score after accounting for wrong stitches
         self.session_start_time = None
         
         # Evaluation state
@@ -166,7 +172,8 @@ class PatternMode:
         self.missed_stitch_mask = None     # Accumulated mask of off-pattern detections
         self.proximity_radius = 5  # Legacy compatibility radius (kept small)
         self.stitch_draw_radius = 3  # Radius of each accepted stitch stamp
-        self.cyan_spread_radius = 2  # Visual cyan expansion around accepted stitches
+        # Visual cyan expansion around accepted stitches (increase by 15%)
+        self.cyan_spread_radius = int(math.ceil(2 * 1.30))
         self.progress_spread_radius = 4  # Progress expansion to bridge tiny gaps only
         # Keep these permissive so centerline-guided tracing can advance one
         # pixel step at a time on small screens/cameras.
@@ -197,6 +204,8 @@ class PatternMode:
         self.pattern_offset_x = 0.0
         self.pattern_offset_y = 0.0
         self.pattern_offset_seeded = False
+        # Motion response multiplier (1.0 = original speed). Increase to move pattern faster.
+        self.motion_response = 1.0
         self.needle_on_pattern = True  # Whether the needle is currently on a pattern pixel
 
         # Cache processed blueprint overlays so we do not hit disk every frame.
@@ -259,7 +268,7 @@ class PatternMode:
         self.highest_segment_reached = 1  # Track highest segment to prevent going backwards
         self.segment_colors = {
             'completed': (255, 255, 0),    # Cyan in BGR (completed sections)
-            'current': (0, 255, 255),      # Yellow in BGR (current section to sew)
+            'current': (0, 255, 0),      # Green in BGR (current section to sew)
             'upcoming': (100, 100, 100),   # Dim Gray (upcoming sections)
             'missed': (0, 0, 255),         # Red in BGR (off-pattern detections)
         }
@@ -268,6 +277,7 @@ class PatternMode:
         self.out_of_segment_warning = False
         self.warning_message = ""
         self.warning_flash_phase = 0
+        self.warning_until_frame = 0
         # Combo and stitch tracking
         self.current_combo = 0
         self.max_combo = 0
@@ -518,7 +528,13 @@ class PatternMode:
         mask = mask[:mask.shape[0] // 2, :]
 
         # Base width is 50%; increase it by 25% => 62.5% of original width.
-        new_w = int(round(mask.shape[1] * 0.625))
+        # Make level-specific width adjustments. Level 1 should be a thin
+        # vertical column so the red-point can only travel up/down.
+        if level == 1:
+            # Reduce to ~28% of original width (adjustable)
+            new_w = int(round(mask.shape[1] * 0.28))
+        else:
+            new_w = int(round(mask.shape[1] * 0.625))
         new_w = max(1, min(mask.shape[1], new_w))
         mask = cv2.resize(mask, (new_w, mask.shape[0]), interpolation=cv2.INTER_NEAREST)
 
@@ -886,6 +902,15 @@ class PatternMode:
                 self.missed_stitch_mask = np.zeros((pat_h, pat_w), dtype=np.uint8)
             cv2.circle(self.missed_stitch_mask, (px, py), self.stitch_draw_radius, 255, -1)
             self._realtime_pat_dirty = True
+            # Trigger a visible warning banner for wrong stitch
+            try:
+                self.out_of_segment_warning = True
+                self.warning_message = "FOLLOW THE PATTERN"
+                self.warning_flash_phase = 0
+                # Show for ~40 frames (~1 second at 30-40 FPS)
+                self.warning_until_frame = int(self.stitch_frame_index) + 40
+            except Exception:
+                pass
             return
 
         if is_valid_stitch:
@@ -1205,6 +1230,16 @@ class PatternMode:
 
         # Increment glow phase for animations
         self.glow_phase += 0.05
+        # Warning flash phase (faster) when active
+        if getattr(self, 'out_of_segment_warning', False):
+            self.warning_flash_phase += 0.18
+            # Auto-hide after warning_until_frame
+            try:
+                if self.stitch_frame_index >= getattr(self, 'warning_until_frame', 0):
+                    self.out_of_segment_warning = False
+                    self.warning_message = ""
+            except Exception:
+                pass
         
         # Draw current level display at top center
         level_text = f"LEVEL {self.current_level}"
@@ -1443,8 +1478,9 @@ class PatternMode:
                             hsv_frame=hsv_detection_frame,
                         )
                         if color_ok:
-                            self.pattern_offset_x += float(self.motion_vector_x)
-                            self.pattern_offset_y += float(self.motion_vector_y)
+                            # Apply motion_response multiplier to control speed
+                            self.pattern_offset_x += float(self.motion_response) * float(self.motion_vector_x)
+                            self.pattern_offset_y += float(self.motion_response) * float(self.motion_vector_y)
                             moved_with_color = True
 
                     # Red dot is fixed; overlay offset tracks cloth translation.
@@ -1527,6 +1563,14 @@ class PatternMode:
                                 -1,
                             )
                             self._realtime_pat_dirty = True
+                            # Trigger visual warning when a needle stitch is off-pattern
+                            try:
+                                self.out_of_segment_warning = True
+                                self.warning_message = "FOLLOW THE PATTERN"
+                                self.warning_flash_phase = 0
+                                self.warning_until_frame = int(self.stitch_frame_index) + 40
+                            except Exception:
+                                pass
                 else:
                     self.centerline_progress_initialized = False
                     self.pattern_offset_seeded = False
@@ -1634,7 +1678,7 @@ class PatternMode:
                                   (self.camera_width - 4, warn_y + warn_h),
                                   (0, 60, 180), -1)
                     cv2.addWeighted(_overlay, 0.78, cam_frame, 0.22, 0, cam_frame)
-                    warn_txt = "!  SEWING NEEDLE NOT CENTRED"
+                    warn_txt = "SEWING NEEDLE NOT CENTRED"
                     warn_scale, warn_thick = 0.62, 2
                     (ww, wh), _ = cv2.getTextSize(warn_txt, cv2.FONT_HERSHEY_DUPLEX,
                                                    warn_scale, warn_thick)
@@ -1700,7 +1744,11 @@ class PatternMode:
                             patch_roi[match_pixels] = blended
 
             if self.needle_detection_enabled:
-                cv2.circle(cam_frame, (int(self.needle_pos_x), int(self.needle_pos_y)), 5, marker_color, -1)
+                # Draw a filled square marker for the needle (all states)
+                cx = int(self.needle_pos_x)
+                cy = int(self.needle_pos_y)
+                half = 6
+                cv2.rectangle(cam_frame, (cx - half, cy - half), (cx + half, cy + half), marker_color, -1)
 
                 # Draw cloth outline
                 self._cloth_outline_counter = (self._cloth_outline_counter + 1) % self.cloth_outline_interval
@@ -1734,6 +1782,17 @@ class PatternMode:
             frame[self.camera_y:self.camera_y+self.camera_height, 
                   self.camera_x:self.camera_x+self.camera_width] = cam_frame
             
+            # Draw zoom buttons (small squares top-right of camera)
+            for btn, label in ((self.zoom_out_button, '-'), (self.zoom_in_button, '+')):
+                bx, by, bw, bh = btn['x'], btn['y'], btn['w'], btn['h']
+                cv2.rectangle(frame, (bx, by), (bx + bw, by + bh), self.COLORS['button_normal'], -1)
+                cv2.rectangle(frame, (bx, by), (bx + bw, by + bh), self.COLORS['text_primary'], 2)
+                # Center label
+                (tw, th), _ = get_text_size(label, FONT_MAIN, 0.9, 2)
+                tx = bx + (bw - tw) // 2
+                ty = by + (bh + th) // 2
+                self._put_text(frame, label, tx, ty, 0.9, self.COLORS['text_primary'], 2)
+
             # Draw warning overlay if out of segment
             if self.out_of_segment_warning:
                 self.draw_warning_overlay(frame)
@@ -2107,7 +2166,7 @@ class PatternMode:
                 "",
                 ("CYAN = Completed stitches", self.COLORS['text_secondary'], 0.7, 2),
                 "",
-                ("YELLOW = Pattern to sew", self.COLORS['text_secondary'], 0.7, 2),
+                ("GREEN = Pattern to sew", self.COLORS['text_secondary'], 0.7, 2),
                 "",
                 ("The pattern progressively turns cyan!", self.COLORS['text_secondary'], 0.7, 2),
             ]
@@ -2444,9 +2503,9 @@ class PatternMode:
     def draw_evaluate_button(self, frame):
         """Draw the evaluate button below stats panel"""
         eb = self.evaluate_button
-        
-        # Don't show if already evaluated
-        if self.is_evaluated:
+        # Only show evaluate button when progress reached 100% and not
+        # already evaluated. The evaluate action is gated by full progress.
+        if self.is_evaluated or self.raw_progress < 100.0:
             return
         
         # Button glow
@@ -2544,31 +2603,25 @@ class PatternMode:
         title_x = panel_x + (panel_w - title_w) // 2
         self._put_text(frame, title, title_x, content_y, title_scale, title_color, title_thickness, font=FONT_DISPLAY)
         
-        # Progress achieved
-        content_y += 70
-        progress_label = "Progress Achieved:"
-        prog_label_scale = text_scale(0.82, self.width, self.height, floor=0.74, ceiling=0.94)
-        prog_label_thick = text_thickness(2, self.width, self.height, min_thickness=1, max_thickness=2)
-        (prog_label_w, _), _ = get_text_size(progress_label, FONT_MAIN, prog_label_scale, prog_label_thick)
-        label_x = panel_x + (panel_w - prog_label_w) // 2
-        self._put_text(frame, progress_label, label_x, content_y, prog_label_scale, self.COLORS['text_secondary'], prog_label_thick)
-        
-        content_y += 50
-        progress_text = f"{self.raw_progress:.1f}%"
-        prog_scale = text_scale(1.45, self.width, self.height, floor=1.22, ceiling=1.65)
-        prog_thick = text_thickness(3, self.width, self.height, min_thickness=2, max_thickness=4)
-        (prog_w, _), _ = get_text_size(progress_text, FONT_DISPLAY, prog_scale, prog_thick)
-        prog_x = panel_x + (panel_w - prog_w) // 2
-        self._put_text(frame, progress_text, prog_x, content_y, prog_scale, self.COLORS['text_primary'], prog_thick, font=FONT_DISPLAY)
-        
-        # Requirement text
-        content_y += 40
-        req_text = "(Need 80% to pass)"
-        req_scale = text_scale(0.64, self.width, self.height, floor=0.58, ceiling=0.74)
-        req_thick = text_thickness(1, self.width, self.height, min_thickness=1, max_thickness=2)
-        (req_w, _), _ = get_text_size(req_text, FONT_MAIN, req_scale, req_thick)
-        req_x = panel_x + (panel_w - req_w) // 2
-        self._put_text(frame, req_text, req_x, content_y, req_scale, self.COLORS['text_secondary'], req_thick)
+        # Show final score and wrong-stitch percentage (replace raw progress)
+        content_y += 60
+        # Large score display
+        score_text = f"{self.final_score:.1f}%"
+        score_scale = text_scale(1.45, self.width, self.height, floor=1.22, ceiling=1.65)
+        score_thick = text_thickness(3, self.width, self.height, min_thickness=2, max_thickness=4)
+        (score_w, _), _ = get_text_size(score_text, FONT_DISPLAY, score_scale, score_thick)
+        score_x = panel_x + (panel_w - score_w) // 2
+        score_col = self.COLORS['glow_cyan'] if self.level_completed else self.COLORS['text_primary']
+        self._put_text(frame, score_text, score_x, content_y, score_scale, score_col, score_thick, font=FONT_DISPLAY)
+
+        # Wrong-stitch percentage (smaller beneath score)
+        content_y += 60
+        wrong_text = f"Wrong stitches: {self.evaluation_wrong_pct:.1f}%"
+        wrong_scale = text_scale(0.72, self.width, self.height, floor=0.66, ceiling=0.86)
+        wrong_thick = text_thickness(2, self.width, self.height, min_thickness=1, max_thickness=2)
+        (wt_w, _), _ = get_text_size(wrong_text, FONT_MAIN, wrong_scale, wrong_thick)
+        wrong_x = panel_x + (panel_w - wt_w) // 2
+        self._put_text(frame, wrong_text, wrong_x, content_y, wrong_scale, self.COLORS['text_secondary'], wrong_thick)
         
         # Action button (Try Again or Next Level)
         if self.level_completed:
@@ -2700,6 +2753,16 @@ class PatternMode:
         if bb['x'] <= x <= bb['x'] + bb['w'] and bb['y'] <= y <= bb['y'] + bb['h']:
             self.play_button_click_sound()
             return 'back'
+
+        # Zoom buttons
+        zib = self.zoom_in_button
+        zob = self.zoom_out_button
+        if zib['x'] <= x <= zib['x'] + zib['w'] and zib['y'] <= y <= zib['y'] + zib['h']:
+            self.play_button_click_sound()
+            return 'zoom_in'
+        if zob['x'] <= x <= zob['x'] + zob['w'] and zob['y'] <= y <= zob['y'] + zob['h']:
+            self.play_button_click_sound()
+            return 'zoom_out'
         
         # Check evaluate button (only if not evaluated yet)
         for color_name, btn in self.color_buttons.items():
@@ -2802,11 +2865,51 @@ class PatternMode:
     def evaluate_pattern(self):
         """Evaluate the current pattern and determine if level is completed"""
         self.is_evaluated = True
-        
-        # Check if level is completed (80%+ raw progress)
-        if self.raw_progress >= 80:
+        # Prefer computing coverage directly against the blueprint mask so
+        # the final score equals the actual cyan coverage of pattern pixels.
+        try:
+            _, pattern_alpha = self.load_blueprint(self.current_level)
+        except Exception:
+            pattern_alpha = None
+
+        cyan_covered = 0
+        missed_on_pattern = 0
+        total_pattern = 0
+
+        if pattern_alpha is not None:
+            pat_mask = (pattern_alpha > self.pattern_alpha_threshold)
+            total_pattern = int(np.sum(pat_mask))
+            if total_pattern > 0:
+                if self.completed_stitch_mask is not None:
+                    # completed_stitch_mask is stored in pattern coordinates
+                    comp = (self.completed_stitch_mask > 0)
+                    # crop/resize defensively if shapes mismatch
+                    if comp.shape != pat_mask.shape:
+                        comp = cv2.resize(comp.astype(np.uint8), (pat_mask.shape[1], pat_mask.shape[0]), interpolation=cv2.INTER_NEAREST).astype(bool)
+                    cyan_covered = int(np.sum(np.logical_and(comp, pat_mask)))
+                if self.missed_stitch_mask is not None:
+                    miss = (self.missed_stitch_mask > 0)
+                    if miss.shape != pat_mask.shape:
+                        miss = cv2.resize(miss.astype(np.uint8), (pat_mask.shape[1], pat_mask.shape[0]), interpolation=cv2.INTER_NEAREST).astype(bool)
+                    missed_on_pattern = int(np.sum(np.logical_and(miss, pat_mask)))
+
+        # Final score = percentage of pattern pixels covered by cyan
+        if total_pattern == 0:
+            self.final_score = 0.0
+        else:
+            self.final_score = float(cyan_covered) / float(total_pattern) * 100.0
+
+        # Wrong-stitch percentage: show remaining pattern not covered by cyan
+        # (i.e. 100% - coverage). This matches the in-game display expectation.
+        if total_pattern == 0:
+            self.evaluation_wrong_pct = 0.0
+        else:
+            self.evaluation_wrong_pct = max(0.0, 100.0 - self.final_score)
+
+        # Determine pass/fail based on final_score
+        if self.final_score >= 80.0:
             self.level_completed = True
-            print(f"✅ Level {self.current_level} completed! Progress: {self.raw_progress:.1f}%")
+            print(f"✅ Level {self.current_level} completed! Score: {self.final_score:.1f}%, Wrong on pattern: {self.evaluation_wrong_pct:.1f}%")
         else:
             self.level_completed = False
-            print(f"📊 Evaluation: {self.raw_progress:.1f}% progress. Need 80%+ to complete.")
+            print(f"📊 Evaluation: Score {self.final_score:.1f}%, Wrong on pattern {self.evaluation_wrong_pct:.1f}%. Need 80%+ to complete.")
