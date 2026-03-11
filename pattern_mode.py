@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 import math
+import gc
 import os
 from ultralytics import YOLO
 from music_manager import get_music_manager
@@ -291,24 +292,17 @@ class PatternMode:
         # Cloth bbox tracking
         self.smooth_cloth_bbox = None  # Smoothed bbox for stable overlay
 
+        # Needle detection enabled flag (can be toggled at runtime)
+        self.needle_detection_enabled = True
+
         # Load needle detection model (used for single-stitch ROI pipeline)
+        # Use helper so we can lazy-load/unload at runtime when the
+        # needle detection toggle is used.
+        self.needle_model = None
         try:
-            needle_model_path = os.path.join(models_dir, 'needle.onnx')
-            if os.path.exists(needle_model_path):
-                print(f"Loading needle detection model: {needle_model_path}")
-                self.needle_model = YOLO(needle_model_path, task='detect')
-                print(f"✓ Needle detection model loaded successfully!")
-                if hasattr(self.needle_model, 'names'):
-                    for idx, name in self.needle_model.names.items():
-                        print(f"    Class {idx}: {name}")
-                test_img = np.zeros((64, 64, 3), dtype=np.uint8)
-                self.needle_model(test_img, conf=self.confidence_threshold, verbose=False)
-                print("  ✓ Needle model test successful!")
-            else:
-                print(f"⚠ Needle model not found: {needle_model_path}")
-                self.needle_model = None
-        except Exception as e:
-            print(f"⚠ ERROR loading needle model: {e}")
+            if self.needle_detection_enabled:
+                self.load_needle_model(models_dir=models_dir)
+        except Exception:
             self.needle_model = None
 
         # Music flag to track if music is playing
@@ -332,6 +326,47 @@ class PatternMode:
         """Play button click sound effect"""
         music_manager = get_music_manager()
         music_manager.play_sound_effect('button_click.mp3')
+
+    def load_needle_model(self, models_dir=None):
+        """Load the needle ONNX model from the models folder."""
+        try:
+            if models_dir is None:
+                models_dir = os.path.join(os.path.dirname(__file__), 'models')
+            needle_model_path = os.path.join(models_dir, 'needle.onnx')
+            if os.path.exists(needle_model_path):
+                print(f"Loading needle detection model: {needle_model_path}")
+                self.needle_model = YOLO(needle_model_path, task='detect')
+                print(f"✓ Needle detection model loaded successfully!")
+                if hasattr(self.needle_model, 'names'):
+                    for idx, name in self.needle_model.names.items():
+                        print(f"    Class {idx}: {name}")
+                # Lightweight smoke test
+                test_img = np.zeros((64, 64, 3), dtype=np.uint8)
+                try:
+                    self.needle_model(test_img, conf=self.confidence_threshold, verbose=False)
+                    print("  ✓ Needle model test successful!")
+                except Exception:
+                    pass
+            else:
+                print(f"⚠ Needle model not found: {needle_model_path}")
+                self.needle_model = None
+        except Exception as e:
+            print(f"⚠ ERROR loading needle model: {e}")
+            self.needle_model = None
+
+    def unload_needle_model(self):
+        """Unload the needle model to free resources."""
+        try:
+            if getattr(self, 'needle_model', None) is not None:
+                print("Unloading needle detection model to save resources...")
+                try:
+                    del self.needle_model
+                except Exception:
+                    pass
+                self.needle_model = None
+                gc.collect()
+        except Exception:
+            pass
     
     def load_blueprint(self, level):
         """Load binary mask for the pattern"""
@@ -1395,33 +1430,36 @@ class PatternMode:
                     follow_check_ready = True
 
             # ── Column ROI overlay (wallet-style, needle centring) ────────────
-            self._needle_check_counter += 1
-            if self._needle_check_counter >= self.NEEDLE_CHECK_INTERVAL:
-                self._needle_check_counter = 0
-                self.needle_confirmed = self._run_needle_check(cam_frame)
-            col_x1    = max(0, self.ROI_CENTER_X - self.ROI_COL_WIDTH // 2)
-            col_x2    = min(self.camera_width, self.ROI_CENTER_X + self.ROI_COL_WIDTH // 2)
-            glow_a    = 0.5 + 0.5 * abs(math.sin(self.glow_phase))
-            col_color = tuple(int(c * glow_a) for c in self.ROI_COL_COLOR)
-            cv2.rectangle(cam_frame, (col_x1, 0), (col_x2, self.camera_height), col_color, 2)
-            if not self.needle_confirmed:
-                warn_h  = 44
-                warn_y  = 8
-                _overlay = cam_frame.copy()
-                cv2.rectangle(_overlay, (4, warn_y),
-                              (self.camera_width - 4, warn_y + warn_h),
-                              (0, 60, 180), -1)
-                cv2.addWeighted(_overlay, 0.78, cam_frame, 0.22, 0, cam_frame)
-                warn_txt = "!  SEWING NEEDLE NOT CENTRED"
-                warn_scale, warn_thick = 0.62, 2
-                (ww, wh), _ = cv2.getTextSize(warn_txt, cv2.FONT_HERSHEY_DUPLEX,
-                                               warn_scale, warn_thick)
-                wx = (self.camera_width - ww) // 2
-                wy = warn_y + (warn_h + wh) // 2
-                cv2.putText(cam_frame, warn_txt, (wx + 1, wy + 1), cv2.FONT_HERSHEY_DUPLEX,
-                            warn_scale, (0, 0, 0), warn_thick + 2, cv2.LINE_AA)
-                cv2.putText(cam_frame, warn_txt, (wx, wy), cv2.FONT_HERSHEY_DUPLEX,
-                            warn_scale, (0, 220, 255), warn_thick, cv2.LINE_AA)
+            # Only show the column ROI and centering checks when needle
+            # detection is enabled.
+            if self.needle_detection_enabled:
+                self._needle_check_counter += 1
+                if self._needle_check_counter >= self.NEEDLE_CHECK_INTERVAL:
+                    self._needle_check_counter = 0
+                    self.needle_confirmed = self._run_needle_check(cam_frame)
+                col_x1    = max(0, self.ROI_CENTER_X - self.ROI_COL_WIDTH // 2)
+                col_x2    = min(self.camera_width, self.ROI_CENTER_X + self.ROI_COL_WIDTH // 2)
+                glow_a    = 0.5 + 0.5 * abs(math.sin(self.glow_phase))
+                col_color = tuple(int(c * glow_a) for c in self.ROI_COL_COLOR)
+                cv2.rectangle(cam_frame, (col_x1, 0), (col_x2, self.camera_height), col_color, 2)
+                if not self.needle_confirmed:
+                    warn_h  = 44
+                    warn_y  = 8
+                    _overlay = cam_frame.copy()
+                    cv2.rectangle(_overlay, (4, warn_y),
+                                  (self.camera_width - 4, warn_y + warn_h),
+                                  (0, 60, 180), -1)
+                    cv2.addWeighted(_overlay, 0.78, cam_frame, 0.22, 0, cam_frame)
+                    warn_txt = "!  SEWING NEEDLE NOT CENTRED"
+                    warn_scale, warn_thick = 0.62, 2
+                    (ww, wh), _ = cv2.getTextSize(warn_txt, cv2.FONT_HERSHEY_DUPLEX,
+                                                   warn_scale, warn_thick)
+                    wx = (self.camera_width - ww) // 2
+                    wy = warn_y + (warn_h + wh) // 2
+                    cv2.putText(cam_frame, warn_txt, (wx + 1, wy + 1), cv2.FONT_HERSHEY_DUPLEX,
+                                warn_scale, (0, 0, 0), warn_thick + 2, cv2.LINE_AA)
+                    cv2.putText(cam_frame, warn_txt, (wx, wy), cv2.FONT_HERSHEY_DUPLEX,
+                                warn_scale, (0, 220, 255), warn_thick, cv2.LINE_AA)
             # ─────────────────────────────────────────────────────────────────
 
             # Outside-pattern warning (color-gated + hysteresis stabilized)
@@ -1487,30 +1525,34 @@ class PatternMode:
                             cnt[:, :, 1] += by1
                             cv2.drawContours(cam_frame, [cnt], -1, marker_color, 1)
 
-            cv2.circle(cam_frame, (int(self.needle_pos_x), int(self.needle_pos_y)), 5, marker_color, -1)
+            if self.needle_detection_enabled:
+                cv2.circle(cam_frame, (int(self.needle_pos_x), int(self.needle_pos_y)), 5, marker_color, -1)
 
-            # Draw cloth outline
-            _, cloth_contour = self._detect_cloth_by_color(cam_frame)
-            if cloth_contour is not None:
-                cloth_cfg = self.cloth_color_profiles[self.selected_cloth_color]
-                outline_color = cloth_cfg.get('preview_bgr', (0, 255, 255))
-                cv2.drawContours(cam_frame, [cloth_contour], -1, outline_color, 2, cv2.LINE_AA)
+                # Draw cloth outline
+                _, cloth_contour = self._detect_cloth_by_color(cam_frame)
+                if cloth_contour is not None:
+                    cloth_cfg = self.cloth_color_profiles[self.selected_cloth_color]
+                    outline_color = cloth_cfg.get('preview_bgr', (0, 255, 255))
+                    cv2.drawContours(cam_frame, [cloth_contour], -1, outline_color, 2, cv2.LINE_AA)
 
-            marker_scale = text_scale(0.52, self.width, self.height, floor=0.46, ceiling=0.62)
-            marker_thick = text_thickness(1, self.width, self.height, min_thickness=1, max_thickness=2)
-            marker_scale = fit_text_scale(marker_text, FONT_MAIN, self.camera_width - col_x1 - 6, marker_scale, marker_thick, min_scale=0.4)
-            draw_text(
-                cam_frame,
-                marker_text,
-                col_x1,
-                self.camera_height - 8,
-                marker_scale,
-                marker_color,
-                marker_thick,
-                font=FONT_MAIN,
-                outline_color=(0, 0, 0),
-                outline_extra=1,
-            )
+                marker_scale = text_scale(0.52, self.width, self.height, floor=0.46, ceiling=0.62)
+                marker_thick = text_thickness(1, self.width, self.height, min_thickness=1, max_thickness=2)
+                marker_scale = fit_text_scale(marker_text, FONT_MAIN, self.camera_width - col_x1 - 6, marker_scale, marker_thick, min_scale=0.4)
+                draw_text(
+                    cam_frame,
+                    marker_text,
+                    col_x1,
+                    self.camera_height - 8,
+                    marker_scale,
+                    marker_color,
+                    marker_thick,
+                    font=FONT_MAIN,
+                    outline_color=(0, 0, 0),
+                    outline_extra=1,
+                )
+            else:
+                # When needle detection is off, hide detection UI
+                pass
             
             frame[self.camera_y:self.camera_y+self.camera_height, 
                   self.camera_x:self.camera_x+self.camera_width] = cam_frame
@@ -2513,6 +2555,20 @@ class PatternMode:
         if nb is not None and nb['x'] <= x <= nb['x'] + nb['w'] and nb['y'] <= y <= nb['y'] + nb['h']:
             self.play_button_click_sound()
             self.needle_detection_enabled = not bool(self.needle_detection_enabled)
+            # Load or unload the ONNX model depending on new state to save resources
+            if self.needle_detection_enabled:
+                try:
+                    self.load_needle_model()
+                except Exception:
+                    pass
+            else:
+                try:
+                    # Unload model and clear detection state + bbox
+                    self.unload_needle_model()
+                    self.smooth_cloth_bbox = None
+                    self.needle_confirmed = False
+                except Exception:
+                    pass
             print(f"🪡 Needle detection {'ENABLED' if self.needle_detection_enabled else 'DISABLED'}")
             return None
 
