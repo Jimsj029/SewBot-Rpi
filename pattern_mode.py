@@ -99,31 +99,31 @@ class PatternMode:
             'white': {
                 'label': 'WHITE',
                 'preview_bgr': (240, 240, 240),
-                'hsv_ranges': [((0, 0, 170), (179, 50, 255))],
-                'min_ratio': 0.15,
+                'hsv_ranges': [((0, 0, 140), (179, 70, 255))],
+                'min_ratio': 0.04,
             },
             'yellow': {
                 'label': 'YELLOW',
                 'preview_bgr': (0, 255, 255),
-                'hsv_ranges': [((18, 80, 80), (40, 255, 255))],
-                'min_ratio': 0.15,
+                'hsv_ranges': [((15, 50, 60), (42, 255, 255))],
+                'min_ratio': 0.04,
             },
             'red': {
                 'label': 'RED',
                 'preview_bgr': (0, 0, 255),
                 'hsv_ranges': [
-                    ((0, 90, 70), (10, 255, 255)),
-                    ((160, 90, 70), (179, 255, 255)),
+                    ((0, 70, 50), (12, 255, 255)),
+                    ((158, 70, 50), (179, 255, 255)),
                 ],
-                'min_ratio': 0.15,
+                'min_ratio': 0.04,
             },
             'black': {
                 'label': 'BLACK',
                 'preview_bgr': (30, 30, 30),
                 'hsv_ranges': [
-                    ((0, 0, 5), (179, 100, 52)),
+                    ((0, 0, 0), (179, 120, 60)),
                 ],
-                'min_ratio': 0.15,
+                'min_ratio': 0.04,
             },
         }
         self.color_buttons = {}
@@ -1467,31 +1467,59 @@ class PatternMode:
                         self.skeleton_seeded = True
                         self.centerline_progress_initialized = True
 
-                    # ── Auto-advance along skeleton when thread color is detected ─────
+                    # ── Auto-advance: color detection uses current dynamic pattern offset ──
+                    # Compute where the pattern is sitting RIGHT NOW (before any advance)
+                    # so the detection region matches the ink visible on camera.
                     moved_with_color = False
                     if self.sewing_started:
-                        color_ok = self._matches_selected_color(
-                            detection_frame, self.needle_pos_x, self.needle_pos_y,
-                            hsv_frame=hsv_detection_frame,
-                        )
+                        _cur = int(np.clip(round(self.skeleton_idx_f), 0, skel_max_idx))
+                        _ex  = int(skeleton_path[_cur][0])
+                        _ey  = int(skeleton_path[_cur][1])
+                        x_off = int(round(self.NEEDLE_ROI_X)) - _ex
+                        y_off = int(round(self.NEEDLE_ROI_Y)) - _ey
+                        _pat_h, _pat_w = pattern_alpha.shape[:2]
+                        _dx1 = max(0, x_off)
+                        _dy1 = max(0, y_off)
+                        _dx2 = min(detection_frame.shape[1], x_off + _pat_w)
+                        _dy2 = min(detection_frame.shape[0], y_off + _pat_h)
+                        color_ok = False
+                        if _dx2 > _dx1 and _dy2 > _dy1:
+                            _sx1 = max(0, -x_off)
+                            _sy1 = max(0, -y_off)
+                            _sx2 = _sx1 + (_dx2 - _dx1)
+                            _sy2 = _sy1 + (_dy2 - _dy1)
+                            _cam_region  = detection_frame[_dy1:_dy2, _dx1:_dx2]
+                            _hsv_region  = hsv_detection_frame[_dy1:_dy2, _dx1:_dx2]
+                            _alpha_crop  = pattern_alpha[_sy1:_sy2, _sx1:_sx2]
+                            _ink_mask    = _alpha_crop > 0.1
+                            _ink_count   = int(np.count_nonzero(_ink_mask))
+                            if _ink_count > 0:
+                                _color_mask   = self._get_selected_color_mask(_cam_region, hsv_patch=_hsv_region)
+                                _color_in_ink = int(np.count_nonzero(_color_mask[_ink_mask]))
+                                _ratio = float(_color_in_ink) / float(_ink_count)
+                                color_cfg = self.color_profiles[self.selected_detection_color]
+                                self.last_color_match_ratio = _ratio
+                                self.last_color_match = _ratio >= color_cfg['min_ratio']
+                                color_ok = self.last_color_match
                         if color_ok:
                             self.skeleton_idx_f = float(np.clip(
                                 self.skeleton_idx_f + self.auto_move_speed,
                                 0.0, float(skel_max_idx)))
                             moved_with_color = True
 
-                    # ── Needle position follows skeleton index; pattern is fixed ─────────
+                    # ── Pattern scrolls under a fixed needle position ─────────────────
                     cur_idx = int(np.clip(round(self.skeleton_idx_f), 0, skel_max_idx))
                     exp_x   = int(skeleton_path[cur_idx][0])
                     exp_y   = int(skeleton_path[cur_idx][1])
 
-                    # Move the needle red-dot to the current skeleton point on screen.
-                    self.needle_pos_x = float(exp_x) + self.skeleton_offset_x
-                    self.needle_pos_y = float(exp_y) + self.skeleton_offset_y
+                    # Needle dot stays fixed; pattern slides so current skeleton
+                    # point always sits beneath the fixed needle position.
+                    self.needle_pos_x = float(self.NEEDLE_ROI_X)
+                    self.needle_pos_y = float(self.NEEDLE_ROI_Y)
 
-                    # Pattern offset is constant — pattern does not move.
-                    x_offset = int(round(self.skeleton_offset_x))
-                    y_offset = int(round(self.skeleton_offset_y))
+                    # Dynamic offset: current skeleton point → fixed screen position.
+                    x_offset = int(round(self.NEEDLE_ROI_X)) - exp_x
+                    y_offset = int(round(self.NEEDLE_ROI_Y)) - exp_y
                     self.pattern_offset_x = float(x_offset)
                     self.pattern_offset_y = float(y_offset)
 
