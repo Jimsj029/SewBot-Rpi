@@ -178,6 +178,7 @@ class PatternMode:
         self.wrong_stitch_check_radius = 12  # Detection circle for off-pattern check: line half-width + ~3 px margin
         self.missed_stitch_draw_radius = 4  # Paint radius for wrong-stitch red mark
         self.outline_thickness = 10             # Outline extends pattern mask outward by this many pixels to form the detection zone (adjustable in code)
+        self.blend_roi_half = 160               # Half-size (pixels) of the pattern-overlay blend window around the needle — reduce to improve FPS, increase to show more pattern context (adjustable in code)
         # Visual cyan expansion around accepted stitches (increase by 15%)
         self.cyan_spread_radius = int(math.ceil(2 * 1.8))
         self.progress_spread_radius = 4  # Progress expansion to bridge tiny gaps only
@@ -281,7 +282,7 @@ class PatternMode:
             'current': (0, 255, 0),        # Green in BGR (current section to sew)
             'upcoming': (100, 100, 100),   # Dim Gray (upcoming sections)
             'missed': (0, 0, 255),         # Red in BGR (off-pattern detections)
-            'outline': (0, 120, 200),      # Dim orange BGR (detection tolerance zone surrounding pattern)
+            'outline': (0, 140, 255),      # Bright orange BGR (detection tolerance zone surrounding pattern)
         }
         
         # Out-of-segment detection
@@ -531,8 +532,8 @@ class PatternMode:
         # Resize the mask to the desired dimensions
         mask = cv2.resize(mask, (self.uniform_width, self.uniform_height))
 
-        # Cut the binary mask in half (keep top half) — skipped for levels 4 & 5
-        if level not in (3, 5):
+        # Cut the binary mask in half (keep top half) — skipped for levels 3, 4 & 5
+        if level not in (3, 4, 5):
             mask = mask[:mask.shape[0] // 2, :]
 
         # Base width is 50%; increase it by 25% => 62.5% of original width.
@@ -541,6 +542,12 @@ class PatternMode:
         if level == 1:
             # Reduce to ~28% of original width (adjustable)
             new_w = int(round(mask.shape[1] * 0.28))
+        elif level == 5:
+            # Level 5: use the full canvas width for maximum width
+            new_w = self.uniform_width
+        elif level == 4:
+            # Level 4: use the full canvas width for a wide U shape
+            new_w = self.uniform_width
         else:
             new_w = int(round(mask.shape[1] * 0.625))
         new_w = max(1, min(mask.shape[1], new_w))
@@ -553,10 +560,13 @@ class PatternMode:
         centered_mask[top_offset:top_offset + mask.shape[0], left_offset:left_offset + mask.shape[1]] = mask
         mask = centered_mask
 
-        # Dilate pattern lines for levels 3-5 *just enough* to round sharp corners
-        # so the skeleton tracer navigates them cleanly, without visually thickening
-        # the lines above the level 1/2 baseline.
-        if level in (3, 4, 5):
+        # Dilate pattern lines to achieve consistent ~6px visual thickness across levels.
+        # Level 5 curves have thin 1px spots from the source mask so need 2 iterations
+        # to fill them out to match level 1's uniform 6px line width.
+        if level == 5:
+            dil_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+            mask = cv2.dilate(mask, dil_kernel, iterations=2)
+        elif level in (3, 4):
             dil_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
             mask = cv2.dilate(mask, dil_kernel, iterations=1)
 
@@ -595,6 +605,8 @@ class PatternMode:
         self.pattern_offset_seeded = False
         self._cached_skeleton_path = None
         self._cached_skeleton_f32  = None
+        # skeleton_idx_f = 0 means start at path[0], which is the bottom-left
+        # for level 5 (skeleton starts from bottom) and top for other levels.
         self.skeleton_idx_f   = 0.0
         self.skeleton_seeded  = False
         self.needle_pos_x = float(self.NEEDLE_ROI_X)
@@ -629,7 +641,8 @@ class PatternMode:
         if overlay is None or alpha is None:
             return None
 
-        colored_overlay = overlay.copy()
+        # Start with a black canvas so the outline colour is visible against it.
+        colored_overlay = np.zeros_like(overlay)
         height, width = overlay.shape[:2]
         pattern_pixels = alpha > 0.1
 
@@ -683,19 +696,7 @@ class PatternMode:
                             run_detection=True, hsv_frame=None,
                             expected_trace_y=None, corridor_mask=None,
                             centerline_path=None, expected_path_idx=None):
-        """
-        Single-needle detection pipeline (replaces multi-stitch update_game_stats).
 
-        Pipeline:
-          Camera frame
-            → optical flow tracks needle between YOLO calls
-            → 64×64 ROI cropped around needle_pos
-            → needle.onnx detects needle / stitch
-            → stitch centre mapped to pattern coordinates
-            → pattern overlap check
-            → completed_stitch_mask updated
-            → progress recalculated
-        """
         if pattern_alpha is None:
             return
 
@@ -993,8 +994,8 @@ class PatternMode:
         path_points = []
         prev_x = None
 
-        # For levels 4 & 5, find the global leftmost x and start there
-        if self.current_level in (4, 5):
+        # For level 5, start at the bottom-most row with the leftmost pixel and trace upward
+        if self.current_level == 5:
             all_xs = []
             row_data = []
             for y in range(actual_h):
@@ -1002,12 +1003,37 @@ class PatternMode:
                 if xs.size > 0:
                     all_xs.extend(xs)
                     row_data.append((y, xs))
-            
             if not row_data:
                 return None
-            
             global_min_x = int(np.min(all_xs))
-            
+            # Find the last (bottom-most) row that contains this leftmost x
+            start_y = None
+            for y, xs in reversed(row_data):
+                if global_min_x in xs:
+                    start_y = y
+                    prev_x = global_min_x
+                    path_points.append((global_min_x, y))
+                    break
+            # Continue upward from that row
+            for y in range(start_y - 1 if start_y is not None else actual_h - 1, -1, -1):
+                xs = np.where(pat_binary[y] > 0)[0]
+                if xs.size == 0:
+                    continue
+                x = int(xs[np.argmin(np.abs(xs - prev_x))])
+                path_points.append((x, y))
+                prev_x = x
+        # For level 4, keep the original top-to-bottom leftmost start
+        elif self.current_level == 4:
+            all_xs = []
+            row_data = []
+            for y in range(actual_h):
+                xs = np.where(pat_binary[y] > 0)[0]
+                if xs.size > 0:
+                    all_xs.extend(xs)
+                    row_data.append((y, xs))
+            if not row_data:
+                return None
+            global_min_x = int(np.min(all_xs))
             # Find the first row that contains this leftmost x
             start_y = None
             for y, xs in row_data:
@@ -1016,7 +1042,6 @@ class PatternMode:
                     prev_x = global_min_x
                     path_points.append((global_min_x, y))
                     break
-            
             # Continue from that row
             for y in range(start_y + 1 if start_y is not None else 0, actual_h):
                 xs = np.where(pat_binary[y] > 0)[0]
@@ -1106,10 +1131,18 @@ class PatternMode:
         # ── Find an endpoint (degree-1 pixel) as the start of the path ────────
         endpoints = [(y, x) for (y, x) in skel_set if len(get_neighbors_8(y, x)) == 1]
         if not endpoints:
-            # Closed loop — pick topmost-leftmost pixel
-            start = min(skel_set, key=lambda p: (p[0], p[1]))
+            if self.current_level == 5:
+                # Closed loop — pick leftmost pixel, break ties by bottom-most
+                start = min(skel_set, key=lambda p: (p[1], -p[0]))
+            else:
+                # Closed loop — pick topmost-leftmost pixel
+                start = min(skel_set, key=lambda p: (p[0], p[1]))
         else:
-            start = min(endpoints, key=lambda p: (p[0], p[1]))
+            if self.current_level == 5:
+                # Level 5: start at leftmost endpoint (smallest x), break ties by bottom-most y
+                start = min(endpoints, key=lambda p: (p[1], -p[0]))
+            else:
+                start = min(endpoints, key=lambda p: (p[0], p[1]))
 
         # ── Walk path: at junctions pick the branch with the most reachable pixels ──
         # This avoids short spurious spurs that thinning creates at inner corners.
@@ -1521,8 +1554,13 @@ class PatternMode:
                             _sy2 = _sy1 + (_dy2 - _dy1)
                             _cam_region  = detection_frame[_dy1:_dy2, _dx1:_dx2]
                             _hsv_region  = hsv_detection_frame[_dy1:_dy2, _dx1:_dx2]
-                            _alpha_crop  = pattern_alpha[_sy1:_sy2, _sx1:_sx2]
-                            _ink_mask    = _alpha_crop > 0.1
+                            # Use the outline mask (dilated detection zone) as the
+                            # ink region for color detection instead of the raw
+                            # pattern alpha — so thread color is recognised anywhere
+                            # within the tolerance border, not just on the pattern line.
+                            _outline_full = self._get_pattern_outline_mask(pattern_alpha, _pat_w, _pat_h)
+                            _outline_crop = _outline_full[_sy1:_sy2, _sx1:_sx2]
+                            _ink_mask    = _outline_crop > 0
                             _ink_count   = int(np.count_nonzero(_ink_mask))
                             if _ink_count > 0:
                                 _color_mask   = self._get_selected_color_mask(_cam_region, hsv_patch=_hsv_region)
@@ -1565,17 +1603,34 @@ class PatternMode:
                     # Credit/penalize only when motion and selected thread color are both valid.
                     if moved_with_color:
                         pat_h, pat_w = pattern_alpha.shape[:2]
-                        # Use the outline mask as the detection zone: the stitch is accepted
-                        # as long as its centre pixel falls within the dilated outline
-                        # surrounding the pattern (self.outline_thickness pixels wide).
+                        # Stitch is in the outline detection zone if its centre pixel
+                        # falls within the dilated outline mask.
                         _outline = self._get_pattern_outline_mask(pattern_alpha, overlay_w, overlay_h)
-                        on_mask = bool(
+                        in_outline = bool(
                             _outline is not None
                             and exp_y < _outline.shape[0]
                             and exp_x < _outline.shape[1]
                             and _outline[exp_y, exp_x] > 0
                         )
-                        if on_mask:
+                        # A stitch in the outline zone counts as CYAN (correct) when
+                        # the stitch circle overlaps the actual pattern mask by >= 50%.
+                        # This means edge stitches that are mostly on the pattern are
+                        # accepted; stitches that are mostly outside are marked wrong.
+                        if in_outline:
+                            r = self.stitch_draw_radius
+                            y0 = max(0, exp_y - r); y1 = min(pat_h, exp_y + r + 1)
+                            x0 = max(0, exp_x - r); x1 = min(pat_w, exp_x + r + 1)
+                            yy, xx = np.mgrid[y0:y1, x0:x1]
+                            circle_mask = (yy - exp_y) ** 2 + (xx - exp_x) ** 2 <= r * r
+                            total_circle = int(np.count_nonzero(circle_mask))
+                            on_pat = int(np.count_nonzero(
+                                circle_mask & (pattern_alpha[y0:y1, x0:x1] > 0.1)
+                            )) if total_circle > 0 else 0
+                            mostly_on_pattern = total_circle > 0 and (on_pat / total_circle) >= 0.5
+                        else:
+                            mostly_on_pattern = False
+
+                        if in_outline and mostly_on_pattern:
                             if self.completed_stitch_mask is None:
                                 self.completed_stitch_mask = np.zeros((pat_h, pat_w), dtype=np.uint8)
                             cv2.circle(
@@ -1587,7 +1642,28 @@ class PatternMode:
                             )
                             self._realtime_pat_dirty = True
                             self._update_progress_from_mask(pattern_alpha)
+                        elif in_outline and not mostly_on_pattern:
+                            # In outline zone but mostly outside the pattern — mark wrong.
+                            if self.missed_stitch_mask is None:
+                                self.missed_stitch_mask = np.zeros((pat_h, pat_w), dtype=np.uint8)
+                            cv2.circle(
+                                self.missed_stitch_mask,
+                                (raw_needle_in_pat_x, raw_needle_in_pat_y),
+                                self.missed_stitch_draw_radius,
+                                255,
+                                -1,
+                            )
+                            self._realtime_pat_dirty = True
+                            self._update_progress_from_mask(pattern_alpha)
+                            try:
+                                self.out_of_segment_warning = True
+                                self.warning_message = "FOLLOW THE PATTERN"
+                                self.warning_flash_phase = 0
+                                self.warning_until_frame = int(self.stitch_frame_index) + 40
+                            except Exception:
+                                pass
                         else:
+                            # Completely outside the outline zone — mark wrong.
                             if self.missed_stitch_mask is None:
                                 self.missed_stitch_mask = np.zeros((pat_h, pat_w), dtype=np.uint8)
                             cv2.circle(
@@ -1650,14 +1726,44 @@ class PatternMode:
                         self._realtime_pat_dirty = False
                     realtime_pattern = self._cached_realtime_pat
 
-                    roi = cam_frame[dst_y1:dst_y2, dst_x1:dst_x2]
                     pattern_src = realtime_pattern if realtime_pattern is not None else pattern_overlay
-                    pattern_crop = pattern_src[src_y1:src_y2, src_x1:src_x2]
-                    alpha_crop = pattern_alpha[src_y1:src_y2, src_x1:src_x2]
-                    # Vectorized 3-channel alpha blend — avoids 3× Python-loop overhead.
-                    a3 = alpha_crop[:, :, np.newaxis] * 0.35  # [H, W, 1] broadcast
-                    roi_blended = a3 * pattern_crop + (1.0 - a3) * roi
-                    cam_frame[dst_y1:dst_y2, dst_x1:dst_x2] = roi_blended.astype(np.uint8)
+
+                    # ── Restrict alpha blend to a window around the needle ─────────
+                    # The needle is fixed at (NEEDLE_ROI_X, NEEDLE_ROI_Y).  Blending
+                    # only this region instead of the full visible pattern area
+                    # dramatically reduces per-frame pixel work.
+                    # Adjust self.blend_roi_half in __init__ to show more/less context.
+                    nx = int(self.needle_pos_x)
+                    ny = int(self.needle_pos_y)
+                    blend_x1 = max(dst_x1, nx - self.blend_roi_half)
+                    blend_y1 = max(dst_y1, ny - self.blend_roi_half)
+                    blend_x2 = min(dst_x2, nx + self.blend_roi_half)
+                    blend_y2 = min(dst_y2, ny + self.blend_roi_half)
+                    b_w = blend_x2 - blend_x1
+                    b_h = blend_y2 - blend_y1
+                    if b_w > 0 and b_h > 0:
+                        # Map the restricted blend window back to pattern source coords.
+                        bsrc_x1 = src_x1 + (blend_x1 - dst_x1)
+                        bsrc_y1 = src_y1 + (blend_y1 - dst_y1)
+                        bsrc_x2 = bsrc_x1 + b_w
+                        bsrc_y2 = bsrc_y1 + b_h
+                        roi = cam_frame[blend_y1:blend_y2, blend_x1:blend_x2]
+                        pattern_crop = pattern_src[bsrc_y1:bsrc_y2, bsrc_x1:bsrc_x2]
+                        alpha_crop = pattern_alpha[bsrc_y1:bsrc_y2, bsrc_x1:bsrc_x2]
+                        # Outline pixels sit outside the PNG alpha (alpha=0), so extend
+                        # the blend alpha to include the outline zone at full weight.
+                        _outline_blend = self._get_pattern_outline_mask(pattern_alpha, actual_w, actual_h)
+                        if _outline_blend is not None:
+                            _outline_crop_b = _outline_blend[bsrc_y1:bsrc_y2, bsrc_x1:bsrc_x2].astype(np.float32) / 255.0
+                            blend_alpha = np.maximum(alpha_crop, _outline_crop_b)
+                        else:
+                            blend_alpha = alpha_crop
+                        # Vectorized 3-channel alpha blend — avoids 3× Python-loop overhead.
+                        # Use higher alpha for outline to make it more visible
+                        a3 = blend_alpha[:, :, np.newaxis] * 0.8  # [H, W, 1] broadcast
+                        roi_blended = a3 * pattern_crop + (1.0 - a3) * roi
+                        cam_frame[blend_y1:blend_y2, blend_x1:blend_x2] = roi_blended.astype(np.uint8)
+                    # ─────────────────────────────────────────────────────────────
                     
                     self.run_needle_pipeline(
                         detection_frame, pattern_alpha,
@@ -1776,19 +1882,9 @@ class PatternMode:
                             patch_roi[match_pixels] = blended
 
             if self.needle_detection_enabled:
-                # Draw wrong-stitch detection border (dashed circle around needle)
+                # Draw a filled square marker for the needle (all states)
                 cx = int(self.needle_pos_x)
                 cy = int(self.needle_pos_y)
-                border_r = int(self.wrong_stitch_check_radius)
-                # Dashed circle: draw 12 short arcs evenly spaced
-                num_dashes = 12
-                for i in range(num_dashes):
-                    angle_start = int(i * 360 / num_dashes)
-                    angle_end   = int(angle_start + 360 / num_dashes * 0.55)
-                    cv2.ellipse(cam_frame, (cx, cy), (border_r, border_r),
-                                0, angle_start, angle_end, (0, 0, 220), 2, cv2.LINE_AA)
-
-                # Draw a filled square marker for the needle (all states)
                 half = 3
                 cv2.rectangle(cam_frame, (cx - half, cy - half), (cx + half, cy + half), marker_color, -1)
 
