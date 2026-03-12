@@ -70,9 +70,11 @@ def _put_text(img, text, x, y, scale, color, thickness):
 
 
 class TutorialPlayer:
-    def __init__(self, width=800, height=600, video_path=None, audio_path=None):
+    def __init__(self, width=800, height=600, video_path=None, audio_path=None,
+                 videos_subfolder='sewing-set-up', tutorial_label='TUTORIAL'):
         self.width = width
         self.height = height
+        self.tutorial_label = tutorial_label
         self.glow_phase = 0
         self.skipped = False
         self.completed = False
@@ -84,7 +86,7 @@ class TutorialPlayer:
         # Multi-video support for tutorial steps
         self.current_step = 0  # Current video index (0-4 for 5 videos)
         self.total_steps = 8
-        self.videos_base_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'videos', 'sewing-set-up')
+        self.videos_base_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'videos', videos_subfolder)
         self.video_files = []  # Will store paths to step1.mov through step5.mov
         self.load_video_list()
         
@@ -612,7 +614,7 @@ class TutorialPlayer:
             
         else:
             # Completed or skipped
-            title = "TUTORIAL COMPLETED" if self.completed else "TUTORIAL"
+            title = f"{self.tutorial_label} COMPLETED" if self.completed else self.tutorial_label
             font_scale = text_scale(1.5, self.width, self.height, floor=1.25, ceiling=1.7)
             thickness = text_thickness(3, self.width, self.height, min_thickness=2, max_thickness=4)
             font_scale = fit_text_scale(title, UI_FONT, self.width - 80, font_scale, thickness, min_scale=1.0)

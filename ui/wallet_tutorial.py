@@ -28,11 +28,11 @@ except ImportError:
         draw_text,
     )
 
-# Add parent directory to path for imports
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from music_manager import get_music_manager
 
-# Direct ONNX Runtime for needle centring detection (no ultralytics overhead)
+#ONNX Runtime for needle centring detection
 try:
     import onnxruntime as ort
     ORT_AVAILABLE = True
@@ -650,8 +650,67 @@ class WalletTutorialPlayer:
 
         _put_text(img, text, text_x, text_y, font_scale, COLORS['text_primary'], thickness)
     
+    def draw_materials_screen(self, img):
+        """Draw the wallet materials list as text inside a single box."""
+        materials = [
+            "1x - 11x24cm (Base Body)",
+            "1x - 11x24cm (Inner Cover)",
+            "1x - 12x24cm (Base Cover)",
+            "3x - 12x24cm  (Pockets & Back Lining)",
+            "Scissors",
+            "Pin Needles",
+        ]
+
+        # Title
+        title = "Materials Needed"
+        title_scale = text_scale(1.1, self.width, self.height, floor=0.95, ceiling=1.28)
+        title_thick = text_thickness(2, self.width, self.height, min_thickness=2, max_thickness=3)
+        title_scale = fit_text_scale(title, UI_FONT, self.width - 120, title_scale, title_thick, min_scale=0.82)
+        (title_w, title_h), _ = get_text_size(title, UI_FONT, title_scale, title_thick)
+        title_x = (self.width - title_w) // 2
+        title_y = 130
+        _put_text(img, title, title_x, title_y, title_scale, COLORS['text_accent'], title_thick)
+
+        # Measure all items to determine the box size
+        item_scale = text_scale(0.85, self.width, self.height, floor=0.74, ceiling=0.98)
+        item_thick = text_thickness(2, self.width, self.height, min_thickness=1, max_thickness=2)
+        line_spacing = 46
+        padding = 24
+
+        fitted_scales = []
+        line_sizes = []
+        for line in materials:
+            fitted = fit_text_scale(line, UI_FONT, self.width - 160, item_scale, item_thick, min_scale=0.64)
+            (lw, lh), _ = get_text_size(line, UI_FONT, fitted, item_thick)
+            fitted_scales.append(fitted)
+            line_sizes.append((lw, lh))
+
+        box_w = max(lw for lw, _ in line_sizes) + padding * 2
+        box_h = len(materials) * line_spacing - (line_spacing - line_sizes[0][1]) + padding * 2
+        box_x = (self.width - box_w) // 2
+        box_y = title_y + title_h + 30
+
+        # Draw single containing box
+        cv2.rectangle(img, (box_x, box_y), (box_x + box_w, box_y + box_h), (30, 30, 30), -1)
+        cv2.rectangle(img, (box_x, box_y), (box_x + box_w, box_y + box_h), COLORS['cyan'], 2)
+
+        # Draw each material item inside the box
+        for i, line in enumerate(materials):
+            (lw, lh) = line_sizes[i]
+            lx = (self.width - lw) // 2
+            ly = box_y + padding + lh + i * line_spacing
+            _put_text(img, line, lx, ly, fitted_scales[i], COLORS['text_primary'], item_thick)
+
+        # Hide progress bar off-screen (no bar shown for materials)
+        self.progress_bar = {'x': 0, 'y': -100, 'w': 0, 'h': 0}
+
     def draw_video_frame(self, img):
         """Draw actual video frame or placeholder"""
+        # For step 0 (Materials), show the text list instead of a video
+        if self.current_step == 0:
+            self.draw_materials_screen(img)
+            return
+
         # Video area - lowered to leave room for step instructions above
         video_margin = 50
         video_y = 145  # Extra space above video for step instruction text

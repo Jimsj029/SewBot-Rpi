@@ -26,18 +26,15 @@ class PatternMode:
         
         # Pattern variables
         self.current_level = 1
-        self.current_level_tracking = 1  # Track which level stats belong to
-        self.uniform_width = 216   # 144 * 1.50 = 216 (50% increase)
-        self.uniform_height = 270  # 180 * 1.50 = 270 (50% increase)
+        self.current_level_tracking = 1 
+        self.uniform_width = 216   
+        self.uniform_height = 270 
         self.alpha_blend = 0.9
         self.glow_phase = 0
         
-        # Level info display at top center (aligned with back button)
+        # Level info display at top center
         self.level_display_y = 60
         
-        # ── LAYOUT ───────────────────────────────────────────────────────────────
-        # Adjust these values to reposition/resize each panel.
-        # cloth panel Y and evaluate button Y are derived automatically.
 
         # Camera
         self.camera_x      = 216
@@ -145,10 +142,7 @@ class PatternMode:
         self.last_color_mask = None
         self.last_color_mask_bounds = None
         self.color_overlay_interval = 3
-        self.cloth_outline_interval = 4
         self._color_overlay_counter = 0
-        self._cloth_outline_counter = 0
-        self.cached_cloth_contour = None
         
         # Try again button (centered in modal) - will be calculated dynamically
         self.try_again_button = {'x': 0, 'y': 0, 'w': 200, 'h': 60}
@@ -196,21 +190,13 @@ class PatternMode:
         self.use_model_stitch_points = False  # Keep tracing tied to the red-dot center
         self.needle_model_imgsz = 160  # 160 is ~3× faster inference than 320 on RPi4
 
-        # Motion gate: a valid stitch requires cloth motion near the needle.
-        self.require_motion_for_stitch = True
-        self.cloth_motion_active = False
-        self.motion_vector_x = 0.0
-        self.motion_vector_y = 0.0
-        self.motion_vector_min_mag = 0.3
-        # Lucas-Kanade sparse optical flow for cloth tracking
+        # Lucas-Kanade sparse optical flow (retained for internal tracking, unused for movement)
         self.of_prev_gray = None        # Previous greyscale frame
         self.of_points = None           # Tracked feature points (Nx1x2 float32)
-        self.of_roi_half = 64           # Smaller ROI cuts per-frame LK cost on RPi
-        self.of_min_points = 8          # Re-detect when fewer points survive
-        self.of_max_corners = 40        # Fewer corners keeps LK tracking lighter
-        self.of_max_level = 2           # Shallower pyramid is cheaper than level 3
-        self.cloth_flow_interval = 2    # Update cloth flow every 2 frames
-        self._cloth_flow_counter = 0
+        self.of_roi_half = 64
+        self.of_min_points = 8
+        self.of_max_corners = 40
+        self.of_max_level = 2
         # Accumulated overlay offset driven entirely by cloth optical flow
         self.pattern_offset_x = 0.0
         self.pattern_offset_y = 0.0
@@ -223,8 +209,11 @@ class PatternMode:
         self.skeleton_offset_y = 0.0        # Fixed pattern→screen offset Y
         self.skeleton_seeded  = False
         self.skeleton_tangent_lookahead = 10  # Points used for tangent estimation
-        # Motion response multiplier (1.0 = original speed). Increase to move pattern faster.
-        self.motion_response = 1.0
+        # Auto-move speed: steps per frame along the skeleton when thread color is detected.
+        # Increase to move faster, decrease to move slower.
+        self.auto_move_speed = 1
+        # Speed control buttons (positions set dynamically in draw_score_panel)
+
         self.needle_on_pattern = True  # Whether the needle is currently on a pattern pixel
 
         # Cache processed blueprint overlays so we do not hit disk every frame.
@@ -539,12 +528,9 @@ class PatternMode:
         # Resize the mask to the desired dimensions
         mask = cv2.resize(mask, (self.uniform_width, self.uniform_height))
 
-        # Mirror the pattern horizontally for specific levels
-        if level in (4, 5):
-            mask = cv2.flip(mask, 1)
-
-        # Cut the binary mask in half (keep top half)
-        mask = mask[:mask.shape[0] // 2, :]
+        # Cut the binary mask in half (keep top half) — skipped for levels 4 & 5
+        if level not in (3, 5):
+            mask = mask[:mask.shape[0] // 2, :]
 
         # Base width is 50%; increase it by 25% => 62.5% of original width.
         # Make level-specific width adjustments. Level 1 should be a thin
@@ -599,12 +585,8 @@ class PatternMode:
         self.stitch_frame_index = 0
         self.last_stitch_frame_index = -9999
         self.last_stitch_point = None
-        self.cloth_motion_active = False
-        self.motion_vector_x = 0.0
-        self.motion_vector_y = 0.0
         self.of_prev_gray = None
         self.of_points = None
-        self._cloth_flow_counter = 0
         self.pattern_offset_x = 0.0
         self.pattern_offset_y = 0.0
         self.pattern_offset_seeded = False
@@ -615,8 +597,6 @@ class PatternMode:
         self.needle_pos_x = float(self.NEEDLE_ROI_X)
         self.needle_pos_y = float(self.NEEDLE_ROI_Y)
         self._color_overlay_counter = 0
-        self._cloth_outline_counter = 0
-        self.cached_cloth_contour = None
         # Clear per-level derivative caches
         self._cached_centerline     = None
         self._cached_centerline_f32 = None
@@ -679,111 +659,12 @@ class PatternMode:
         pass
 
     def _update_cloth_optical_flow(self, cam_frame):
-        """Track cloth motion using Lucas-Kanade sparse optical flow.
-
-        Computes the median pixel displacement of cloth texture near the needle.
-        Stores the result in motion_vector_x/y and cloth_motion_active.
-        The caller decides whether to advance the pattern based on this + color.
-        """
-        if cam_frame is None or cam_frame.size == 0:
-            self.cloth_motion_active = False
-            return
-
-        gray = cv2.cvtColor(cam_frame, cv2.COLOR_BGR2GRAY)
-
-        cx = int(self.needle_pos_x)
-        cy = int(self.needle_pos_y)
-        half = self.of_roi_half
-        rx1 = max(0, cx - half)
-        ry1 = max(0, cy - half)
-        rx2 = min(gray.shape[1], cx + half)
-        ry2 = min(gray.shape[0], cy + half)
-
-        # ── First frame or no previous frame: detect features and return ─────
-        if self.of_prev_gray is None:
-            mask = np.zeros_like(gray)
-            mask[ry1:ry2, rx1:rx2] = 255
-            self.of_points = cv2.goodFeaturesToTrack(
-                gray, maxCorners=self.of_max_corners, qualityLevel=0.02, minDistance=6, mask=mask)
-            self.of_prev_gray = gray
-            self.cloth_motion_active = False
-            return
-
-        # ── Re-detect when tracked set gets too sparse ────────────────────────
-        if self.of_points is None or len(self.of_points) < self.of_min_points:
-            mask = np.zeros_like(gray)
-            mask[ry1:ry2, rx1:rx2] = 255
-            self.of_points = cv2.goodFeaturesToTrack(
-                gray, maxCorners=self.of_max_corners, qualityLevel=0.02, minDistance=6, mask=mask)
-            self.of_prev_gray = gray
-            self.cloth_motion_active = False
-            return
-
-        # ── Track: previous frame → current frame ────────────────────────────
-        new_pts, status, _ = cv2.calcOpticalFlowPyrLK(
-            self.of_prev_gray, gray,
-            self.of_points, None,
-            winSize=(15, 15),
-            maxLevel=self.of_max_level,
-            criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03),
-        )
-
-        if new_pts is None or status is None:
-            self.of_points = None
-            self.of_prev_gray = gray
-            self.cloth_motion_active = False
-            return
-
-        good_old = self.of_points[status.flatten() == 1]
-        good_new  = new_pts[status.flatten() == 1]
-
-        if len(good_new) < 3:
-            self.of_points = None
-            self.of_prev_gray = gray
-            self.cloth_motion_active = False
-            return
-
-        # ── Median displacement — robust to outliers ──────────────────────────
-        displacements = good_new.reshape(-1, 2) - good_old.reshape(-1, 2)
-        dx = float(np.median(displacements[:, 0]))
-        dy = float(np.median(displacements[:, 1]))
-
-        blend = 0.5
-        self.motion_vector_x = (1.0 - blend) * self.motion_vector_x + blend * dx
-        self.motion_vector_y = (1.0 - blend) * self.motion_vector_y + blend * dy
-
-        self.cloth_motion_active = math.hypot(self.motion_vector_x, self.motion_vector_y) >= self.motion_vector_min_mag
-
-        self.of_points    = good_new.reshape(-1, 1, 2)
-        self.of_prev_gray = gray
+        """Removed: cloth detection is no longer used. Kept as no-op for compatibility."""
+        pass
 
     def _infer_centerline_step_direction(self, centerline_path, current_idx):
-        """Infer +1/-1 movement along centerline from local cloth motion."""
-        if centerline_path is None or len(centerline_path) < 3:
-            return 0
-
-        idx = int(np.clip(current_idx, 0, len(centerline_path) - 1))
-        prev_idx = max(0, idx - 1)
-        next_idx = min(len(centerline_path) - 1, idx + 1)
-        if prev_idx == next_idx:
-            return 0
-
-        tangent = centerline_path[next_idx].astype(np.float32) - centerline_path[prev_idx].astype(np.float32)
-        tan_norm = float(np.linalg.norm(tangent))
-        if tan_norm < 1e-6:
-            return 0
-        tangent /= tan_norm
-
-        motion = np.array([self.motion_vector_x, self.motion_vector_y], dtype=np.float32)
-        motion_mag = float(np.linalg.norm(motion))
-        if motion_mag < self.motion_vector_min_mag:
-            return 0
-
-        projection = float(np.dot(motion, tangent))
-        if abs(projection) < 0.05:
-            return 0
-
-        return 1 if projection > 0 else -1
+        """Always advance forward along the centerline (cloth motion removed)."""
+        return 1
 
     def run_needle_pipeline(self, cam_frame, pattern_alpha,
                             x_offset, y_offset, actual_w, actual_h,
@@ -906,9 +787,6 @@ class PatternMode:
             return
 
         if not self._matches_selected_color(cam_frame, cx_cam, cy_cam, hsv_frame=hsv_frame):
-            return
-
-        if source == "center" and self.require_motion_for_stitch and not self.cloth_motion_active:
             return
 
         pat_h, pat_w = pattern_alpha.shape[:2]
@@ -1412,8 +1290,6 @@ class PatternMode:
         
         # Draw current level display at top center
         level_text = f"LEVEL {self.current_level}"
-        difficulty_texts = ["EASY", "MEDIUM", "HARD", "EXPERT", "MASTER"]
-        difficulty_text = f"[ {difficulty_texts[self.current_level - 1]} ]"
         
         pulse = 0.6 + 0.4 * abs(math.sin(self.glow_phase * 0.8))
         
@@ -1439,13 +1315,7 @@ class PatternMode:
             outline_extra=2,
         )
         
-        # Draw difficulty text below
-        diff_font_scale = text_scale(0.66, self.width, self.height, floor=0.58, ceiling=0.76)
-        diff_thickness = text_thickness(1, self.width, self.height, min_thickness=1, max_thickness=2)
-        (diff_w, diff_h), _ = get_text_size(difficulty_text, FONT_MAIN, diff_font_scale, diff_thickness)
-        diff_x = (self.width - diff_w) // 2
-        diff_y = level_y + 30
-        self._put_text(frame, difficulty_text, diff_x, diff_y, diff_font_scale, self.COLORS['text_secondary'], diff_thickness)
+        # (Difficulty text removed)
         
         # Draw back button (top left)
         self.draw_back_button(frame)
@@ -1468,8 +1338,7 @@ class PatternMode:
         # Draw thread colour panel (left, top)
         self.draw_thread_color_panel(frame)
 
-        # Draw cloth colour panel (left, below thread)
-        self.draw_cloth_color_panel(frame)
+        # (Cloth colour panel removed — cloth detection no longer used)
         
         # Draw evaluation results if evaluated
         if self.is_evaluated:
@@ -1497,51 +1366,6 @@ class PatternMode:
         text_x = bb['x'] + (bb['w'] - text_w) // 2
         text_y = bb['y'] + (bb['h'] + text_h) // 2
         self._put_text(frame, text, text_x, text_y, font_scale, self.COLORS['text_primary'], thickness)
-    
-    def _detect_cloth_by_color(self, cam_frame):
-        """Detect cloth outline using improved HSV colour segmentation.
-
-        Returns
-        -------
-        (bbox, contour) where bbox is (x1,y1,x2,y2) and contour is the
-        simplified polygon, or (None, None) when nothing is detected.
-        """
-        h, w = cam_frame.shape[:2]
-        # Blur before colour conversion: reduces high-frequency noise so the
-        # mask edges are cleaner and the contour is less jagged.
-        blurred = cv2.GaussianBlur(cam_frame, (7, 7), 0)
-        hsv = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
-
-        cfg = self.cloth_color_profiles[self.selected_cloth_color]
-        combined = np.zeros((h, w), dtype=np.uint8)
-        for lo, hi in cfg['hsv_ranges']:
-            combined = cv2.bitwise_or(
-                combined,
-                cv2.inRange(hsv, np.array(lo, np.uint8), np.array(hi, np.uint8)))
-
-        # Open first (remove isolated noise specks), then close
-        # (fill small holes/gaps inside the cloth region).
-        kernel_sm = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-        kernel_lg = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (25, 25))
-        combined = cv2.morphologyEx(combined, cv2.MORPH_OPEN,  kernel_sm)
-        combined = cv2.morphologyEx(combined, cv2.MORPH_CLOSE, kernel_lg)
-
-        contours, _ = cv2.findContours(combined, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if not contours:
-            return None, None
-
-        largest = max(contours, key=cv2.contourArea)
-        # Reject blobs smaller than 5 % of frame area
-        if cv2.contourArea(largest) < h * w * 0.05:
-            return None, None
-
-        # Simplify contour: removes pixel-level jagginess while preserving
-        # the overall cloth silhouette.
-        epsilon = 0.008 * cv2.arcLength(largest, True)
-        approx = cv2.approxPolyDP(largest, epsilon, True)
-
-        bx, by, bw, bh = cv2.boundingRect(largest)
-        return (bx, by, bx + bw, by + bh), approx
 
     def _run_needle_check(self, cam_frame):
         """Crop the column ROI and run needle.onnx to check needle centring.
@@ -1608,9 +1432,6 @@ class PatternMode:
             detection_frame = cam_frame.copy()
             hsv_detection_frame = cv2.cvtColor(detection_frame, cv2.COLOR_BGR2HSV)
             self.stitch_frame_index += 1
-            self._cloth_flow_counter = (self._cloth_flow_counter + 1) % self.cloth_flow_interval
-            if self._cloth_flow_counter == 0:
-                self._update_cloth_optical_flow(detection_frame)
             follow_check_ready = False
             follow_on_corridor = True
             follow_order_valid = True
@@ -1646,30 +1467,16 @@ class PatternMode:
                         self.skeleton_seeded = True
                         self.centerline_progress_initialized = True
 
-                    # ── Project cloth motion onto skeleton tangent → advance index ──────
+                    # ── Auto-advance along skeleton when thread color is detected ─────
                     moved_with_color = False
-                    if self.sewing_started and self.cloth_motion_active:
+                    if self.sewing_started:
                         color_ok = self._matches_selected_color(
                             detection_frame, self.needle_pos_x, self.needle_pos_y,
                             hsv_frame=hsv_detection_frame,
                         )
                         if color_ok:
-                            idx = int(np.clip(round(self.skeleton_idx_f), 0, skel_max_idx))
-                            look = int(self.skeleton_tangent_lookahead)
-                            t_ahead  = skeleton_path[min(idx + look, skel_max_idx)]
-                            t_behind = skeleton_path[max(idx - look, 0)]
-                            tan = np.array(
-                                [float(t_ahead[0] - t_behind[0]),
-                                 float(t_ahead[1] - t_behind[1])], dtype=np.float32)
-                            tan_len = float(np.hypot(tan[0], tan[1]))
-                            if tan_len > 1e-6:
-                                tan /= tan_len
-                                proj = (float(self.motion_vector_x) * tan[0]
-                                        + float(self.motion_vector_y) * tan[1])
-                            else:
-                                proj = 0.0
                             self.skeleton_idx_f = float(np.clip(
-                                self.skeleton_idx_f + float(self.motion_response) * proj,
+                                self.skeleton_idx_f + self.auto_move_speed,
                                 0.0, float(skel_max_idx)))
                             moved_with_color = True
 
@@ -1784,7 +1591,7 @@ class PatternMode:
                     pattern_crop = pattern_src[src_y1:src_y2, src_x1:src_x2]
                     alpha_crop = pattern_alpha[src_y1:src_y2, src_x1:src_x2]
                     # Vectorized 3-channel alpha blend — avoids 3× Python-loop overhead.
-                    a3 = alpha_crop[:, :, np.newaxis] * 0.7  # [H, W, 1] broadcast
+                    a3 = alpha_crop[:, :, np.newaxis] * 0.35  # [H, W, 1] broadcast
                     roi_blended = a3 * pattern_crop + (1.0 - a3) * roi
                     cam_frame[dst_y1:dst_y2, dst_x1:dst_x2] = roi_blended.astype(np.uint8)
                     
@@ -1879,12 +1686,8 @@ class PatternMode:
 
             color_cfg = self.color_profiles[self.selected_detection_color]
             if self.last_color_match:
-                if self.require_motion_for_stitch and not self.cloth_motion_active:
-                    marker_text = f"{color_cfg['label']} detected - move cloth"
-                    marker_color = (0, 165, 255)
-                else:
-                    marker_text = f"{color_cfg['label']} detected"
-                    marker_color = (0, 220, 0)
+                marker_text = f"{color_cfg['label']} detected - moving"
+                marker_color = (0, 220, 0)
             else:
                 marker_text = f"No {color_cfg['label'].lower()} ({self.last_color_match_ratio * 100:.0f}%)"
                 marker_color = (0, 0, 255)
@@ -1922,13 +1725,8 @@ class PatternMode:
                                 0, angle_start, angle_end, (0, 0, 220), 2, cv2.LINE_AA)
 
                 # Draw a filled square marker for the needle (all states)
-                half = 6
+                half = 3
                 cv2.rectangle(cam_frame, (cx - half, cy - half), (cx + half, cy + half), marker_color, -1)
-
-                # Draw cloth outline (detection still runs; overlay removed)
-                self._cloth_outline_counter = (self._cloth_outline_counter + 1) % self.cloth_outline_interval
-                if self._cloth_outline_counter == 0:
-                    _, self.cached_cloth_contour = self._detect_cloth_by_color(cam_frame)
 
                 marker_scale = text_scale(0.52, self.width, self.height, floor=0.46, ceiling=0.62)
                 marker_thick = text_thickness(1, self.width, self.height, min_thickness=1, max_thickness=2)
@@ -2868,7 +2666,7 @@ class PatternMode:
     
     def draw_next_level_button_centered(self, frame, panel_x, panel_y, panel_w, panel_h):
         """Draw next level button in the centered modal"""
-        button_w = 220
+        button_w = 220                                      
         button_h = 60
         button_x = panel_x + (panel_w - button_w) // 2
         button_y = panel_y + panel_h - 90
@@ -3050,10 +2848,8 @@ class PatternMode:
             tb = self.try_again_button
             if tb['x'] <= x <= tb['x'] + tb['w'] and tb['y'] <= y <= tb['y'] + tb['h']:
                 self.play_button_click_sound()
-                # Reset all progress to try again
-                self.pattern_progress = 0.0
-                self.raw_progress = 0.0
-                self.current_segment = 1
+                # Fully reset all progress and caches
+                self.reset_progress()
                 self.highest_segment_reached = 1
                 self.current_accuracy = 0.0
                 self.total_score = 0

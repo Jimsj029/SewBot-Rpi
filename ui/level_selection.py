@@ -216,16 +216,7 @@ class LevelSelection:
         text_color = self.COLORS['text_secondary'] if is_locked else self.COLORS['text_primary']
         _put_text(frame, label_text, label_x, label_y, label_font_scale, text_color, label_thickness)
         
-        # Difficulty indicator
-        difficulty_texts = ["EASY", "MEDIUM", "HARD", "EXPERT", "MASTER"]
-        difficulty_text = difficulty_texts[btn['level'] - 1]
-        diff_font_scale = text_scale(0.56, self.width, self.height, floor=0.5, ceiling=0.66)
-        diff_thickness = text_thickness(1, self.width, self.height, min_thickness=1, max_thickness=2)
-        diff_font_scale = fit_text_scale(difficulty_text, FONT_MAIN, btn['w'] - 12, diff_font_scale, diff_thickness, min_scale=0.46)
-        (diff_w, diff_h), _ = get_text_size(difficulty_text, FONT_MAIN, diff_font_scale, diff_thickness)
-        diff_x = btn['x'] + (btn['w'] - diff_w) // 2
-        diff_y = btn['y'] + btn['h'] - 20
-        _put_text(frame, difficulty_text, diff_x, diff_y, diff_font_scale, text_color, diff_thickness)
+        
     
     def draw_back_button(self, frame):
         """Draw back button"""
