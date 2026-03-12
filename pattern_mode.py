@@ -177,6 +177,7 @@ class PatternMode:
         self.stitch_draw_radius = 9        # Radius of each accepted (correct) stitch stamp — large enough to cover line edges & corners
         self.wrong_stitch_check_radius = 12  # Detection circle for off-pattern check: line half-width + ~3 px margin
         self.missed_stitch_draw_radius = 4  # Paint radius for wrong-stitch red mark
+        self.outline_thickness = 10             # Outline extends pattern mask outward by this many pixels to form the detection zone (adjustable in code)
         # Visual cyan expansion around accepted stitches (increase by 15%)
         self.cyan_spread_radius = int(math.ceil(2 * 1.8))
         self.progress_spread_radius = 4  # Progress expansion to bridge tiny gaps only
@@ -229,6 +230,7 @@ class PatternMode:
         self._cached_pat_px_f32     = None  # float32 versions for distance calc
         self._cached_pat_py_f32     = None
         self._cached_corridor_mask  = None  # dilated binary corridor from _get_pattern_corridor_mask
+        self._cached_outline_mask   = None  # dilated outline mask used as detection zone
         self._cached_realtime_pat   = None  # colored overlay from create_realtime_pattern
         self._realtime_pat_dirty    = True  # rebuild when True
 
@@ -276,9 +278,10 @@ class PatternMode:
         self.highest_segment_reached = 1  # Track highest segment to prevent going backwards
         self.segment_colors = {
             'completed': (255, 255, 0),    # Cyan in BGR (completed sections)
-            'current': (0, 255, 0),      # Green in BGR (current section to sew)
+            'current': (0, 255, 0),        # Green in BGR (current section to sew)
             'upcoming': (100, 100, 100),   # Dim Gray (upcoming sections)
             'missed': (0, 0, 255),         # Red in BGR (off-pattern detections)
+            'outline': (0, 120, 200),      # Dim orange BGR (detection tolerance zone surrounding pattern)
         }
         
         # Out-of-segment detection
@@ -605,6 +608,7 @@ class PatternMode:
         self._cached_pat_px_f32     = None
         self._cached_pat_py_f32     = None
         self._cached_corridor_mask  = None
+        self._cached_outline_mask   = None
         self._cached_realtime_pat   = None
         self._realtime_pat_dirty    = True
         self.centerline_progress_idx = 0
@@ -628,6 +632,14 @@ class PatternMode:
         colored_overlay = overlay.copy()
         height, width = overlay.shape[:2]
         pattern_pixels = alpha > 0.1
+
+        # Draw outline detection zone first (tolerance ring around pattern).
+        # Only pixels in the dilated outline but NOT on the pattern itself are coloured,
+        # so the zone shows as a visible border. Pattern pixels are drawn on top.
+        outline_mask = self._get_pattern_outline_mask(alpha, width, height)
+        if outline_mask is not None:
+            outline_border = np.logical_and(outline_mask > 0, ~pattern_pixels)
+            colored_overlay[outline_border] = self.segment_colors['outline']
 
         # Base state: everything in the blueprint is still to be sewn (yellow).
         colored_overlay[pattern_pixels] = self.segment_colors['current']
@@ -944,6 +956,25 @@ class PatternMode:
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
         self._cached_corridor_mask = cv2.dilate(pat_binary, kernel, iterations=1)
         return self._cached_corridor_mask
+
+    def _get_pattern_outline_mask(self, pattern_alpha, actual_w, actual_h):
+        """Return a dilated binary mask that surrounds the blueprint pattern.
+
+        The mask is expanded outward by self.outline_thickness pixels in all
+        directions.  This forms the detection zone: stitches whose centre pixel
+        falls inside this mask are accepted as on-pattern.
+
+        Adjust self.outline_thickness (default 10) in __init__ to make the
+        zone wider or narrower.
+        """
+        if self._cached_outline_mask is not None:
+            return self._cached_outline_mask
+        pat_crop = pattern_alpha[:actual_h, :actual_w]
+        pat_binary = (pat_crop > self.pattern_alpha_threshold).astype(np.uint8)
+        k = max(3, self.outline_thickness * 2 + 1)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+        self._cached_outline_mask = cv2.dilate(pat_binary, kernel, iterations=1)
+        return self._cached_outline_mask
 
     def _build_centerline_path(self, pattern_alpha, actual_w, actual_h):
         """Build an ordered centerline path from the binary blueprint mask.
@@ -1534,10 +1565,15 @@ class PatternMode:
                     # Credit/penalize only when motion and selected thread color are both valid.
                     if moved_with_color:
                         pat_h, pat_w = pattern_alpha.shape[:2]
-                        # Option 2: wrong stitch fires if ANY pixel of the stitch circle
-                        # falls outside the pattern mask — not just the center.
-                        on_mask = self._circle_fully_on_mask(
-                            pattern_alpha, exp_x, exp_y, self.wrong_stitch_check_radius
+                        # Use the outline mask as the detection zone: the stitch is accepted
+                        # as long as its centre pixel falls within the dilated outline
+                        # surrounding the pattern (self.outline_thickness pixels wide).
+                        _outline = self._get_pattern_outline_mask(pattern_alpha, overlay_w, overlay_h)
+                        on_mask = bool(
+                            _outline is not None
+                            and exp_y < _outline.shape[0]
+                            and exp_x < _outline.shape[1]
+                            and _outline[exp_y, exp_x] > 0
                         )
                         if on_mask:
                             if self.completed_stitch_mask is None:
