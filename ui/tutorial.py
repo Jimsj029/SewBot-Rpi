@@ -4,6 +4,7 @@ import cv2
 import numpy as np
 import math
 import os
+import re
 import sys
 import time
 
@@ -62,6 +63,7 @@ FONTS = {
 }
 
 UI_FONT = FONT_MAIN
+SUPPORTED_VIDEO_EXTENSIONS = {'.mp4', '.mov', '.avi', '.mkv'}
 
 
 def _put_text(img, text, x, y, scale, color, thickness):
@@ -69,9 +71,30 @@ def _put_text(img, text, x, y, scale, color, thickness):
     draw_text(img, text, x, y, scale, color, thickness, font=UI_FONT)
 
 
+def _natural_sort_key(value):
+    parts = re.split(r'(\d+)', value)
+    return [int(part) if part.isdigit() else part.lower() for part in parts]
+
+
+def _discover_video_files(folder_path):
+    if not os.path.isdir(folder_path):
+        return []
+
+    video_paths = []
+    for file_name in os.listdir(folder_path):
+        full_path = os.path.join(folder_path, file_name)
+        if not os.path.isfile(full_path):
+            continue
+        if os.path.splitext(file_name)[1].lower() not in SUPPORTED_VIDEO_EXTENSIONS:
+            continue
+        video_paths.append(full_path)
+
+    return sorted(video_paths, key=lambda path: _natural_sort_key(os.path.basename(path)))
+
+
 class TutorialPlayer:
     def __init__(self, width=800, height=600, video_path=None, audio_path=None,
-                 videos_subfolder='sewing-set-up', tutorial_label='TUTORIAL'):
+                 videos_subfolder='Sewing', tutorial_label='TUTORIAL'):
         self.width = width
         self.height = height
         self.tutorial_label = tutorial_label
@@ -84,10 +107,10 @@ class TutorialPlayer:
         self.progress_bar = {'x': 0, 'y': 0, 'w': 0, 'h': 0}
         
         # Multi-video support for tutorial steps
-        self.current_step = 0  # Current video index (0-4 for 5 videos)
-        self.total_steps = 8
+        self.current_step = 0
+        self.total_steps = 1
         self.videos_base_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'videos', videos_subfolder)
-        self.video_files = []  # Will store paths to step1.mov through step5.mov
+        self.video_files = []
         self.load_video_list()
         
         # Video capture
@@ -181,41 +204,18 @@ class TutorialPlayer:
         }
     
     def load_video_list(self):
-        """Load the list of tutorial video files (step1 through step5)"""
-        self.video_files = []
-        
-        # Check for step1.mov/mp4 through step5.mov/mp4
-        for i in range(1, self.total_steps + 1):
-            # Try both .mov and .mp4 extensions
-            video_found = False
-            # Try different naming patterns: "Step 1.MOV", "step1.mov", "step 1.mov", etc.
-            patterns = [
-                f'Step {i}.MOV',
-                f'Step {i}.mov',
-                f'Step {i}.MP4',
-                f'Step {i}.mp4',
-                f'step{i}.MOV',
-                f'step{i}.mov',
-                f'step{i}.MP4',
-                f'step{i}.mp4',
-                f'step {i}.MOV',
-                f'step {i}.mov',
-                f'step {i}.MP4',
-                f'step {i}.mp4',
-            ]
-            
-            for pattern in patterns:
-                video_path = os.path.join(self.videos_base_path, pattern)
-                if os.path.exists(video_path):
-                    self.video_files.append(video_path)
-                    video_found = True
-                    print(f"Found tutorial video: {pattern}")
-                    break
-            
-            if not video_found:
-                # Add None as placeholder if video not found
-                self.video_files.append(None)
-                print(f"Warning: step{i} video not found in {self.videos_base_path}")
+        """Load tutorial videos by scanning the selected videos subfolder."""
+        self.video_files = _discover_video_files(self.videos_base_path)
+
+        if not self.video_files:
+            self.video_files = [None]
+            self.total_steps = 1
+            print(f"Warning: no tutorial videos found in {self.videos_base_path}")
+            return
+
+        self.total_steps = len(self.video_files)
+        for video_path in self.video_files:
+            print(f"Found tutorial video: {os.path.basename(video_path)}")
     
     def load_current_video(self):
         """Load the video for the current step"""
