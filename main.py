@@ -758,8 +758,8 @@ class SewBotApp:
         else:
             text_start_y = self.height // 3  # Default position if no logo
         
-        # Draw SEWBOT title
-        text = "SEWBOT"
+        # Draw SEW GUIDER title
+        text = "SEW GUIDER"
         title_font = FONT_DISPLAY
         font_scale = text_scale(2.45, self.width, self.height, floor=2.05, ceiling=2.65)
         thickness = text_thickness(4, self.width, self.height, min_thickness=3, max_thickness=5)
