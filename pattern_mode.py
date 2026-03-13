@@ -156,6 +156,7 @@ class PatternMode:
         self.total_score = 0
         self.pattern_progress = 0.0  # 0-100%
         self.raw_progress = 0.0  # Raw actual progress for evaluation
+        self.progress_from_path = True  # Progress reaches 100% when path index reaches the end
         # Evaluation metrics
         self.evaluation_wrong_pct = 0.0  # % of wrong/off-pattern stitches among detections
         self.final_score = 0.0  # Adjusted score after accounting for wrong stitches
@@ -1314,8 +1315,10 @@ class PatternMode:
                 start = min(endpoints, key=lambda p: (p[0], p[1]))
 
         # ── Walk path ─────────────────────────────────────────────────────────
-        if self.current_level in (2, 3, 5):
-            # For level 3 (W pattern), stop at the end of each branch and do not backtrack.
+        if self.current_level in (2, 5):
+            # DFS with backtracking so every branch — including short
+            # bottom-corner spurs that a greedy longest-arm walk would skip —
+            # is visited in order.
             path_yx = []
             visited = set()
             visited.add(start)
@@ -1334,9 +1337,6 @@ class PatternMode:
                 while children and children[0] in visited:
                     children.pop(0)
                 if not children:
-                    # For level 3, stop at branch end (do not backtrack to other branches)
-                    if self.current_level == 3:
-                        break
                     dfs_stack.pop()
                 else:
                     nxt = children.pop(0)
@@ -1476,6 +1476,40 @@ class PatternMode:
             if self.follow_off_count >= self.follow_off_confirm_frames:
                 self.needle_on_pattern = False
 
+    def _update_segment_progress_from_raw(self):
+        """Update segment state from current raw_progress using existing thresholds."""
+        rp = self.raw_progress
+        if   rp >= 70: new_seg, new_prog = 5, 100.0
+        elif rp >= 45: new_seg, new_prog = 4,  75.0
+        elif rp >= 25: new_seg, new_prog = 3,  50.0
+        elif rp >= 12: new_seg, new_prog = 2,  25.0
+        else:          new_seg, new_prog = 1,   0.0
+
+        if new_seg > self.highest_segment_reached:
+            self.highest_segment_reached = new_seg
+            self.current_segment = min(new_seg, 4)
+            self.pattern_progress = new_prog
+        elif self.highest_segment_reached >= 5:
+            self.current_segment = 4
+            self.pattern_progress = 100.0
+        else:
+            self.current_segment = self.highest_segment_reached
+            self.pattern_progress = (self.highest_segment_reached - 1) * 25.0
+
+    def _update_progress_from_path(self, current_idx, max_idx):
+        """Drive raw progress directly from ordered path traversal."""
+        if max_idx <= 0:
+            path_progress = 100.0
+        else:
+            path_progress = float(np.clip((float(current_idx) / float(max_idx)) * 100.0, 0.0, 100.0))
+
+        # Path index should be monotonic; keep progress non-decreasing.
+        if path_progress < self.raw_progress:
+            path_progress = self.raw_progress
+
+        self.raw_progress = path_progress
+        self._update_segment_progress_from_raw()
+
     def _update_progress_from_mask(self, pattern_alpha):
         """Recalculate raw_progress from completed (cyan) stitch coverage only.
 
@@ -1483,6 +1517,9 @@ class PatternMode:
         on the pattern, preventing early 100% from red/off-pattern stitches or
         artificial dilation expansion.
         """
+        if self.progress_from_path:
+            return
+
         if self.completed_stitch_mask is None:
             return
 
@@ -1499,25 +1536,7 @@ class PatternMode:
         covered = int(np.sum(np.logical_and(completed > 0, pattern_pixels)))
         self.raw_progress = min(100.0, covered / total * 100.0)
         print(f"📊 Raw Progress: {self.raw_progress:.1f}%")
-
-        # Update segmented visual progress (one-way ratchet)
-        rp = self.raw_progress
-        if   rp >= 70: new_seg, new_prog = 5, 100.0
-        elif rp >= 45: new_seg, new_prog = 4,  75.0
-        elif rp >= 25: new_seg, new_prog = 3,  50.0
-        elif rp >= 12: new_seg, new_prog = 2,  25.0
-        else:          new_seg, new_prog = 1,   0.0
-
-        if new_seg > self.highest_segment_reached:
-            self.highest_segment_reached = new_seg
-            self.current_segment  = min(new_seg, 4)
-            self.pattern_progress = new_prog
-        elif self.highest_segment_reached >= 5:
-            self.current_segment  = 4
-            self.pattern_progress = 100.0
-        else:
-            self.current_segment  = self.highest_segment_reached
-            self.pattern_progress = (self.highest_segment_reached - 1) * 25.0
+        self._update_segment_progress_from_raw()
 
     # ──────────────────────────────────────────────────────────────────────────
 
@@ -1794,11 +1813,15 @@ class PatternMode:
                             _local_cy = int(np.clip(_ey - _sy1, 0, _outline_crop.shape[0] - 1))
                             _color_mask = self._get_selected_color_mask(_cam_region, hsv_patch=_hsv_region)
                             _contours, _ = cv2.findContours(_color_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                            _min_outline_contour_area = int(self.min_color_contour_area_outline)
+                            if self.current_level == 3:
+                                # Level 3 (W) has frequent sharp turns; be slightly more permissive.
+                                _min_outline_contour_area = max(10, int(round(_min_outline_contour_area * 0.65)))
                             _best_contour = self._select_color_contour(
                                 _contours,
                                 _local_cx,
                                 _local_cy,
-                                self.min_color_contour_area_outline,
+                                _min_outline_contour_area,
                             )
                             if _best_contour is not None:
                                 _m = cv2.moments(_best_contour)
@@ -1806,6 +1829,8 @@ class PatternMode:
                                     _ccx = float(_m['m10'] / _m['m00'])
                                     _ccy = float(_m['m01'] / _m['m00'])
                                     _max_dist = float(max(6, self.outline_detect_local_half_size))
+                                    if self.current_level == 3:
+                                        _max_dist = max(_max_dist, 30.0)
                                     if ((_ccx - _local_cx) ** 2 + (_ccy - _local_cy) ** 2) > (_max_dist ** 2):
                                         _best_contour = None
                             if _best_contour is not None:
@@ -1821,7 +1846,10 @@ class PatternMode:
                                 if _ink_count > 0:
                                     _color_in_ink = int(np.count_nonzero(_color_mask[_ink_mask]))
                                     _ratio = float(_color_in_ink) / float(_ink_count)
-                                    _required_px = max(10, min(int(self.min_color_pixels_outline), int(0.75 * _ink_count)))
+                                    _min_outline_pixels = int(self.min_color_pixels_outline)
+                                    if self.current_level == 3:
+                                        _min_outline_pixels = max(10, int(round(_min_outline_pixels * 0.65)))
+                                    _required_px = max(8, min(_min_outline_pixels, int(0.75 * _ink_count)))
                                     color_cfg = self.color_profiles[self.selected_detection_color]
                                     self.last_color_match_ratio = _ratio
                                     self.last_color_match = (
@@ -1852,6 +1880,9 @@ class PatternMode:
                     cur_idx = int(np.clip(round(self.skeleton_idx_f), 0, skel_max_idx))
                     exp_x   = int(skeleton_path[cur_idx][0])
                     exp_y   = int(skeleton_path[cur_idx][1])
+
+                    if self.progress_from_path:
+                        self._update_progress_from_path(cur_idx, skel_max_idx)
 
                     # Needle dot stays fixed; pattern slides so current skeleton
                     # point always sits beneath the fixed needle position.
@@ -2759,46 +2790,15 @@ class PatternMode:
             self.total_score = int(self.current_accuracy)
             
             # Calculate progress (how much of pattern is covered by stitches)
-            pattern_pixels = np.sum(pattern_mask_roi > 0)
-            if pattern_pixels > 0:
-                covered_pixels = np.sum(np.logical_and(roi_combined_mask > 0, pattern_mask_roi > 0))
-                raw_progress = min(100.0, (covered_pixels / pattern_pixels) * 100.0)
-                
-                # Store raw progress for evaluation
-                self.raw_progress = raw_progress
-                print(f"📊 Raw Progress: {raw_progress:.1f}%")  # Debug print
-                
-                # Determine segment based on raw progress (much lower thresholds)
-                if raw_progress >= 70:  # 70%+ completes everything
-                    new_segment = 5  # Beyond segment 4, means fully complete
-                    new_progress = 100.0
-                elif raw_progress >= 45:  # 45%+ completes segment 3, working on segment 4
-                    new_segment = 4
-                    new_progress = 75.0
-                elif raw_progress >= 25:  # 25%+ completes segment 2, working on segment 3
-                    new_segment = 3
-                    new_progress = 50.0
-                elif raw_progress >= 12:  # 12%+ completes segment 1, working on segment 2
-                    new_segment = 2
-                    new_progress = 25.0
-                else:  # < 12% still working on segment 1
-                    new_segment = 1
-                    new_progress = 0.0
-                
-                # Only allow progress forward, never backwards (prevent flickering)
-                if new_segment > self.highest_segment_reached:
-                    self.highest_segment_reached = new_segment
-                    self.current_segment = new_segment if new_segment <= 4 else 4
-                    self.pattern_progress = new_progress
-                # Keep the highest values reached
-                elif self.highest_segment_reached > 1:
-                    # Stay at the highest segment reached
-                    if self.highest_segment_reached == 5:
-                        self.current_segment = 4
-                        self.pattern_progress = 100.0
-                    else:
-                        self.current_segment = self.highest_segment_reached
-                        self.pattern_progress = (self.highest_segment_reached - 1) * 25.0
+            # Keep this legacy path only when mask-based progress mode is active.
+            if not self.progress_from_path:
+                pattern_pixels = np.sum(pattern_mask_roi > 0)
+                if pattern_pixels > 0:
+                    covered_pixels = np.sum(np.logical_and(roi_combined_mask > 0, pattern_mask_roi > 0))
+                    raw_progress = min(100.0, (covered_pixels / pattern_pixels) * 100.0)
+                    self.raw_progress = raw_progress
+                    print(f"📊 Raw Progress: {raw_progress:.1f}%")  # Debug print
+                    self._update_segment_progress_from_raw()
             
             # Update combo system
             if accuracy > 70:  # Good accuracy threshold
