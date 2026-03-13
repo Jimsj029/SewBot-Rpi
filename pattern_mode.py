@@ -3329,14 +3329,22 @@ class PatternMode:
     
     def evaluate_pattern(self):
         """Take screenshot, run AI stitch detection, and score against target pattern."""
+        print("\n" + "=" * 72)
+        print(f"🧪 EVALUATE START | Level {self.current_level}")
         if self.last_camera_frame is None:
             print("⚠ Cannot evaluate: no camera frame available yet.")
+            print("🧪 EVALUATE ABORTED")
+            print("=" * 72)
             return
         if self.last_pattern_projection is None:
             print("⚠ Cannot evaluate: pattern projection not ready yet.")
+            print("🧪 EVALUATE ABORTED")
+            print("=" * 72)
             return
         if self.eval_model is None:
             print(f"⚠ Cannot evaluate: AI model missing at {self.eval_model_path}")
+            print("🧪 EVALUATE ABORTED")
+            print("=" * 72)
             return
 
         # 1) Capture screenshot of current camera frame.
@@ -3347,11 +3355,14 @@ class PatternMode:
         cv2.imwrite(screenshot_path, self.last_camera_frame)
         self.last_evaluation_screenshot_path = screenshot_path
         print(f"📸 Evaluation screenshot saved: {screenshot_path}")
+        print(f"🧪 Frame size: {self.last_camera_frame.shape[1]}x{self.last_camera_frame.shape[0]}")
 
         # 2) Run AI model on screenshot.
         detected_camera_mask = self._run_evaluation_inference(self.last_camera_frame)
         if detected_camera_mask is None:
             print("⚠ Evaluation failed: AI inference returned no result.")
+            print("🧪 EVALUATE ABORTED")
+            print("=" * 72)
             return
 
         try:
@@ -3360,9 +3371,15 @@ class PatternMode:
             pattern_alpha = None
         if pattern_alpha is None:
             print("⚠ Evaluation failed: target pattern mask unavailable.")
+            print("🧪 EVALUATE ABORTED")
+            print("=" * 72)
             return
 
         proj = self.last_pattern_projection
+        print(
+            f"🧪 Projection | x_offset={int(proj['x_offset'])} y_offset={int(proj['y_offset'])} "
+            f"pattern={int(proj['pattern_w'])}x{int(proj['pattern_h'])}"
+        )
         detected_pattern_mask = self._map_camera_mask_to_pattern(
             detected_camera_mask,
             int(proj['x_offset']),
@@ -3370,6 +3387,9 @@ class PatternMode:
             int(proj['pattern_w']),
             int(proj['pattern_h']),
         )
+        camera_detected_px = int(np.count_nonzero(detected_camera_mask > 0))
+        pattern_detected_px = int(np.count_nonzero(detected_pattern_mask > 0))
+        print(f"🧪 AI detections | camera_px={camera_detected_px} mapped_pattern_px={pattern_detected_px}")
 
         # 3) Compute score from overlap between user's stitched detections and AI target pattern.
         pat_mask = (pattern_alpha > self.pattern_alpha_threshold)
@@ -3379,6 +3399,10 @@ class PatternMode:
         total_detected = int(np.count_nonzero(det_mask))
         on_pattern = int(np.count_nonzero(np.logical_and(det_mask, pat_mask)))
         off_pattern = int(np.count_nonzero(np.logical_and(det_mask, np.logical_not(pat_mask))))
+        print(
+            f"🧪 Pixel stats | total_pattern={total_pattern} total_detected={total_detected} "
+            f"on_pattern={on_pattern} off_pattern={off_pattern}"
+        )
 
         coverage_pct = (float(on_pattern) / float(total_pattern) * 100.0) if total_pattern > 0 else 0.0
         wrong_pct = (float(off_pattern) / float(total_detected) * 100.0) if total_detected > 0 else 0.0
@@ -3400,3 +3424,5 @@ class PatternMode:
                 f"📊 Evaluation: Score {self.final_score:.1f}% | "
                 f"Coverage: {coverage_pct:.1f}% | Wrong: {self.evaluation_wrong_pct:.1f}%. Need 80%+."
             )
+        print("🧪 EVALUATE END")
+        print("=" * 72)
