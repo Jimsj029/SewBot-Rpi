@@ -3,6 +3,7 @@ import numpy as np
 import math
 import gc
 import os
+from datetime import datetime
 import threading
 import onnxruntime as ort
 from music_manager import get_music_manager
@@ -163,6 +164,11 @@ class PatternMode:
         # Evaluation state
         self.is_evaluated = False
         self.level_completed = False
+        self.last_evaluation_screenshot_path = None
+
+        # Last camera frame/projection for screenshot-based AI evaluation
+        self.last_camera_frame = None
+        self.last_pattern_projection = None
         
         # Guide/Tutorial state
         self.show_guide = False  # Will be set to True on first level entry
@@ -356,6 +362,13 @@ class PatternMode:
         self.needle_input_name = None
         self.needle_output_name = None
 
+        # Evaluation model (stitch segmentation/detection for scoring)
+        self.eval_model = None
+        self.eval_input_name = None
+        self.eval_output_names = []
+        self.eval_input_size = 320
+        self.eval_model_path = None
+
         # ── Background inference thread ───────────────────────────────────────
         # ONNX takes ~120–180 ms on RPi4.  Running it on the render thread caps
         # the whole UI to ~5 FPS even at imgsz=160.  Instead, a dedicated daemon
@@ -373,6 +386,12 @@ class PatternMode:
                 self.load_needle_model(models_dir=models_dir)
         except Exception:
             self.needle_model = None
+
+        try:
+            self.load_evaluation_model(models_dir=models_dir)
+        except Exception as e:
+            print(f"⚠ Evaluation model load failed: {e}")
+            self.eval_model = None
 
         # Music flag to track if music is playing
         self.music_playing = False
@@ -448,6 +467,159 @@ class PatternMode:
                 gc.collect()
         except Exception:
             pass
+
+    def load_evaluation_model(self, models_dir=None):
+        """Load the stitch evaluation ONNX model (best.onnx) if available."""
+        if models_dir is None:
+            models_dir = os.path.join(os.path.dirname(__file__), 'models')
+        model_path = os.path.join(models_dir, 'best.onnx')
+        self.eval_model_path = model_path
+
+        if not os.path.exists(model_path):
+            print(f"⚠ Evaluation model not found: {model_path}")
+            self.eval_model = None
+            return
+
+        sess_opts = ort.SessionOptions()
+        sess_opts.inter_op_num_threads = 2
+        sess_opts.intra_op_num_threads = 2
+        self.eval_model = ort.InferenceSession(
+            model_path,
+            sess_options=sess_opts,
+            providers=['CPUExecutionProvider'],
+        )
+        self.eval_input_name = self.eval_model.get_inputs()[0].name
+        self.eval_output_names = [o.name for o in self.eval_model.get_outputs()]
+
+        in_shape = self.eval_model.get_inputs()[0].shape
+        if len(in_shape) >= 4 and isinstance(in_shape[2], int) and in_shape[2] > 0:
+            self.eval_input_size = int(in_shape[2])
+        else:
+            self.eval_input_size = 320
+        print(f"✓ Evaluation model loaded: {model_path} (imgsz={self.eval_input_size})")
+
+    @staticmethod
+    def _sigmoid(x):
+        return 1.0 / (1.0 + np.exp(-np.clip(x, -50.0, 50.0)))
+
+    def _extract_eval_mask_from_outputs(self, outputs, frame_w, frame_h):
+        """Decode model outputs to a binary stitch mask in camera-frame coordinates."""
+        combined_mask = np.zeros((frame_h, frame_w), dtype=np.uint8)
+        if outputs is None or len(outputs) == 0:
+            return combined_mask
+
+        preds = outputs[0]
+        if preds is None:
+            return combined_mask
+
+        if preds.ndim == 3:
+            preds = preds[0]
+        if preds.ndim != 2:
+            return combined_mask
+
+        if preds.shape[0] < preds.shape[1]:
+            preds = preds.T
+
+        channels = preds.shape[1]
+        if channels < 6:
+            return combined_mask
+
+        proto = None
+        if len(outputs) > 1 and isinstance(outputs[1], np.ndarray) and outputs[1].ndim == 4:
+            proto = outputs[1][0]
+        n_mask = int(proto.shape[0]) if proto is not None else 0
+        n_cls = channels - 4 - n_mask
+        if n_cls <= 0:
+            n_cls = 1
+            n_mask = max(0, channels - 5)
+
+        cls_scores = preds[:, 4:4 + n_cls]
+        obj = cls_scores.max(axis=1)
+        keep = obj >= max(0.05, self.confidence_threshold)
+        if not np.any(keep):
+            return combined_mask
+
+        filtered = preds[keep]
+        boxes_xywh = filtered[:, :4]
+        scores = filtered[:, 4:4 + n_cls].max(axis=1)
+
+        boxes = []
+        for b in boxes_xywh:
+            cx, cy, bw, bh = float(b[0]), float(b[1]), float(b[2]), float(b[3])
+            x1 = max(0, cx - bw / 2.0)
+            y1 = max(0, cy - bh / 2.0)
+            boxes.append([x1, y1, max(1.0, bw), max(1.0, bh)])
+
+        idxs = cv2.dnn.NMSBoxes(boxes, scores.tolist(), max(0.05, self.confidence_threshold), self.iou_threshold)
+        if idxs is None or len(idxs) == 0:
+            return combined_mask
+
+        mask_coeffs = filtered[:, 4 + n_cls:4 + n_cls + n_mask] if n_mask > 0 else None
+        in_size = float(self.eval_input_size)
+
+        for idx in np.array(idxs).reshape(-1):
+            bx, by, bw, bh = boxes[idx]
+            x1 = int(np.clip(round(bx / in_size * frame_w), 0, frame_w - 1))
+            y1 = int(np.clip(round(by / in_size * frame_h), 0, frame_h - 1))
+            x2 = int(np.clip(round((bx + bw) / in_size * frame_w), 0, frame_w - 1))
+            y2 = int(np.clip(round((by + bh) / in_size * frame_h), 0, frame_h - 1))
+            if x2 <= x1 or y2 <= y1:
+                continue
+
+            if proto is not None and mask_coeffs is not None and mask_coeffs.shape[1] == proto.shape[0]:
+                coeff = mask_coeffs[idx]
+                mh, mw = proto.shape[1], proto.shape[2]
+                pred_mask = self._sigmoid(np.matmul(coeff, proto.reshape(proto.shape[0], -1))).reshape(mh, mw)
+                pred_mask = cv2.resize(pred_mask, (frame_w, frame_h), interpolation=cv2.INTER_LINEAR)
+                bin_mask = (pred_mask > 0.5).astype(np.uint8) * 255
+                crop = np.zeros_like(bin_mask)
+                crop[y1:y2, x1:x2] = bin_mask[y1:y2, x1:x2]
+                combined_mask = np.maximum(combined_mask, crop)
+            else:
+                cv2.rectangle(combined_mask, (x1, y1), (x2, y2), 255, -1)
+
+        return combined_mask
+
+    def _run_evaluation_inference(self, camera_frame):
+        """Run AI model on screenshot and return binary detected-stitches mask."""
+        if self.eval_model is None:
+            return None
+
+        try:
+            in_size = int(self.eval_input_size)
+            resized = cv2.resize(camera_frame, (in_size, in_size))
+            inp = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+            inp = np.transpose(inp, (2, 0, 1))[np.newaxis]
+            outputs = self.eval_model.run(None, {self.eval_input_name: inp})
+            frame_h, frame_w = camera_frame.shape[:2]
+            return self._extract_eval_mask_from_outputs(outputs, frame_w, frame_h)
+        except Exception as e:
+            print(f"⚠ Evaluation inference failed: {e}")
+            return None
+
+    def _map_camera_mask_to_pattern(self, camera_mask, x_offset, y_offset, pattern_w, pattern_h):
+        """Map camera-space detections into pattern-space mask using current overlay offsets."""
+        pattern_mask = np.zeros((pattern_h, pattern_w), dtype=np.uint8)
+        if camera_mask is None:
+            return pattern_mask
+
+        dx1 = max(0, x_offset)
+        dy1 = max(0, y_offset)
+        dx2 = min(self.camera_width, x_offset + pattern_w)
+        dy2 = min(self.camera_height, y_offset + pattern_h)
+        if dx2 <= dx1 or dy2 <= dy1:
+            return pattern_mask
+
+        sx1 = max(0, -x_offset)
+        sy1 = max(0, -y_offset)
+        sx2 = sx1 + (dx2 - dx1)
+        sy2 = sy1 + (dy2 - dy1)
+
+        cam_crop = camera_mask[dy1:dy2, dx1:dx2]
+        if cam_crop.size == 0:
+            return pattern_mask
+        pattern_mask[sy1:sy2, sx1:sx2] = (cam_crop > 0).astype(np.uint8) * 255
+        return pattern_mask
 
     # ── Background inference thread ───────────────────────────────────────────
 
@@ -647,6 +819,8 @@ class PatternMode:
         self.follow_off_count = 0
         self.follow_on_count = 0
         self.sewing_started = False  # Require Start button press again on reset
+        self.last_evaluation_screenshot_path = None
+        self.last_pattern_projection = None
         print(f"🔄 Progress reset for Level {self.current_level}")
     
     def create_realtime_pattern(self, overlay, alpha, trace_y=None):
@@ -1559,6 +1733,8 @@ class PatternMode:
             self._put_text(frame, text, tx, ty, text_scale_value, self.COLORS['text_primary'], text_thick)
         else:
             cam_frame = cv2.resize(camera_frame, (self.camera_width, self.camera_height))
+            # Keep a copy of the raw camera frame for screenshot-based evaluation.
+            self.last_camera_frame = cam_frame.copy()
             detection_frame = cam_frame.copy()
             hsv_detection_frame = cv2.cvtColor(detection_frame, cv2.COLOR_BGR2HSV)
             self.stitch_frame_index += 1
@@ -1830,6 +2006,14 @@ class PatternMode:
                 # Validation should use full pattern coordinates.
                 actual_w = overlay_w
                 actual_h = overlay_h
+
+                # Save projection so evaluate can map AI detections back to the pattern.
+                self.last_pattern_projection = {
+                    'x_offset': int(x_offset),
+                    'y_offset': int(y_offset),
+                    'pattern_w': int(actual_w),
+                    'pattern_h': int(actual_h),
+                }
 
                 if visible_w > 0 and visible_h > 0:
                     corridor_mask = self._get_pattern_corridor_mask(pattern_alpha, actual_w, actual_h)
@@ -2429,8 +2613,8 @@ class PatternMode:
                 ("Click the EVALUATE button when", self.COLORS['text_secondary'], 0.7, 2),
                 ("you finish sewing.", self.COLORS['text_secondary'], 0.7, 2),
                 "",
-                ("You need 80% or more progress", self.COLORS['text_secondary'], 0.7, 2),
-                ("to complete the level.", self.COLORS['text_secondary'], 0.7, 2),
+                ("Reach 100% progress to unlock", self.COLORS['text_secondary'], 0.7, 2),
+                ("EVALUATE, then score 80%+ to pass.", self.COLORS['text_secondary'], 0.7, 2),
             ]
         
         y_pos = content_y
@@ -3110,7 +3294,7 @@ class PatternMode:
             print(f"Confidence threshold: {self.confidence_threshold:.2f}")
             return None
 
-        if not self.is_evaluated:
+        if not self.is_evaluated and self.raw_progress >= 100.0:
             eb = self.evaluate_button
             if eb['x'] <= x <= eb['x'] + eb['w'] and eb['y'] <= y <= eb['y'] + eb['h']:
                 self.play_button_click_sound()
@@ -3144,55 +3328,75 @@ class PatternMode:
         return None
     
     def evaluate_pattern(self):
-        """Evaluate the current pattern and determine if level is completed"""
-        self.is_evaluated = True
-        # Prefer computing coverage directly against the blueprint mask so
-        # the final score equals the actual cyan coverage of pattern pixels.
+        """Take screenshot, run AI stitch detection, and score against target pattern."""
+        if self.last_camera_frame is None:
+            print("⚠ Cannot evaluate: no camera frame available yet.")
+            return
+        if self.last_pattern_projection is None:
+            print("⚠ Cannot evaluate: pattern projection not ready yet.")
+            return
+        if self.eval_model is None:
+            print(f"⚠ Cannot evaluate: AI model missing at {self.eval_model_path}")
+            return
+
+        # 1) Capture screenshot of current camera frame.
+        captures_dir = os.path.join(os.path.dirname(__file__), 'captures', 'evaluations')
+        os.makedirs(captures_dir, exist_ok=True)
+        ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+        screenshot_path = os.path.join(captures_dir, f'level{self.current_level}_{ts}.png')
+        cv2.imwrite(screenshot_path, self.last_camera_frame)
+        self.last_evaluation_screenshot_path = screenshot_path
+        print(f"📸 Evaluation screenshot saved: {screenshot_path}")
+
+        # 2) Run AI model on screenshot.
+        detected_camera_mask = self._run_evaluation_inference(self.last_camera_frame)
+        if detected_camera_mask is None:
+            print("⚠ Evaluation failed: AI inference returned no result.")
+            return
+
         try:
             _, pattern_alpha = self.load_blueprint(self.current_level)
         except Exception:
             pattern_alpha = None
+        if pattern_alpha is None:
+            print("⚠ Evaluation failed: target pattern mask unavailable.")
+            return
 
-        cyan_covered = 0
-        missed_on_pattern = 0
-        total_pattern = 0
+        proj = self.last_pattern_projection
+        detected_pattern_mask = self._map_camera_mask_to_pattern(
+            detected_camera_mask,
+            int(proj['x_offset']),
+            int(proj['y_offset']),
+            int(proj['pattern_w']),
+            int(proj['pattern_h']),
+        )
 
-        if pattern_alpha is not None:
-            pat_mask = (pattern_alpha > self.pattern_alpha_threshold)
-            total_pattern = int(np.sum(pat_mask))
-            if total_pattern > 0:
-                if self.completed_stitch_mask is not None:
-                    # completed_stitch_mask is stored in pattern coordinates
-                    comp = (self.completed_stitch_mask > 0)
-                    # crop/resize defensively if shapes mismatch
-                    if comp.shape != pat_mask.shape:
-                        comp = cv2.resize(comp.astype(np.uint8), (pat_mask.shape[1], pat_mask.shape[0]), interpolation=cv2.INTER_NEAREST).astype(bool)
-                    cyan_covered = int(np.sum(np.logical_and(comp, pat_mask)))
-                if self.missed_stitch_mask is not None:
-                    miss = (self.missed_stitch_mask > 0)
-                    if miss.shape != pat_mask.shape:
-                        miss = cv2.resize(miss.astype(np.uint8), (pat_mask.shape[1], pat_mask.shape[0]), interpolation=cv2.INTER_NEAREST).astype(bool)
-                    missed_on_pattern = int(np.sum(np.logical_and(miss, pat_mask)))
+        # 3) Compute score from overlap between user's stitched detections and AI target pattern.
+        pat_mask = (pattern_alpha > self.pattern_alpha_threshold)
+        det_mask = (detected_pattern_mask > 0)
 
-        # Coverage and wrong-stitch percentages measured on blueprint pixels.
-        # Keep in-game progress behavior unchanged; only final evaluation score
-        # is adjusted here to penalize wrong stitches on the pattern.
-        if total_pattern == 0:
-            coverage_pct = 0.0
-            wrong_pct = 0.0
-        else:
-            coverage_pct = float(cyan_covered) / float(total_pattern) * 100.0
-            wrong_pct = float(missed_on_pattern) / float(total_pattern) * 100.0
+        total_pattern = int(np.count_nonzero(pat_mask))
+        total_detected = int(np.count_nonzero(det_mask))
+        on_pattern = int(np.count_nonzero(np.logical_and(det_mask, pat_mask)))
+        off_pattern = int(np.count_nonzero(np.logical_and(det_mask, np.logical_not(pat_mask))))
+
+        coverage_pct = (float(on_pattern) / float(total_pattern) * 100.0) if total_pattern > 0 else 0.0
+        wrong_pct = (float(off_pattern) / float(total_detected) * 100.0) if total_detected > 0 else 0.0
 
         self.evaluation_wrong_pct = wrong_pct
-        # Final score = correct coverage minus wrong-stitch percentage.
-        # Example: 100% coverage with 30% wrong stitches => 70 final score.
-        self.final_score = max(0.0, coverage_pct - wrong_pct)
+        # Penalize by wrong detections while rewarding target coverage.
+        self.final_score = max(0.0, coverage_pct * (1.0 - wrong_pct / 100.0))
 
-        # Determine pass/fail based on final_score
+        self.is_evaluated = True
         if self.final_score >= 80.0:
             self.level_completed = True
-            print(f"✅ Level {self.current_level} completed! Score: {self.final_score:.1f}%, Wrong on pattern: {self.evaluation_wrong_pct:.1f}%")
+            print(
+                f"✅ Level {self.current_level} completed! "
+                f"Score: {self.final_score:.1f}% | Coverage: {coverage_pct:.1f}% | Wrong: {self.evaluation_wrong_pct:.1f}%"
+            )
         else:
             self.level_completed = False
-            print(f"📊 Evaluation: Score {self.final_score:.1f}%, Wrong on pattern {self.evaluation_wrong_pct:.1f}%. Need 80%+ to complete.")
+            print(
+                f"📊 Evaluation: Score {self.final_score:.1f}% | "
+                f"Coverage: {coverage_pct:.1f}% | Wrong: {self.evaluation_wrong_pct:.1f}%. Need 80%+."
+            )
