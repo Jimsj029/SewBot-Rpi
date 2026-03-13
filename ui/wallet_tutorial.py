@@ -305,62 +305,75 @@ class WalletTutorialPlayer:
         }
     
     def load_video_list(self):
-        """Load wallet tutorial videos by scanning the Wallet videos subfolder."""
+        """Load wallet tutorial videos from the Wallet folder into the fixed 15-step flow."""
         discovered_files = _discover_video_files(self.videos_base_path)
         self.video_files = []
         self.step_entries = []
+
+        materials_path = None
+        showcase_path = None
+        numbered_steps = {}
+        unnumbered_steps = []
 
         for video_path in discovered_files:
             base_name = os.path.splitext(os.path.basename(video_path))[0]
             lower_name = base_name.lower()
             numbers = [int(value) for value in re.findall(r'\d+', lower_name)]
 
-            if 'material' in lower_name:
-                self.step_entries.append({
-                    'path': video_path,
-                    'kind': 'materials',
-                    'step_number': None,
-                    'needs_practice': False,
-                    'display_label': 'Wallet Materials',
-                    'sort_key': (0, 0, _natural_sort_key(base_name)),
-                })
-            elif 'showcase' in lower_name or 'final' in lower_name:
-                self.step_entries.append({
-                    'path': video_path,
-                    'kind': 'showcase',
-                    'step_number': None,
-                    'needs_practice': False,
-                    'display_label': 'Wallet Showcase',
-                    'sort_key': (2, 0, _natural_sort_key(base_name)),
-                })
+            if 'material' in lower_name and materials_path is None:
+                materials_path = video_path
+                continue
+
+            if ('showcase' in lower_name or 'final' in lower_name) and showcase_path is None:
+                showcase_path = video_path
+                continue
+
+            step_number = numbers[0] if numbers else None
+            if step_number is not None and 1 <= step_number <= 13 and step_number not in numbered_steps:
+                numbered_steps[step_number] = video_path
             else:
-                step_number = numbers[0] if numbers else None
-                display_label = f"Wallet Step {step_number}" if step_number is not None else base_name.replace('_', ' ').replace('-', ' ').title()
-                self.step_entries.append({
-                    'path': video_path,
-                    'kind': 'step',
-                    'step_number': step_number,
-                    'needs_practice': step_number is not None and step_number not in (2, 12),
-                    'display_label': display_label,
-                    'sort_key': (1, step_number if step_number is not None else 9999, _natural_sort_key(base_name)),
-                })
+                unnumbered_steps.append(video_path)
 
-        self.step_entries.sort(key=lambda entry: entry['sort_key'])
+        # Preserve the original wallet tutorial layout:
+        # Materials, Step 1-13, Showcase.
+        self.step_entries.append({
+            'path': materials_path,
+            'kind': 'materials',
+            'step_number': None,
+            'needs_practice': False,
+            'display_label': 'Wallet Materials',
+        })
 
-        if not self.step_entries:
-            self.step_entries = [{
-                'path': None,
-                'kind': 'materials',
-                'step_number': None,
-                'needs_practice': False,
-                'display_label': 'Wallet Materials',
-                'sort_key': (0, 0, []),
-            }]
+        remaining_step_paths = list(unnumbered_steps)
+        for step_number in range(1, 14):
+            video_path = numbered_steps.get(step_number)
+            if video_path is None and remaining_step_paths:
+                video_path = remaining_step_paths.pop(0)
+
+            self.step_entries.append({
+                'path': video_path,
+                'kind': 'step',
+                'step_number': step_number,
+                'needs_practice': step_number not in (2, 12),
+                'display_label': f'Wallet Step {step_number}',
+            })
+
+        self.step_entries.append({
+            'path': showcase_path,
+            'kind': 'showcase',
+            'step_number': None,
+            'needs_practice': False,
+            'display_label': 'Wallet Showcase',
+        })
+
+        if not discovered_files:
             print(f"Warning: no wallet tutorial videos found in {self.videos_base_path}")
-        else:
-            for entry in self.step_entries:
-                if entry['path'] is not None:
-                    print(f"Found wallet tutorial video: {os.path.basename(entry['path'])}")
+
+        for entry in self.step_entries:
+            if entry['path'] is not None:
+                print(f"Found wallet tutorial video: {os.path.basename(entry['path'])} -> {entry['display_label']}")
+            else:
+                print(f"Warning: missing video for {entry['display_label']} in {self.videos_base_path}")
 
         self.video_files = [entry['path'] for entry in self.step_entries]
         self.total_steps = len(self.video_files)

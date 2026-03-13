@@ -3060,18 +3060,20 @@ class PatternMode:
                         miss = cv2.resize(miss.astype(np.uint8), (pat_mask.shape[1], pat_mask.shape[0]), interpolation=cv2.INTER_NEAREST).astype(bool)
                     missed_on_pattern = int(np.sum(np.logical_and(miss, pat_mask)))
 
-        # Final score = percentage of pattern pixels covered by cyan
+        # Coverage and wrong-stitch percentages measured on blueprint pixels.
+        # Keep in-game progress behavior unchanged; only final evaluation score
+        # is adjusted here to penalize wrong stitches on the pattern.
         if total_pattern == 0:
-            self.final_score = 0.0
+            coverage_pct = 0.0
+            wrong_pct = 0.0
         else:
-            self.final_score = float(cyan_covered) / float(total_pattern) * 100.0
+            coverage_pct = float(cyan_covered) / float(total_pattern) * 100.0
+            wrong_pct = float(missed_on_pattern) / float(total_pattern) * 100.0
 
-        # Wrong-stitch percentage: show remaining pattern not covered by cyan
-        # (i.e. 100% - coverage). This matches the in-game display expectation.
-        if total_pattern == 0:
-            self.evaluation_wrong_pct = 0.0
-        else:
-            self.evaluation_wrong_pct = max(0.0, 100.0 - self.final_score)
+        self.evaluation_wrong_pct = wrong_pct
+        # Final score = correct coverage minus wrong-stitch percentage.
+        # Example: 100% coverage with 30% wrong stitches => 70 final score.
+        self.final_score = max(0.0, coverage_pct - wrong_pct)
 
         # Determine pass/fail based on final_score
         if self.final_score >= 80.0:
