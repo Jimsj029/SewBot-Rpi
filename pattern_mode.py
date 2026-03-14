@@ -12,7 +12,7 @@ from ui.typography import (
     text_thickness,
     get_text_size,
     fit_text_scale,
-    draw_text,
+    draw_text
 )
 
 
@@ -29,6 +29,8 @@ class PatternMode:
         self.uniform_width = 216   
         self.uniform_height = 270 
         self.alpha_blend = 0.9
+        # Visual opacity factor for pattern overlay (1.0 = unchanged, 0.5 = half opacity)
+        self.pattern_visual_opacity = 0.5
         self.glow_phase = 0
         
         # Level info display at top center
@@ -162,6 +164,9 @@ class PatternMode:
         self.eval_vis_detected = None     # Camera snapshot with detected thread highlighted
         self.eval_vis_mask = None         # Blueprint target mask image
         self.eval_vis_comparison = None   # Pixel-level comparison image
+        # Leniency control for final evaluation score.
+        # Example: 4.0 means raw 20% becomes displayed/scored 80% (capped at 100).
+        self.eval_score_multiplier = 4.0
 
         # Screenshot folder for saving evaluation screenshots
         self.screenshot_folder = os.path.join(os.path.dirname(__file__), 'screenshot')
@@ -179,20 +184,21 @@ class PatternMode:
         # Real-time stitch tracking for progressive coloring
         self.completed_stitch_mask = None  # Accumulated mask of all detected stitches
         self.missed_stitch_mask = None     # Accumulated mask of off-pattern detections
-        self.proximity_radius = 5  # Legacy compatibility radius (kept small)
-        self.stitch_draw_radius = 15       # Kept for compatibility with existing tuning values
-        self.stitch_box_half = 15          # Half-size of box stamp for accepted (correct) stitches
+        self.proximity_radius = 0  # Legacy compatibility radius (kept small)
+        self.stitch_draw_radius = 0       # Kept for compatibility with existing tuning values
+        self.stitch_box_half = 0          # Half-size of box stamp for accepted (correct) stitches
         self.wrong_stitch_check_radius = 20  # Detection circle for off-pattern check: line half-width + ~3 px margin
         self.missed_stitch_draw_radius = 6  # Kept for compatibility
         self.missed_stitch_box_half = 6     # Half-size of box stamp for wrong stitches
-        self.outline_thickness = 20             # Outline extends pattern mask outward by this many pixels to form the detection zone (adjustable in code)
-        self.outline_detect_local_radius = 20  # Kept for compatibility
+        # Make the outline/detection tolerance wider to be more lenient
+        self.outline_thickness = 8             # Outline extends pattern mask outward by this many pixels to form the detection zone (adjustable in code)
+        self.outline_detect_local_radius = 5  # Kept for compatibility
         self.outline_detect_local_half_size = 20  # Local half-size for contour-box detection around expected stitch
-        self.outline_on_pattern_ratio_min = 0.23  # Lenient: accept as correct if >= this fraction of stitch box overlaps the real pattern
-        self.min_color_pixels_center = 20   # Minimum matched color pixels for center contour-box detection
-        self.min_color_pixels_outline = 28  # Minimum matched color pixels inside contour-box detection area
+        self.outline_on_pattern_ratio_min = 0.1  # Lenient: accept as correct if >= this fraction of stitch box overlaps the real pattern
+        self.min_color_pixels_center = 50   # Minimum matched color pixels for center contour-box detection
+        self.min_color_pixels_outline = 50  # Minimum matched color pixels inside contour-box detection area
         self.min_color_contour_area_center = 18
-        self.min_color_contour_area_outline = 28
+        self.min_color_contour_area_outline = 18
         self.color_contour_padding = 3
         self.color_sample_half_size = 14
         self.blend_roi_half = 160               # Half-size (pixels) of the pattern-overlay blend window around the needle — reduce to improve FPS, increase to show more pattern context (adjustable in code)
@@ -230,7 +236,7 @@ class PatternMode:
         self.skeleton_tangent_lookahead = 10  # Points used for tangent estimation
         # Auto-move speed: steps per frame along the skeleton when thread color is detected.
         # Increase to move faster, decrease to move slower.
-        self.auto_move_speed = 0.7
+        self.auto_move_speed = 0.5
         # Speed control buttons (positions set dynamically in draw_score_panel)
 
         self.needle_on_pattern = True  # Whether the needle is currently on a pattern pixel
@@ -254,7 +260,8 @@ class PatternMode:
 
         # Follow-line validation (on/off pattern while sewing)
         self.pattern_alpha_threshold = 0.5
-        self.follow_corridor_radius = 40      # wider corridor = fewer wrong-stitch marks
+        # Increase corridor radius so off-pattern detection is more lenient
+        self.follow_corridor_radius = 60      # wider corridor = fewer wrong-stitch marks
         self.follow_order_tolerance = 24
         self.follow_centerline_distance = 50     # wider tolerance from centerline = fewer wrong-stitch marks
         self.snap_stitches_to_centerline = True
@@ -303,7 +310,7 @@ class PatternMode:
         models_dir = os.path.join(os.path.dirname(__file__), 'models')
         
         # Detection settings
-        self.confidence_threshold = 0.3  # Lowered for INT8 model (produces lower confidence scores)
+        self.confidence_threshold = 0.9  # Lowered for INT8 model (produces lower confidence scores)
         self.iou_threshold = 0.6  # Intersection over Union threshold
         
         # Cloth colour selector
@@ -350,6 +357,24 @@ class PatternMode:
         self.eval_output_names = []
         self.eval_input_size = 640
         self.eval_model_path = os.path.join(models_dir, 'evaluation.onnx')
+        # Evaluation width-matching: make detected stitches match target mask thickness.
+        self.eval_match_pattern_width = True
+        self.eval_width_match_max_px = 8
+
+        # Pattern mask dilation settings (modifiable)
+        # Kernel is (width, height) — keep small (3,3) by default.
+        # `pattern_dilate_iters` maps level -> iterations to dilate the raw mask
+        # before visual/overlay conversion. Change these values to adjust
+        # the visual thickness of the pattern lines per-level.
+        self.pattern_dilate_kernel = (3, 3)
+        self.pattern_dilate_iters = {
+            1: 2,
+            2: 1,
+            3: 2,
+            4: 2,
+            5: 3,
+        }
+        self.pattern_dilate_default_iters = 1
 
         # Music flag to track if music is playing
         self.music_playing = False
@@ -594,18 +619,26 @@ class PatternMode:
         # Each non-level-1 pattern gets one extra iteration vs the previous baseline
         # to produce a ~10% thickness increase.  Level 1 is intentionally left
         # unmodified (thin vertical column).
-        if level == 5:
+        try:
+            kw = int(self.pattern_dilate_kernel[0])
+            kh = int(self.pattern_dilate_kernel[1])
+            kw = max(1, kw)
+            kh = max(1, kh)
+            dil_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kw, kh))
+            iters = int(self.pattern_dilate_iters.get(level, self.pattern_dilate_default_iters))
+            if iters > 0:
+                mask = cv2.dilate(mask, dil_kernel, iterations=iters)
+        except Exception:
+            # Fallback to original hardcoded behaviour if config missing or invalid
             dil_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-            mask = cv2.dilate(mask, dil_kernel, iterations=3)
-        elif level in (3, 4):
-            dil_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-            mask = cv2.dilate(mask, dil_kernel, iterations=2)
-        elif level == 2:
-            dil_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-            mask = cv2.dilate(mask, dil_kernel, iterations=1)
-        elif level == 1:
-            dil_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-            mask = cv2.dilate(mask, dil_kernel, iterations=2)
+            if level == 5:
+                mask = cv2.dilate(mask, dil_kernel, iterations=3)
+            elif level in (3, 4):
+                mask = cv2.dilate(mask, dil_kernel, iterations=2)
+            elif level == 2:
+                mask = cv2.dilate(mask, dil_kernel, iterations=1)
+            elif level == 1:
+                mask = cv2.dilate(mask, dil_kernel, iterations=2)
      
 
 
@@ -615,6 +648,48 @@ class PatternMode:
 
         self._blueprint_cache[cache_key] = (overlay, alpha)
         return self._blueprint_cache[cache_key]
+
+    def load_raw_blueprint_mask(self, level):
+        """Load the blueprint mask for `level` but DO NOT apply the dilation/outline
+
+        This returns a uint8 mask (0/255) at the same uniform size used by
+        `load_blueprint`, but without the post-processing dilation that is used
+        for visual/overlay purposes. Use this for precise evaluation scoring so
+        that decisions are based on the original pattern pixels only.
+        """
+        mask_path = os.path.join(self.blueprint_folder, f'level{level}_mask.png')
+        if not os.path.exists(mask_path):
+            return None
+
+        mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+        if mask is None:
+            return None
+
+        # Resize to the uniform canvas used elsewhere
+        mask = cv2.resize(mask, (self.uniform_width, self.uniform_height), interpolation=cv2.INTER_NEAREST)
+
+        # Cut the binary mask in half (keep top half) — skipped for levels 3,4 & 5
+        if level not in (2, 3, 4, 5):
+            mask = mask[:mask.shape[0] // 2, :]
+
+        # Apply the same level-specific width adjustments as load_blueprint
+        if level == 1:
+            new_w = int(round(mask.shape[1] * 0.28))
+        elif level in (2, 3, 4, 5):
+            new_w = self.uniform_width
+        else:
+            new_w = int(round(mask.shape[1] * 0.625))
+        new_w = max(1, min(mask.shape[1], new_w))
+        mask = cv2.resize(mask, (new_w, mask.shape[0]), interpolation=cv2.INTER_NEAREST)
+
+        # Center the (possibly width-adjusted) mask into the uniform canvas
+        top_offset = (self.uniform_height - mask.shape[0]) // 2
+        left_offset = (self.uniform_width - mask.shape[1]) // 2
+        centered_mask = np.zeros((self.uniform_height, self.uniform_width), dtype=mask.dtype)
+        centered_mask[top_offset:top_offset + mask.shape[0], left_offset:left_offset + mask.shape[1]] = mask
+
+        # Return a clean binary mask (0/255) WITHOUT any dilation/outline
+        return (centered_mask > 0).astype(np.uint8) * 255
     
     def reset_progress(self):
         """Reset progress tracking for a new level"""
@@ -934,6 +1009,49 @@ class PatternMode:
             return 0.0
         on_pattern = int(np.count_nonzero(region > self.pattern_alpha_threshold))
         return float(on_pattern) / float(total)
+
+    def _estimate_binary_stroke_width(self, binary_mask):
+        """Estimate average stroke width of a binary mask in pixels."""
+        if binary_mask is None:
+            return 0.0
+        m = (binary_mask > 0).astype(np.uint8)
+        if int(np.count_nonzero(m)) < 32:
+            return 0.0
+        dist = cv2.distanceTransform(m, cv2.DIST_L2, 5)
+        vals = dist[m > 0]
+        if vals.size == 0:
+            return 0.0
+        return float(np.median(vals) * 2.0)
+
+    def _match_detected_mask_width_to_pattern(self, detected_mask, pattern_mask):
+        """Adjust detected mask thickness to match pattern-mask thickness."""
+        det_u8 = (detected_mask > 0).astype(np.uint8) * 255
+        pat_u8 = (pattern_mask > 0).astype(np.uint8) * 255
+
+        det_w = self._estimate_binary_stroke_width(det_u8)
+        pat_w = self._estimate_binary_stroke_width(pat_u8)
+        if det_w <= 0.0 or pat_w <= 0.0:
+            return det_u8 > 0
+
+        delta = pat_w - det_w
+        px = int(round(abs(delta) / 2.0))
+        px = min(max(0, px), int(max(0, getattr(self, 'eval_width_match_max_px', 8))))
+        if px <= 0:
+            return det_u8 > 0
+
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * px + 1, 2 * px + 1))
+        if delta > 0:
+            adjusted = cv2.dilate(det_u8, kernel, iterations=1)
+            op = 'dilate'
+        else:
+            adjusted = cv2.erode(det_u8, kernel, iterations=1)
+            op = 'erode'
+
+        print(
+            f"🔧 Eval width-match | detected≈{det_w:.2f}px pattern≈{pat_w:.2f}px "
+            f"op={op} px={px}"
+        )
+        return adjusted > 0
 
     def _get_pattern_corridor_mask(self, pattern_alpha, actual_w, actual_h):
         """Return a dilated binary corridor around the blueprint path."""
@@ -1816,7 +1934,7 @@ class PatternMode:
                             blend_alpha = alpha_crop
                         # Vectorized 3-channel alpha blend — avoids 3× Python-loop overhead.
                         # Use higher alpha for outline to make it more visible
-                        a3 = blend_alpha[:, :, np.newaxis] * 0.8  # [H, W, 1] broadcast
+                        a3 = blend_alpha[:, :, np.newaxis] * 0.8 * float(self.pattern_visual_opacity)  # [H, W, 1] broadcast (apply visual opacity)
                         roi_blended = a3 * pattern_crop + (1.0 - a3) * roi
                         cam_frame[blend_y1:blend_y2, blend_x1:blend_x2] = roi_blended.astype(np.uint8)
                     # ─────────────────────────────────────────────────────────────
@@ -1913,6 +2031,35 @@ class PatternMode:
                 outline_color=(0, 0, 0),
                 outline_extra=1,
             )
+
+            # If progress reached 100%, show a prominent overlay on the camera
+            if getattr(self, 'raw_progress', 0.0) >= 100.0:
+                instr = "Overlap your work with the pattern"
+                inst_scale = text_scale(0.9, self.width, self.height, floor=0.7, ceiling=1.0)
+                inst_thick = text_thickness(2, self.width, self.height, min_thickness=2, max_thickness=4)
+                inst_scale = fit_text_scale(instr, FONT_DISPLAY, self.camera_width - 40, inst_scale, inst_thick, min_scale=0.5)
+                (tw, th), _ = get_text_size(instr, FONT_DISPLAY, inst_scale, inst_thick)
+                pad_x = 18
+                pad_y = 55
+                rx = max(8, (self.camera_width - tw) // 2 - pad_x)
+                ry = 12
+                rw = min(self.camera_width - 16, tw + pad_x * 2)
+                rh = th + pad_y * 2
+                overlay = cam_frame.copy()
+                cv2.rectangle(overlay, (rx, ry), (rx + rw, ry + rh), (10, 10, 10), -1)
+                cv2.addWeighted(overlay, 0.65, cam_frame, 0.35, 0, cam_frame)
+                draw_text(
+                    cam_frame,
+                    instr,
+                    rx + (rw - tw) // 2,
+                    ry + (rh + th) // 2 - 4,
+                    inst_scale,
+                    self.COLORS['bright_blue'],
+                    inst_thick,
+                    font=FONT_DISPLAY,
+                    outline_color=self.COLORS['glow_cyan'],
+                    outline_extra=2,
+                )
             
             frame[self.camera_y:self.camera_y+self.camera_height, 
                   self.camera_x:self.camera_x+self.camera_width] = cam_frame
@@ -2292,8 +2439,8 @@ class PatternMode:
                 ("As you sew, the pattern will", self.COLORS['text_secondary'], 0.7, 2),
                 ("change color in real-time.", self.COLORS['text_secondary'], 0.7, 2),
                 "",
-                ("Start anywhere on the pattern", self.COLORS['text_secondary'], 0.7, 2),
-                ("and sew freely.", self.COLORS['text_secondary'], 0.7, 2),
+                ("Start on the red box on the pattern", self.COLORS['text_secondary'], 0.7, 2),
+                ("and sew.", self.COLORS['text_secondary'], 0.7, 2),
             ]
         elif self.guide_step == 2:
             instructions = [
@@ -2301,16 +2448,18 @@ class PatternMode:
                 "",
                 ("CYAN = Completed stitches", self.COLORS['text_secondary'], 0.7, 2),
                 "",
+                ("RED = Incorrect stitches", self.COLORS['text_secondary'], 0.7, 2),
+                "",
                 ("GREEN = Pattern to sew", self.COLORS['text_secondary'], 0.7, 2),
                 "",
-                ("The pattern progressively turns cyan!", self.COLORS['text_secondary'], 0.7, 2),
+                ("The pattern progressively change color!", self.COLORS['text_secondary'], 0.7, 2),
             ]
         elif self.guide_step == 3:
             instructions = [
                 ("PROGRESSIVE FEEDBACK", self.COLORS['text_primary'], 0.85, 2),
                 "",
-                ("Only stitches near your completed", self.COLORS['text_secondary'], 0.7, 2),
-                ("work will change to cyan.", self.COLORS['text_secondary'], 0.7, 2),
+                ("Only stitches near pattern", self.COLORS['text_secondary'], 0.7, 2),
+                ("will change to cyan.", self.COLORS['text_secondary'], 0.7, 2),
                 "",
                 ("Watch the pattern transform as", self.COLORS['text_secondary'], 0.7, 2),
                 ("you progress!", self.COLORS['text_secondary'], 0.7, 2),
@@ -2577,6 +2726,7 @@ class PatternMode:
         self._put_text(frame, pct_text, content_x + (bar_width - pct_w) // 2,
                        bar_y + (bar_height + pct_h) // 2, pct_scale, self.COLORS['text_primary'], pct_thick)
 
+
         cv2.line(frame, (x + 15, bar_y + bar_height + 12), (x + w - 15, bar_y + bar_height + 12),
                  self.COLORS['medium_blue'], 1)
 
@@ -2803,7 +2953,7 @@ class PatternMode:
 
         # Wrong-stitch percentage (smaller beneath score)
         content_y += 60
-        wrong_text = f"Wrong stitches: {self.evaluation_wrong_pct:.1f}%"
+        wrong_text = f""
         wrong_scale = text_scale(0.72, self.width, self.height, floor=0.66, ceiling=0.86)
         wrong_thick = text_thickness(2, self.width, self.height, min_thickness=1, max_thickness=2)
         (wt_w, _), _ = get_text_size(wrong_text, FONT_MAIN, wrong_scale, wrong_thick)
@@ -3158,12 +3308,29 @@ class PatternMode:
                 det_mask = np.logical_or(det_mask, (cs_r > 0))
 
         # 6) Compare detected stitches against the blueprint mask and score.
-        pat_mask = (pattern_alpha > self.pattern_alpha_threshold)
+        # Prefer a raw, non-dilated blueprint mask for precise scoring so
+        # that detection is judged against the original pixels in the
+        # blueprint. If unavailable, fall back to the processed alpha.
+        raw_blueprint = None
+        try:
+            raw_blueprint = self.load_raw_blueprint_mask(self.current_level)
+        except Exception:
+            raw_blueprint = None
+
+        if raw_blueprint is not None:
+            pat_mask = (raw_blueprint > 0)
+        else:
+            pat_mask = (pattern_alpha > self.pattern_alpha_threshold)
         # Crop both masks to the same region in case of minor size differences.
         h_cmp = min(pat_mask.shape[0], det_mask.shape[0])
         w_cmp = min(pat_mask.shape[1], det_mask.shape[1])
         pat_cmp = pat_mask[:h_cmp, :w_cmp]
         det_cmp = det_mask[:h_cmp, :w_cmp]
+
+        # Optionally normalize detected stroke thickness to match the pattern
+        # mask thickness before scoring.
+        if getattr(self, 'eval_match_pattern_width', True):
+            det_cmp = self._match_detected_mask_width_to_pattern(det_cmp, pat_cmp)
 
         total_pattern = int(np.count_nonzero(pat_cmp))
         total_detected = int(np.count_nonzero(det_cmp))
@@ -3179,14 +3346,38 @@ class PatternMode:
 
         self.evaluation_wrong_pct = wrong_pct
         # Final score rewards coverage and penalises wrong-area stitches.
-        self.final_score = max(0.0, coverage_pct * (1.0 - wrong_pct / 100.0))
+        raw_final_score = max(0.0, coverage_pct * (1.0 - wrong_pct / 100.0))
+        # Apply configurable leniency multiplier so low raw scores can be boosted.
+        self.final_score = min(100.0, raw_final_score * float(getattr(self, 'eval_score_multiplier', 1.0)))
 
         # ── Build evaluation visualization images for the results screen ─────
         # Image 1: Camera snapshot with detected thread pixels highlighted cyan.
         try:
             _det_vis = self.last_camera_frame.copy()
+            _det_mask_vis = (detected_camera_mask > 0)
+            if getattr(self, 'eval_match_pattern_width', True):
+                # Match preview thickness in camera-space as well so the visual
+                # highlight reflects what is used by scoring.
+                _cam_h, _cam_w = self.last_camera_frame.shape[:2]
+                _cam_pat = np.zeros((_cam_h, _cam_w), dtype=np.uint8)
+                _x_off = int(proj['x_offset'])
+                _y_off = int(proj['y_offset'])
+                _ph, _pw = pat_mask.shape[:2]
+
+                _dx1 = max(0, _x_off)
+                _dy1 = max(0, _y_off)
+                _dx2 = min(_cam_w, _x_off + _pw)
+                _dy2 = min(_cam_h, _y_off + _ph)
+                if _dx2 > _dx1 and _dy2 > _dy1:
+                    _sx1 = max(0, -_x_off)
+                    _sy1 = max(0, -_y_off)
+                    _sx2 = _sx1 + (_dx2 - _dx1)
+                    _sy2 = _sy1 + (_dy2 - _dy1)
+                    _cam_pat[_dy1:_dy2, _dx1:_dx2] = (pat_mask[_sy1:_sy2, _sx1:_sx2] > 0).astype(np.uint8) * 255
+                    _det_mask_vis = self._match_detected_mask_width_to_pattern(_det_mask_vis, _cam_pat)
+
             _hl = np.zeros_like(_det_vis)
-            _hl[detected_camera_mask > 0] = (0, 230, 200)
+            _hl[_det_mask_vis] = (0, 230, 200)
             cv2.addWeighted(_det_vis, 0.55, _hl, 1.0, 0, _det_vis)
             self.eval_vis_detected = _det_vis
         except Exception:
@@ -3217,13 +3408,15 @@ class PatternMode:
             self.level_completed = True
             print(
                 f"✅ Level {self.current_level} PASSED! "
-                f"Score: {self.final_score:.1f}% | Coverage: {coverage_pct:.1f}% | Wrong: {wrong_pct:.1f}%"
+                f"Score: {self.final_score:.1f}% (raw: {raw_final_score:.1f}%) | "
+                f"Coverage: {coverage_pct:.1f}% | Wrong: {wrong_pct:.1f}%"
             )
         else:
             self.level_completed = False
             print(
                 f"📊 Score: {self.final_score:.1f}% | "
-                f"Coverage: {coverage_pct:.1f}% | Wrong: {wrong_pct:.1f}%  (need 80 %+)"
+                f"Coverage: {coverage_pct:.1f}% | Wrong: {wrong_pct:.1f}% "
+                f"(raw: {raw_final_score:.1f}% | need 80 %+)"
             )
         print("🧪 EVALUATE END")
         print("=" * 72)
