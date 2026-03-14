@@ -1818,7 +1818,7 @@ class PatternMode:
                     # overlap between selected-thread contour region and pattern mask.
                     if moved_with_contour:
                         pat_h, pat_w = pattern_alpha.shape[:2]
-                        _stamp_half = 4 if self.current_level in (2, 3) else self.stitch_box_half
+                        _stamp_half = self.stitch_box_half
                         if thread_overlaps_pattern:
                             if self.completed_stitch_mask is None:
                                 self.completed_stitch_mask = np.zeros((pat_h, pat_w), dtype=np.uint8)
@@ -3294,18 +3294,9 @@ class PatternMode:
         pattern_detected_px = int(np.count_nonzero(detected_pattern_mask > 0))
         print(f"🧪 Detections | camera_px={camera_detected_px} mapped_pattern_px={pattern_detected_px}")
 
-        # 5) Merge the session accumulated stitch mask so stitches tracked in real
-        #    time (but not necessarily visible in the snapshot) also count toward
-        #    coverage.  This gives a fairer score when the camera moved slightly.
-        pat_h, pat_w = int(proj['pattern_h']), int(proj['pattern_w'])
+        # 5) Use detected mask only for evaluation (no session-overlay merge).
+        #    This prevents UI-tracked colors from influencing scoring.
         det_mask = (detected_pattern_mask > 0)
-        if self.completed_stitch_mask is not None:
-            cs = self.completed_stitch_mask
-            if cs.shape[0] == pat_h and cs.shape[1] == pat_w:
-                det_mask = np.logical_or(det_mask, (cs > 0))
-            else:
-                cs_r = cv2.resize(cs, (pat_w, pat_h), interpolation=cv2.INTER_NEAREST)
-                det_mask = np.logical_or(det_mask, (cs_r > 0))
 
         # 6) Compare detected stitches against the blueprint mask and score.
         # Prefer a raw, non-dilated blueprint mask for precise scoring so
@@ -3332,49 +3323,55 @@ class PatternMode:
         if getattr(self, 'eval_match_pattern_width', True):
             det_cmp = self._match_detected_mask_width_to_pattern(det_cmp, pat_cmp)
 
+        det_cmp_bool = (det_cmp > 0)
         total_pattern = int(np.count_nonzero(pat_cmp))
-        total_detected = int(np.count_nonzero(det_cmp))
-        on_pattern  = int(np.count_nonzero(np.logical_and(det_cmp, pat_cmp)))
-        off_pattern = int(np.count_nonzero(np.logical_and(det_cmp, ~pat_cmp)))
+        det_in_overlay = np.logical_and(det_cmp_bool, pat_cmp)
+        on_pattern = int(np.count_nonzero(det_in_overlay))
+        uncovered_pattern = max(0, total_pattern - on_pattern)
+        total_detected = on_pattern
+        off_pattern = 0
         print(
-            f"🧪 Pixel stats | total_pattern={total_pattern}  total_detected={total_detected} "
-            f"on_pattern={on_pattern}  off_pattern={off_pattern}"
+            f"🧪 Pixel stats | total_pattern={total_pattern}  covered={on_pattern} "
+            f"uncovered={uncovered_pattern}"
         )
 
+        # Coverage score = percentage of mask covered by detected stitches.
         coverage_pct = (float(on_pattern) / float(total_pattern) * 100.0) if total_pattern > 0 else 0.0
-        wrong_pct    = (float(off_pattern) / float(total_detected) * 100.0) if total_detected > 0 else 0.0
+        wrong_pct = 0.0
 
         self.evaluation_wrong_pct = wrong_pct
-        # Final score rewards coverage and penalises wrong-area stitches.
-        raw_final_score = max(0.0, coverage_pct * (1.0 - wrong_pct / 100.0))
-        # Apply configurable leniency multiplier so low raw scores can be boosted.
-        self.final_score = min(100.0, raw_final_score * float(getattr(self, 'eval_score_multiplier', 1.0)))
+        # Final score = percentage of the pattern mask covered by detected stitches.
+        raw_final_score = max(0.0, coverage_pct)
+        self.final_score = min(100.0, raw_final_score)
 
         # ── Build evaluation visualization images for the results screen ─────
-        # Image 1: Camera snapshot with detected thread pixels highlighted cyan.
+        # Image 1: Camera snapshot with only in-overlay detected stitches highlighted.
         try:
             _det_vis = self.last_camera_frame.copy()
             _det_mask_vis = (detected_camera_mask > 0)
-            if getattr(self, 'eval_match_pattern_width', True):
-                # Match preview thickness in camera-space as well so the visual
-                # highlight reflects what is used by scoring.
-                _cam_h, _cam_w = self.last_camera_frame.shape[:2]
-                _cam_pat = np.zeros((_cam_h, _cam_w), dtype=np.uint8)
-                _x_off = int(proj['x_offset'])
-                _y_off = int(proj['y_offset'])
-                _ph, _pw = pat_mask.shape[:2]
+            _cam_h, _cam_w = self.last_camera_frame.shape[:2]
+            _cam_pat = np.zeros((_cam_h, _cam_w), dtype=np.uint8)
+            _x_off = int(proj['x_offset'])
+            _y_off = int(proj['y_offset'])
+            _ph, _pw = pat_mask.shape[:2]
 
-                _dx1 = max(0, _x_off)
-                _dy1 = max(0, _y_off)
-                _dx2 = min(_cam_w, _x_off + _pw)
-                _dy2 = min(_cam_h, _y_off + _ph)
-                if _dx2 > _dx1 and _dy2 > _dy1:
-                    _sx1 = max(0, -_x_off)
-                    _sy1 = max(0, -_y_off)
-                    _sx2 = _sx1 + (_dx2 - _dx1)
-                    _sy2 = _sy1 + (_dy2 - _dy1)
-                    _cam_pat[_dy1:_dy2, _dx1:_dx2] = (pat_mask[_sy1:_sy2, _sx1:_sx2] > 0).astype(np.uint8) * 255
-                    _det_mask_vis = self._match_detected_mask_width_to_pattern(_det_mask_vis, _cam_pat)
+            _dx1 = max(0, _x_off)
+            _dy1 = max(0, _y_off)
+            _dx2 = min(_cam_w, _x_off + _pw)
+            _dy2 = min(_cam_h, _y_off + _ph)
+            if _dx2 > _dx1 and _dy2 > _dy1:
+                _sx1 = max(0, -_x_off)
+                _sy1 = max(0, -_y_off)
+                _sx2 = _sx1 + (_dx2 - _dx1)
+                _sy2 = _sy1 + (_dy2 - _dy1)
+                _cam_pat[_dy1:_dy2, _dx1:_dx2] = (pat_mask[_sy1:_sy2, _sx1:_sx2] > 0).astype(np.uint8) * 255
+
+            if getattr(self, 'eval_match_pattern_width', True):
+                # Match preview thickness in camera-space so preview mirrors scoring.
+                _det_mask_vis = self._match_detected_mask_width_to_pattern(_det_mask_vis, _cam_pat)
+
+            # Show only detected stitches that lie inside the overlay region.
+            _det_mask_vis = np.logical_and(_det_mask_vis, _cam_pat > 0)
 
             _hl = np.zeros_like(_det_vis)
             _hl[_det_mask_vis] = (0, 230, 200)
@@ -3391,12 +3388,11 @@ class PatternMode:
         except Exception:
             self.eval_vis_mask = None
 
-        # Image 3: Pixel-level comparison (green=correct, red=wrong, dim=missed).
+        # Image 3: Pixel-level comparison (cyan=stitched-on-overlay, dim=missed).
         try:
             _comp_vis = np.full((h_cmp, w_cmp, 3), (30, 20, 15), dtype=np.uint8)
-            _comp_vis[np.logical_and(pat_cmp, ~det_cmp)] = (50, 40, 20)   # dim: missed
-            _comp_vis[np.logical_and(det_cmp, pat_cmp)] = (50, 200, 50)   # green: correct
-            _comp_vis[np.logical_and(det_cmp, ~pat_cmp)] = (30, 30, 200)  # red: wrong
+            _comp_vis[np.logical_and(pat_cmp, ~det_in_overlay)] = (50, 40, 20)   # dim: missed
+            _comp_vis[det_in_overlay] = (80, 200, 200)                             # cyan: stitched in overlay
             self.eval_vis_comparison = _comp_vis
         except Exception:
             self.eval_vis_comparison = None
@@ -3409,13 +3405,13 @@ class PatternMode:
             print(
                 f"✅ Level {self.current_level} PASSED! "
                 f"Score: {self.final_score:.1f}% (raw: {raw_final_score:.1f}%) | "
-                f"Coverage: {coverage_pct:.1f}% | Wrong: {wrong_pct:.1f}%"
+                f"Mask Coverage: {coverage_pct:.1f}%"
             )
         else:
             self.level_completed = False
             print(
                 f"📊 Score: {self.final_score:.1f}% | "
-                f"Coverage: {coverage_pct:.1f}% | Wrong: {wrong_pct:.1f}% "
+                f"Mask Coverage: {coverage_pct:.1f}% "
                 f"(raw: {raw_final_score:.1f}% | need 80 %+)"
             )
         print("🧪 EVALUATE END")
