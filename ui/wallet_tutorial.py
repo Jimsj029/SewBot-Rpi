@@ -32,6 +32,12 @@ except ImportError:
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from music_manager import get_music_manager
+# Reuse the tutorial discovery helpers for consistent behavior
+try:
+    from .tutorial import _discover_video_files, _find_videos_folder
+except Exception:
+    # Fallback if relative import fails
+    from tutorial import _discover_video_files, _find_videos_folder
 
 #ONNX Runtime for needle centring detection
 try:
@@ -87,20 +93,8 @@ def _natural_sort_key(value):
     return [int(part) if part.isdigit() else part.lower() for part in parts]
 
 
-def _discover_video_files(folder_path):
-    if not os.path.isdir(folder_path):
-        return []
+# Use _discover_video_files imported from ui.tutorial for consistent behavior
 
-    video_paths = []
-    for file_name in os.listdir(folder_path):
-        full_path = os.path.join(folder_path, file_name)
-        if not os.path.isfile(full_path):
-            continue
-        if os.path.splitext(file_name)[1].lower() not in SUPPORTED_VIDEO_EXTENSIONS:
-            continue
-        video_paths.append(full_path)
-
-    return sorted(video_paths, key=lambda path: _natural_sort_key(os.path.basename(path)))
 
 # Per-step instructions shown in "Your Turn" practice screen
 STEP_INSTRUCTIONS = {
@@ -146,7 +140,9 @@ class WalletTutorialPlayer:
         # Multi-video support for wallet tutorial steps
         self.current_step = 0
         self.total_steps = 1
-        self.videos_base_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'videos', videos_subfolder)
+        # Resolve videos folder using the shared discovery helper
+        self.videos_base_path = _find_videos_folder(videos_subfolder)
+        print(f"Wallet tutorial videos base path resolved to: {self.videos_base_path}")
         self.video_files = []
         self.step_entries = []
         self.load_video_list()
