@@ -131,6 +131,7 @@ class PatternMode:
         self.last_color_match = False
         self.last_color_mask = None
         self.last_color_mask_bounds = None
+        self.last_color_contour_box = None
         self.color_overlay_interval = 3
         self._color_overlay_counter = 0
         
@@ -148,6 +149,7 @@ class PatternMode:
         self.total_score = 0
         self.pattern_progress = 0.0  # 0-100%
         self.raw_progress = 0.0  # Raw actual progress for evaluation
+        self.progress_from_path = True  # Progress reaches 100% when path index reaches the end
         # Evaluation metrics
         self.evaluation_wrong_pct = 0.0  # % of wrong/off-pattern stitches among detections
         self.final_score = 0.0  # Adjusted score after accounting for wrong stitches
@@ -178,14 +180,21 @@ class PatternMode:
         self.completed_stitch_mask = None  # Accumulated mask of all detected stitches
         self.missed_stitch_mask = None     # Accumulated mask of off-pattern detections
         self.proximity_radius = 5  # Legacy compatibility radius (kept small)
-        self.stitch_draw_radius = 15       # Radius of each accepted (correct) stitch stamp — large enough to cover line edges & corners
+        self.stitch_draw_radius = 15       # Kept for compatibility with existing tuning values
+        self.stitch_box_half = 15          # Half-size of box stamp for accepted (correct) stitches
         self.wrong_stitch_check_radius = 20  # Detection circle for off-pattern check: line half-width + ~3 px margin
-        self.missed_stitch_draw_radius = 6  # Paint radius for wrong-stitch red mark
+        self.missed_stitch_draw_radius = 6  # Kept for compatibility
+        self.missed_stitch_box_half = 6     # Half-size of box stamp for wrong stitches
         self.outline_thickness = 20             # Outline extends pattern mask outward by this many pixels to form the detection zone (adjustable in code)
-        self.outline_detect_local_radius = 20  # Local radius (pattern px) around current expected point for outline color matching
-        self.outline_on_pattern_ratio_min = 0.23  # Lenient: accept as correct if >= this fraction of stitch circle overlaps the real pattern
-        self.min_color_pixels_center = 150  # Minimum matched color pixels for center patch detection
-        self.min_color_pixels_outline = 150  # Minimum matched color pixels inside local outline window
+        self.outline_detect_local_radius = 20  # Kept for compatibility
+        self.outline_detect_local_half_size = 20  # Local half-size for contour-box detection around expected stitch
+        self.outline_on_pattern_ratio_min = 0.23  # Lenient: accept as correct if >= this fraction of stitch box overlaps the real pattern
+        self.min_color_pixels_center = 20   # Minimum matched color pixels for center contour-box detection
+        self.min_color_pixels_outline = 28  # Minimum matched color pixels inside contour-box detection area
+        self.min_color_contour_area_center = 18
+        self.min_color_contour_area_outline = 28
+        self.color_contour_padding = 3
+        self.color_sample_half_size = 14
         self.blend_roi_half = 160               # Half-size (pixels) of the pattern-overlay blend window around the needle — reduce to improve FPS, increase to show more pattern context (adjustable in code)
         # Visual cyan expansion around accepted stitches (increase by 15%)
         self.cyan_spread_radius = int(math.ceil(20 * self.stitch_draw_radius * 1.15))
@@ -594,6 +603,11 @@ class PatternMode:
         elif level == 2:
             dil_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
             mask = cv2.dilate(mask, dil_kernel, iterations=1)
+        elif level == 1:
+            dil_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+            mask = cv2.dilate(mask, dil_kernel, iterations=2)
+     
+
 
         # Convert mask to white overlay (pattern lines)
         overlay = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
@@ -744,10 +758,10 @@ class PatternMode:
         return colored_overlay
 
     def _matches_selected_color(self, cam_frame, cx_cam, cy_cam, hsv_frame=None):
-        """Return True when the sampled stitch area matches the currently selected color."""
+        """Return True when a contour-box near the sample point matches the selected color."""
         color_cfg = self.color_profiles[self.selected_detection_color]
 
-        sample_radius = 7
+        sample_radius = int(max(8, self.color_sample_half_size))
         x = int(cx_cam)
         y = int(cy_cam)
         x1 = max(0, x - sample_radius)
@@ -761,6 +775,7 @@ class PatternMode:
             self.last_color_match = False
             self.last_color_mask = None
             self.last_color_mask_bounds = None
+            self.last_color_contour_box = None
             return False
 
         hsv_patch = None
@@ -768,15 +783,58 @@ class PatternMode:
             hsv_patch = hsv_frame[y1:y2, x1:x2]
         combined_mask = self._get_selected_color_mask(patch, hsv_patch=hsv_patch)
 
-        color_pixels = int(np.count_nonzero(combined_mask))
-        match_ratio = float(color_pixels) / float(combined_mask.size)
+        contours, _ = cv2.findContours(combined_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        ref_x = (x2 - x1) / 2.0
+        ref_y = (y2 - y1) / 2.0
+        best_contour = self._select_color_contour(
+            contours,
+            ref_x,
+            ref_y,
+            self.min_color_contour_area_center,
+        )
+        if best_contour is None:
+            self.last_color_match_ratio = 0.0
+            self.last_color_match = False
+            self.last_color_mask = None
+            self.last_color_mask_bounds = None
+            self.last_color_contour_box = None
+            return False
+
+        box_mask, (bx1, by1, bx2, by2) = self._build_contour_box_mask(
+            combined_mask.shape,
+            best_contour,
+            padding=self.color_contour_padding,
+        )
+        ink_mask = box_mask > 0
+        ink_pixels = int(np.count_nonzero(ink_mask))
+        if ink_pixels <= 0:
+            self.last_color_match_ratio = 0.0
+            self.last_color_match = False
+            self.last_color_mask = None
+            self.last_color_mask_bounds = None
+            self.last_color_contour_box = None
+            return False
+
+        color_pixels = int(np.count_nonzero(combined_mask[ink_mask]))
+        match_ratio = float(color_pixels) / float(ink_pixels)
+        required_pixels = max(8, min(int(self.min_color_pixels_center), int(0.75 * ink_pixels)))
+
         self.last_color_match_ratio = match_ratio
         self.last_color_match = (
-            color_pixels >= int(self.min_color_pixels_center)
+            color_pixels >= required_pixels
             and match_ratio >= color_cfg['min_ratio']
         )
-        self.last_color_mask = combined_mask
-        self.last_color_mask_bounds = (x1, y1, x2, y2)
+
+        if bx2 > bx1 and by2 > by1:
+            masked = cv2.bitwise_and(combined_mask, box_mask)
+            self.last_color_mask = masked[by1:by2, bx1:bx2].copy()
+            self.last_color_mask_bounds = (x1 + bx1, y1 + by1, x1 + bx2, y1 + by2)
+            self.last_color_contour_box = self.last_color_mask_bounds
+        else:
+            self.last_color_mask = None
+            self.last_color_mask_bounds = None
+            self.last_color_contour_box = None
+
         return self.last_color_match
 
     def _get_selected_color_mask(self, bgr_patch, hsv_patch=None):
@@ -792,6 +850,90 @@ class PatternMode:
             combined_mask = cv2.bitwise_or(combined_mask, cv2.inRange(hsv_patch, low_np, high_np))
 
         return combined_mask
+
+    def _select_color_contour(self, contours, ref_x, ref_y, min_area):
+        """Pick the contour nearest the reference point with a minimum area."""
+        best_contour = None
+        best_score = None
+
+        for cnt in contours:
+            area = float(cv2.contourArea(cnt))
+            if area < float(min_area):
+                continue
+            m = cv2.moments(cnt)
+            if m['m00'] == 0:
+                continue
+            cx = float(m['m10'] / m['m00'])
+            cy = float(m['m01'] / m['m00'])
+            dist2 = (cx - float(ref_x)) ** 2 + (cy - float(ref_y)) ** 2
+            # Prefer contours near the expected point, break ties toward larger area.
+            score = dist2 - (0.35 * area)
+            if best_score is None or score < best_score:
+                best_score = score
+                best_contour = cnt
+
+        if best_contour is not None:
+            return best_contour
+
+        if not contours:
+            return None
+
+        largest = max(contours, key=cv2.contourArea)
+        if cv2.contourArea(largest) < float(min_area):
+            return None
+        return largest
+
+    def _build_contour_box_mask(self, mask_shape, contour, padding=0):
+        """Build a filled rectangle mask around a contour's bounding box."""
+        h, w = mask_shape[:2]
+        out = np.zeros((h, w), dtype=np.uint8)
+        if contour is None:
+            return out, (0, 0, 0, 0)
+
+        x, y, bw, bh = cv2.boundingRect(contour)
+        pad = int(max(0, padding))
+        x1 = max(0, int(x) - pad)
+        y1 = max(0, int(y) - pad)
+        x2 = min(w, int(x + bw) + pad)
+        y2 = min(h, int(y + bh) + pad)
+        if x2 <= x1 or y2 <= y1:
+            return out, (0, 0, 0, 0)
+
+        out[y1:y2, x1:x2] = 255
+        return out, (x1, y1, x2, y2)
+
+    def _stamp_box(self, mask, cx, cy, half_size):
+        """Paint a filled box stamp on a binary mask."""
+        if mask is None:
+            return
+
+        h, w = mask.shape[:2]
+        hs = max(1, int(half_size))
+        x1 = max(0, int(cx) - hs)
+        y1 = max(0, int(cy) - hs)
+        x2 = min(w, int(cx) + hs + 1)
+        y2 = min(h, int(cy) + hs + 1)
+        if x2 <= x1 or y2 <= y1:
+            return
+        mask[y1:y2, x1:x2] = 255
+
+    def _box_overlap_ratio(self, pattern_alpha, cx, cy, half_size):
+        """Return fraction of a box stamp that lies on the pattern mask."""
+        pat_h, pat_w = pattern_alpha.shape[:2]
+        hs = max(1, int(half_size))
+        x1 = max(0, int(cx) - hs)
+        y1 = max(0, int(cy) - hs)
+        x2 = min(pat_w, int(cx) + hs + 1)
+        y2 = min(pat_h, int(cy) + hs + 1)
+        if x2 <= x1 or y2 <= y1:
+            return 0.0
+
+        region = pattern_alpha[y1:y2, x1:x2]
+        total = int(region.size)
+        if total <= 0:
+            return 0.0
+        on_pattern = int(np.count_nonzero(region > self.pattern_alpha_threshold))
+        return float(on_pattern) / float(total)
 
     def _get_pattern_corridor_mask(self, pattern_alpha, actual_w, actual_h):
         """Return a dilated binary corridor around the blueprint path."""
@@ -999,11 +1141,10 @@ class PatternMode:
                 start = min(endpoints, key=lambda p: (p[0], p[1]))
 
         # ── Walk path ─────────────────────────────────────────────────────────
-        if self.current_level in (2, 3,5):
-            # DFS with backtracking so every branch — including the short
+        if self.current_level in (2, 5):
+            # DFS with backtracking so every branch — including short
             # bottom-corner spurs that a greedy longest-arm walk would skip —
-            # is visited in order.  Down-first ordering makes the path dip into
-            # each valley of the V/W before climbing the next arm.
+            # is visited in order.
             path_yx = []
             visited = set()
             visited.add(start)
@@ -1023,8 +1164,6 @@ class PatternMode:
                     children.pop(0)
                 if not children:
                     dfs_stack.pop()
-                    # No backtrack step: needle jumps invisibly to the next
-                    # junction and continues forward from there.
                 else:
                     nxt = children.pop(0)
                     visited.add(nxt)
@@ -1163,6 +1302,40 @@ class PatternMode:
             if self.follow_off_count >= self.follow_off_confirm_frames:
                 self.needle_on_pattern = False
 
+    def _update_segment_progress_from_raw(self):
+        """Update segment state from current raw_progress using existing thresholds."""
+        rp = self.raw_progress
+        if   rp >= 70: new_seg, new_prog = 5, 100.0
+        elif rp >= 45: new_seg, new_prog = 4,  75.0
+        elif rp >= 25: new_seg, new_prog = 3,  50.0
+        elif rp >= 12: new_seg, new_prog = 2,  25.0
+        else:          new_seg, new_prog = 1,   0.0
+
+        if new_seg > self.highest_segment_reached:
+            self.highest_segment_reached = new_seg
+            self.current_segment = min(new_seg, 4)
+            self.pattern_progress = new_prog
+        elif self.highest_segment_reached >= 5:
+            self.current_segment = 4
+            self.pattern_progress = 100.0
+        else:
+            self.current_segment = self.highest_segment_reached
+            self.pattern_progress = (self.highest_segment_reached - 1) * 25.0
+
+    def _update_progress_from_path(self, current_idx, max_idx):
+        """Drive raw progress directly from ordered path traversal."""
+        if max_idx <= 0:
+            path_progress = 100.0
+        else:
+            path_progress = float(np.clip((float(current_idx) / float(max_idx)) * 100.0, 0.0, 100.0))
+
+        # Path index should be monotonic; keep progress non-decreasing.
+        if path_progress < self.raw_progress:
+            path_progress = self.raw_progress
+
+        self.raw_progress = path_progress
+        self._update_segment_progress_from_raw()
+
     def _update_progress_from_mask(self, pattern_alpha):
         """Recalculate raw_progress from completed (cyan) stitch coverage only.
 
@@ -1170,6 +1343,9 @@ class PatternMode:
         on the pattern, preventing early 100% from red/off-pattern stitches or
         artificial dilation expansion.
         """
+        if self.progress_from_path:
+            return
+
         if self.completed_stitch_mask is None:
             return
 
@@ -1186,25 +1362,7 @@ class PatternMode:
         covered = int(np.sum(np.logical_and(completed > 0, pattern_pixels)))
         self.raw_progress = min(100.0, covered / total * 100.0)
         print(f"📊 Raw Progress: {self.raw_progress:.1f}%")
-
-        # Update segmented visual progress (one-way ratchet)
-        rp = self.raw_progress
-        if   rp >= 70: new_seg, new_prog = 5, 100.0
-        elif rp >= 45: new_seg, new_prog = 4,  75.0
-        elif rp >= 25: new_seg, new_prog = 3,  50.0
-        elif rp >= 12: new_seg, new_prog = 2,  25.0
-        else:          new_seg, new_prog = 1,   0.0
-
-        if new_seg > self.highest_segment_reached:
-            self.highest_segment_reached = new_seg
-            self.current_segment  = min(new_seg, 4)
-            self.pattern_progress = new_prog
-        elif self.highest_segment_reached >= 5:
-            self.current_segment  = 4
-            self.pattern_progress = 100.0
-        else:
-            self.current_segment  = self.highest_segment_reached
-            self.pattern_progress = (self.highest_segment_reached - 1) * 25.0
+        self._update_segment_progress_from_raw()
 
     # ──────────────────────────────────────────────────────────────────────────
 
@@ -1393,10 +1551,10 @@ class PatternMode:
                         self.skeleton_seeded = True
                         self.centerline_progress_initialized = True
 
-                    # ── Auto-advance: color detection uses current dynamic pattern offset ──
+                    # ── Auto-advance: contour-box detection uses current dynamic pattern offset ──
                     # Compute where the pattern is sitting RIGHT NOW (before any advance)
                     # so the detection region matches the ink visible on camera.
-                    moved_with_color = False
+                    moved_with_contour = False
                     if _is_completed:
                         # Freeze at the END of the skeleton path so the needle
                         # always rests on the final stitch tip, not wherever
@@ -1418,7 +1576,8 @@ class PatternMode:
                         _dy1 = max(0, y_off)
                         _dx2 = min(detection_frame.shape[1], x_off + _pat_w)
                         _dy2 = min(detection_frame.shape[0], y_off + _pat_h)
-                        color_ok = False
+                        contour_match_for_overlay_move = False
+                        thread_overlaps_pattern = False
                         if _dx2 > _dx1 and _dy2 > _dy1:
                             _sx1 = max(0, -x_off)
                             _sy1 = max(0, -y_off)
@@ -1436,34 +1595,87 @@ class PatternMode:
                             # so each pattern segment is evaluated locally (lenient but targeted).
                             _local_cx = int(np.clip(_ex - _sx1, 0, _outline_crop.shape[1] - 1))
                             _local_cy = int(np.clip(_ey - _sy1, 0, _outline_crop.shape[0] - 1))
-                            _local_r = int(max(6, self.outline_detect_local_radius))
-                            _yy, _xx = np.ogrid[:_outline_crop.shape[0], :_outline_crop.shape[1]]
-                            _local_window = ((_xx - _local_cx) ** 2 + (_yy - _local_cy) ** 2) <= (_local_r * _local_r)
-                            _ink_mask = np.logical_and(_outline_crop > 0, _local_window)
-                            if not np.any(_ink_mask):
-                                _ink_mask = _outline_crop > 0
-                            _ink_count   = int(np.count_nonzero(_ink_mask))
-                            if _ink_count > 0:
-                                _color_mask   = self._get_selected_color_mask(_cam_region, hsv_patch=_hsv_region)
-                                _color_in_ink = int(np.count_nonzero(_color_mask[_ink_mask]))
-                                _ratio = float(_color_in_ink) / float(_ink_count)
-                                color_cfg = self.color_profiles[self.selected_detection_color]
-                                self.last_color_match_ratio = _ratio
-                                self.last_color_match = (
-                                    _color_in_ink >= int(self.min_color_pixels_outline)
-                                    and _ratio >= color_cfg['min_ratio']
+                            _color_mask = self._get_selected_color_mask(_cam_region, hsv_patch=_hsv_region)
+                            _contours, _ = cv2.findContours(_color_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                            _min_outline_contour_area = int(self.min_color_contour_area_outline)
+                            if self.current_level == 3:
+                                # Level 3 (W) has frequent sharp turns; be slightly more permissive.
+                                _min_outline_contour_area = max(10, int(round(_min_outline_contour_area * 0.65)))
+                            _best_contour = self._select_color_contour(
+                                _contours,
+                                _local_cx,
+                                _local_cy,
+                                _min_outline_contour_area,
+                            )
+                            if _best_contour is not None:
+                                _m = cv2.moments(_best_contour)
+                                if _m['m00'] > 0:
+                                    _ccx = float(_m['m10'] / _m['m00'])
+                                    _ccy = float(_m['m01'] / _m['m00'])
+                                    _max_dist = float(max(6, self.outline_detect_local_half_size))
+                                    if self.current_level == 3:
+                                        _max_dist = max(_max_dist, 30.0)
+                                    if ((_ccx - _local_cx) ** 2 + (_ccy - _local_cy) ** 2) > (_max_dist ** 2):
+                                        _best_contour = None
+                            if _best_contour is not None:
+                                _box_mask, (_bx1, _by1, _bx2, _by2) = self._build_contour_box_mask(
+                                    _color_mask.shape,
+                                    _best_contour,
+                                    padding=self.color_contour_padding,
                                 )
-                                color_ok = self.last_color_match
-                        if color_ok:
+                                _ink_mask = np.logical_and(_outline_crop > 0, _box_mask > 0)
+                                if not np.any(_ink_mask):
+                                    _ink_mask = _box_mask > 0
+                                _ink_count = int(np.count_nonzero(_ink_mask))
+                                if _ink_count > 0:
+                                    _color_in_ink = int(np.count_nonzero(_color_mask[_ink_mask]))
+                                    _ratio = float(_color_in_ink) / float(_ink_count)
+                                    _min_outline_pixels = int(self.min_color_pixels_outline)
+                                    if self.current_level == 3:
+                                        _min_outline_pixels = max(10, int(round(_min_outline_pixels * 0.65)))
+                                    _required_px = max(8, min(_min_outline_pixels, int(0.75 * _ink_count)))
+                                    color_cfg = self.color_profiles[self.selected_detection_color]
+                                    self.last_color_match_ratio = _ratio
+                                    self.last_color_match = (
+                                        _color_in_ink >= _required_px
+                                        and _ratio >= color_cfg['min_ratio']
+                                    )
+                                    contour_match_for_overlay_move = self.last_color_match
+                                    if self.last_color_match:
+                                        _thread_mask = np.logical_and(_color_mask > 0, _box_mask > 0)
+                                        _pattern_mask_crop = (
+                                            pattern_alpha[_sy1:_sy2, _sx1:_sx2] > self.pattern_alpha_threshold
+                                        )
+                                        if _pattern_mask_crop.shape == _thread_mask.shape:
+                                            thread_overlaps_pattern = bool(
+                                                np.any(np.logical_and(_thread_mask, _pattern_mask_crop))
+                                            )
+
+                                    # Persist contour-box debug mask for on-frame highlight.
+                                    if _bx2 > _bx1 and _by2 > _by1:
+                                        _masked = cv2.bitwise_and(_color_mask, _box_mask)
+                                        self.last_color_mask = _masked[_by1:_by2, _bx1:_bx2].copy()
+                                        self.last_color_mask_bounds = (
+                                            _dx1 + _bx1,
+                                            _dy1 + _by1,
+                                            _dx1 + _bx2,
+                                            _dy1 + _by2,
+                                        )
+                                        self.last_color_contour_box = self.last_color_mask_bounds
+                        # Movement is strictly contour-gated: no contour match, no overlay shift.
+                        if contour_match_for_overlay_move:
                             self.skeleton_idx_f = float(np.clip(
                                 self.skeleton_idx_f + self.auto_move_speed,
                                 0.0, float(skel_max_idx)))
-                            moved_with_color = True
+                            moved_with_contour = True
 
                     # ── Pattern scrolls under a fixed needle position ─────────────────
                     cur_idx = int(np.clip(round(self.skeleton_idx_f), 0, skel_max_idx))
                     exp_x   = int(skeleton_path[cur_idx][0])
                     exp_y   = int(skeleton_path[cur_idx][1])
+
+                    if self.progress_from_path:
+                        self._update_progress_from_path(cur_idx, skel_max_idx)
 
                     # Needle dot stays fixed; pattern slides so current skeleton
                     # point always sits beneath the fixed needle position.
@@ -1484,81 +1696,25 @@ class PatternMode:
                     raw_needle_in_pat_x = exp_x
                     raw_needle_in_pat_y = exp_y
 
-                    # Credit/penalize only when motion and selected thread color are both valid.
-                    if moved_with_color:
+                    # Keep movement contour-gated, but classify correctness by
+                    # overlap between selected-thread contour region and pattern mask.
+                    if moved_with_contour:
                         pat_h, pat_w = pattern_alpha.shape[:2]
-                        # Stitch is in the outline detection zone if its centre pixel
-                        # falls within the dilated outline mask.
-                        _outline = self._get_pattern_outline_mask(pattern_alpha, overlay_w, overlay_h)
-                        in_outline = bool(
-                            _outline is not None
-                            and exp_y < _outline.shape[0]
-                            and exp_x < _outline.shape[1]
-                            and _outline[exp_y, exp_x] > 0
-                        )
-                        # A stitch in the outline zone counts as CYAN (correct) when
-                        # the stitch circle overlaps the actual pattern mask by >= 50%.
-                        # This means edge stitches that are mostly on the pattern are
-                        # accepted; stitches that are mostly outside are marked wrong.
-                        if in_outline:
-                            r = self.stitch_draw_radius
-                            y0 = max(0, exp_y - r); y1 = min(pat_h, exp_y + r + 1)
-                            x0 = max(0, exp_x - r); x1 = min(pat_w, exp_x + r + 1)
-                            yy, xx = np.mgrid[y0:y1, x0:x1]
-                            circle_mask = (yy - exp_y) ** 2 + (xx - exp_x) ** 2 <= r * r
-                            total_circle = int(np.count_nonzero(circle_mask))
-                            on_pat = int(np.count_nonzero(
-                                circle_mask & (pattern_alpha[y0:y1, x0:x1] > 0.1)
-                            )) if total_circle > 0 else 0
-                            mostly_on_pattern = (
-                                total_circle > 0
-                                and (on_pat / total_circle) >= float(self.outline_on_pattern_ratio_min)
-                            )
-                        else:
-                            mostly_on_pattern = False
-
-                        if in_outline and mostly_on_pattern:
+                        _stamp_half = 4 if self.current_level in (2, 3) else self.stitch_box_half
+                        if thread_overlaps_pattern:
                             if self.completed_stitch_mask is None:
                                 self.completed_stitch_mask = np.zeros((pat_h, pat_w), dtype=np.uint8)
-                            cv2.circle(
-                                self.completed_stitch_mask,
-                                (exp_x, exp_y),
-                                self.stitch_draw_radius,
-                                255,
-                                -1,
-                            )
+                            self._stamp_box(self.completed_stitch_mask, exp_x, exp_y, _stamp_half)
                             self._realtime_pat_dirty = True
                             self._update_progress_from_mask(pattern_alpha)
-                        elif in_outline and not mostly_on_pattern:
-                            # In outline zone but mostly outside the pattern — mark wrong.
-                            if self.missed_stitch_mask is None:
-                                self.missed_stitch_mask = np.zeros((pat_h, pat_w), dtype=np.uint8)
-                            cv2.circle(
-                                self.missed_stitch_mask,
-                                (raw_needle_in_pat_x, raw_needle_in_pat_y),
-                                self.missed_stitch_draw_radius,
-                                255,
-                                -1,
-                            )
-                            self._realtime_pat_dirty = True
-                            self._update_progress_from_mask(pattern_alpha)
-                            try:
-                                self.out_of_segment_warning = True
-                                self.warning_message = "FOLLOW THE PATTERN"
-                                self.warning_flash_phase = 0
-                                self.warning_until_frame = int(self.stitch_frame_index) + 40
-                            except Exception:
-                                pass
                         else:
-                            # Completely outside the outline zone — mark wrong.
                             if self.missed_stitch_mask is None:
                                 self.missed_stitch_mask = np.zeros((pat_h, pat_w), dtype=np.uint8)
-                            cv2.circle(
+                            self._stamp_box(
                                 self.missed_stitch_mask,
-                                (raw_needle_in_pat_x, raw_needle_in_pat_y),
-                                self.missed_stitch_draw_radius,
-                                255,
-                                -1,
+                                raw_needle_in_pat_x,
+                                raw_needle_in_pat_y,
+                                self.missed_stitch_box_half,
                             )
                             self._realtime_pat_dirty = True
                             self._update_progress_from_mask(pattern_alpha)
@@ -2348,46 +2504,15 @@ class PatternMode:
             self.total_score = int(self.current_accuracy)
             
             # Calculate progress (how much of pattern is covered by stitches)
-            pattern_pixels = np.sum(pattern_mask_roi > 0)
-            if pattern_pixels > 0:
-                covered_pixels = np.sum(np.logical_and(roi_combined_mask > 0, pattern_mask_roi > 0))
-                raw_progress = min(100.0, (covered_pixels / pattern_pixels) * 100.0)
-                
-                # Store raw progress for evaluation
-                self.raw_progress = raw_progress
-                print(f"📊 Raw Progress: {raw_progress:.1f}%")  # Debug print
-                
-                # Determine segment based on raw progress (much lower thresholds)
-                if raw_progress >= 70:  # 70%+ completes everything
-                    new_segment = 5  # Beyond segment 4, means fully complete
-                    new_progress = 100.0
-                elif raw_progress >= 45:  # 45%+ completes segment 3, working on segment 4
-                    new_segment = 4
-                    new_progress = 75.0
-                elif raw_progress >= 25:  # 25%+ completes segment 2, working on segment 3
-                    new_segment = 3
-                    new_progress = 50.0
-                elif raw_progress >= 12:  # 12%+ completes segment 1, working on segment 2
-                    new_segment = 2
-                    new_progress = 25.0
-                else:  # < 12% still working on segment 1
-                    new_segment = 1
-                    new_progress = 0.0
-                
-                # Only allow progress forward, never backwards (prevent flickering)
-                if new_segment > self.highest_segment_reached:
-                    self.highest_segment_reached = new_segment
-                    self.current_segment = new_segment if new_segment <= 4 else 4
-                    self.pattern_progress = new_progress
-                # Keep the highest values reached
-                elif self.highest_segment_reached > 1:
-                    # Stay at the highest segment reached
-                    if self.highest_segment_reached == 5:
-                        self.current_segment = 4
-                        self.pattern_progress = 100.0
-                    else:
-                        self.current_segment = self.highest_segment_reached
-                        self.pattern_progress = (self.highest_segment_reached - 1) * 25.0
+            # Keep this legacy path only when mask-based progress mode is active.
+            if not self.progress_from_path:
+                pattern_pixels = np.sum(pattern_mask_roi > 0)
+                if pattern_pixels > 0:
+                    covered_pixels = np.sum(np.logical_and(roi_combined_mask > 0, pattern_mask_roi > 0))
+                    raw_progress = min(100.0, (covered_pixels / pattern_pixels) * 100.0)
+                    self.raw_progress = raw_progress
+                    print(f"📊 Raw Progress: {raw_progress:.1f}%")  # Debug print
+                    self._update_segment_progress_from_raw()
             
             # Update combo system
             if accuracy > 70:  # Good accuracy threshold
