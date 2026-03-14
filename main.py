@@ -77,17 +77,17 @@ class SewBotApp:
         
         # Tutorial players read every supported video file inside their folder.
         self.tutorial_player = TutorialPlayer(self.width, self.height,
-                                              videos_subfolder='Sewing',
+                                                                                            videos_subfolder='sewing machine',
                                               tutorial_label='SEWING MACHINE TUTORIAL')
 
         # Embroidery tutorial player - same functionality, different video folder
         self.embroidery_tutorial_player = TutorialPlayer(self.width, self.height,
-                                                         videos_subfolder='Embroidery',
+                                                                                                                 videos_subfolder='embroidery machine',
                                                          tutorial_label='EMBROIDERY MACHINE TUTORIAL')
         
         # Wallet tutorial player - initialize with wallet videos
         self.wallet_tutorial_player = WalletTutorialPlayer(self.width, self.height,
-                                                           videos_subfolder='Wallet')
+                                                                                                                     videos_subfolder='Wallet Making')
         
         # Level selection screen
         self.level_selection = LevelSelection(self.width, self.height, self.COLORS)
