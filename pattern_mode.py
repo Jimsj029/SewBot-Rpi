@@ -200,6 +200,7 @@ class PatternMode:
         self.min_color_contour_area_center = 18
         self.min_color_contour_area_outline = 18
         self.color_contour_padding = 3
+        self.color_ink_required_ratio = 0.75  # Fraction of outline-ink pixels that must match selected color
         self.color_sample_half_size = 14
         self.blend_roi_half = 160               # Half-size (pixels) of the pattern-overlay blend window around the needle — reduce to improve FPS, increase to show more pattern context (adjustable in code)
         # Visual cyan expansion around accepted stitches (increase by 15%)
@@ -278,6 +279,16 @@ class PatternMode:
         self.NEEDLE_ROI_X    = 280  # ROI centre X in camera-frame pixels  ← adjust freely
         self.NEEDLE_ROI_Y    = 210  # ROI centre Y in camera-frame pixels  ← adjust freely
         # ─────────────────────────────────────────────────────────────────────────────
+
+        # Raspberry Pi 1024x600 tuning: keep start alignment stable and relax color thresholds.
+        if self.width == 1024 and self.height == 600:
+            self.NEEDLE_ROI_X = self.camera_width // 2
+            self.NEEDLE_ROI_Y = self.camera_height // 2
+            self.min_color_pixels_outline = 24
+            self.min_color_pixels_center = 24
+            self.color_ink_required_ratio = 0.45
+            for _cfg in self.color_profiles.values():
+                _cfg['min_ratio'] = min(_cfg.get('min_ratio', 0.04), 0.025)
 
         # Fixed needle marker position used by the overlay pipeline
         self.needle_pos_x = float(self.NEEDLE_ROI_X)
@@ -1676,6 +1687,9 @@ class PatternMode:
                     if _is_completed:
                         # On completion, keep the pattern centered on screen.
                         self.skeleton_idx_f = float(np.clip(self.skeleton_idx_f, 0.0, float(skel_max_idx)))
+                    elif not self.sewing_started:
+                        # Before sewing starts, always show the true starting point.
+                        self.skeleton_idx_f = 0.0
                     elif self.sewing_started:
                         _cur = int(np.clip(round(self.skeleton_idx_f), 0, skel_max_idx))
                         _ex  = int(skeleton_path[_cur][0])
@@ -1711,7 +1725,7 @@ class PatternMode:
                                 _min_outline_pixels = int(self.min_color_pixels_outline)
                                 if self.current_level == 3:
                                     _min_outline_pixels = max(10, int(round(_min_outline_pixels * 0.65)))
-                                _required_px = max(8, min(_min_outline_pixels, int(0.75 * _ink_count)))
+                                _required_px = max(8, min(_min_outline_pixels, int(self.color_ink_required_ratio * _ink_count)))
                                 color_cfg = self.color_profiles[self.selected_detection_color]
                                 self.last_color_match_ratio = _ratio
                                 self.last_color_match = (
