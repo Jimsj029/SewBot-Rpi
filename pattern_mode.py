@@ -1,10 +1,8 @@
 import cv2
 import numpy as np
 import math
-import gc
 import os
 from datetime import datetime
-import threading
 import onnxruntime as ort
 from music_manager import get_music_manager
 from ui.typography import (
@@ -82,15 +80,6 @@ class PatternMode:
             'h': 50,
         }
         self.sewing_started = False  # Gates cloth/thread color detection
-
-        # Needle detection toggle button (left side, below cloth color panel)
-        self.needle_detection_enabled = True
-        self.needle_toggle_button = {
-            'x': self.cloth_color_panel_x,
-            'y': self.cloth_color_panel_y + self.cloth_color_panel_height + 12,
-            'w': self.cloth_color_panel_width,
-            'h': 44,
-        }
 
         # Back button
         self.back_button = {'x': 20, 'y': 20, 'w': 120, 'h': 50}
@@ -202,8 +191,6 @@ class PatternMode:
         self.stitch_frame_index = 0
         self.last_stitch_frame_index = -9999
         self.last_stitch_point = None
-        self.use_model_stitch_points = False  # Keep tracing tied to the red-dot center
-        self.needle_model_imgsz = 160  # 160 is ~3× faster inference than 320 on RPi4
 
         # Lucas-Kanade sparse optical flow (retained for internal tracking, unused for movement)
         self.of_prev_gray = None        # Previous greyscale frame
@@ -270,24 +257,11 @@ class PatternMode:
         self.NEEDLE_ROI_Y    = 210  # ROI centre Y in camera-frame pixels  ← adjust freely
         # ─────────────────────────────────────────────────────────────────────────────
 
-        # Needle optical-flow tracking (updates pos between YOLO calls)
+        # Fixed needle marker position used by the overlay pipeline
         self.needle_pos_x = float(self.NEEDLE_ROI_X)
         self.needle_pos_y = float(self.NEEDLE_ROI_Y)
         self.prev_gray    = None   # Grayscale previous frame
         self.of_points    = None   # Lucas-Kanade tracking points
-
-        # ── Column ROI – wallet-style needle centring guide ───────────────────
-        self.ROI_CENTER_X         = 272   # Column horizontal centre (camera-frame px)
-        self.ROI_COL_WIDTH        = 140   # Column width in pixels
-        self.ROI_TOP_Y            = 0     # Y start (top of camera feed)
-        self.ROI_BOT_MARGIN       = 0     # Y margin from bottom of camera feed
-        self.ROI_COL_COLOR        = (0, 255, 255)  # BGR colour of column outline
-        self.needle_confirmed        = False
-        self.NEEDLE_CONF_THRESHOLD   = 0.35
-        self.NEEDLE_CENTER_TOLERANCE = 40
-        self.NEEDLE_CHECK_INTERVAL   = 10  # Run ONNX every 10 frames (~40% fewer calls)
-        self._needle_check_counter   = 0
-        # ─────────────────────────────────────────────────────────────────────
 
         # Segment tracking (divide pattern into 4 quarters)
         self.current_segment = 1  # 1=first 25%, 2=25-50%, 3=50-75%, 4=75-100%
@@ -355,46 +329,12 @@ class PatternMode:
         # Cloth bbox tracking
         self.smooth_cloth_bbox = None  # Smoothed bbox for stable overlay
 
-        # Needle detection enabled flag (can be toggled at runtime)
-        self.needle_detection_enabled = True
-
-        # Load needle detection model (used for single-stitch ROI pipeline)
-        # Use helper so we can lazy-load/unload at runtime when the
-        # needle detection toggle is used.
-        self.needle_model = None
-        self.needle_input_name = None
-        self.needle_output_name = None
-
         # Evaluation model (stitch segmentation/detection for scoring)
         self.eval_model = None
         self.eval_input_name = None
         self.eval_output_names = []
-        self.eval_input_size = 320
-        self.eval_model_path = None
-
-        # ── Background inference thread ───────────────────────────────────────
-        # ONNX takes ~120–180 ms on RPi4.  Running it on the render thread caps
-        # the whole UI to ~5 FPS even at imgsz=160.  Instead, a dedicated daemon
-        # thread runs inference asynchronously; the render loop just reads the
-        # most-recent result without blocking.
-        self._infer_lock      = threading.Lock()   # guards _infer_pending_frame
-        self._infer_event     = threading.Event()  # signal: new frame ready
-        self._infer_stop      = threading.Event()  # signal: shut thread down
-        self._infer_pending_frame = None           # latest frame copy queued for inference
-        self._infer_thread    = None               # the daemon thread
-        # ─────────────────────────────────────────────────────────────────────
-
-        try:
-            if self.needle_detection_enabled:
-                self.load_needle_model(models_dir=models_dir)
-        except Exception:
-            self.needle_model = None
-
-        try:
-            self.load_evaluation_model(models_dir=models_dir)
-        except Exception as e:
-            print(f"⚠ Evaluation model load failed: {e}")
-            self.eval_model = None
+        self.eval_input_size = 640
+        self.eval_model_path = os.path.join(models_dir, 'evaluation.onnx')
 
         # Music flag to track if music is playing
         self.music_playing = False
@@ -418,61 +358,8 @@ class PatternMode:
         music_manager = get_music_manager()
         music_manager.play_sound_effect('button_click.mp3')
 
-    def load_needle_model(self, models_dir=None):
-        """Load the needle ONNX model from the models folder."""
-        try:
-            if models_dir is None:
-                models_dir = os.path.join(os.path.dirname(__file__), 'models')
-            needle_model_path = os.path.join(models_dir, 'needle.onnx')
-            if os.path.exists(needle_model_path):
-                print(f"Loading needle detection model: {needle_model_path}")
-                sess_opts = ort.SessionOptions()
-                sess_opts.inter_op_num_threads = 2
-                sess_opts.intra_op_num_threads = 2
-                self.needle_model = ort.InferenceSession(
-                    needle_model_path,
-                    sess_options=sess_opts,
-                    providers=['CPUExecutionProvider'])
-                self.needle_input_name  = self.needle_model.get_inputs()[0].name
-                self.needle_output_name = self.needle_model.get_outputs()[0].name
-                print(f"✓ Needle detection model loaded (ONNX Runtime direct)")
-                print(f"    Input:  {self.needle_input_name}  {self.needle_model.get_inputs()[0].shape}")
-                print(f"    Output: {self.needle_output_name} {self.needle_model.get_outputs()[0].shape}")
-                # Lightweight warm-up run
-                _warmup = np.zeros((1, 3, self.needle_model_imgsz, self.needle_model_imgsz), dtype=np.float32)
-                try:
-                    self.needle_model.run(None, {self.needle_input_name: _warmup})
-                    print("  ✓ Needle model warm-up successful!")
-                except Exception:
-                    pass
-                # Start the background inference thread now that the model is ready.
-                self._start_inference_thread()
-                print("  ✓ Background needle inference thread started")
-            else:
-                print(f"⚠ Needle model not found: {needle_model_path}")
-                self.needle_model = None
-        except Exception as e:
-            print(f"⚠ ERROR loading needle model: {e}")
-            self.needle_model = None
-
-    def unload_needle_model(self):
-        """Unload the needle model to free resources."""
-        # Stop the inference thread first so it doesn't hold a reference.
-        self._stop_inference_thread()
-        try:
-            if getattr(self, 'needle_model', None) is not None:
-                print("Unloading needle detection model to save resources...")
-                try:
-                    del self.needle_model
-                except Exception:
-                    pass
-                self.needle_model = None
-                gc.collect()
-        except Exception:
-            pass
-
     def load_evaluation_model(self, models_dir=None):
-        """Load the stitch evaluation ONNX model (best.onnx) if available."""
+        """Load the stitch evaluation ONNX model (evaluation.onnx) if available."""
         if models_dir is None:
             models_dir = os.path.join(os.path.dirname(__file__), 'models')
         model_path = os.path.join(models_dir, 'evaluation.onnx')
@@ -498,8 +385,15 @@ class PatternMode:
         if len(in_shape) >= 4 and isinstance(in_shape[2], int) and in_shape[2] > 0:
             self.eval_input_size = int(in_shape[2])
         else:
-            self.eval_input_size = 320
+            self.eval_input_size = 640
         print(f"✓ Evaluation model loaded: {model_path} (imgsz={self.eval_input_size})")
+
+    def unload_evaluation_model(self):
+        """Unload evaluation model after scoring to keep runtime lightweight."""
+        if self.eval_model is not None:
+            self.eval_model = None
+            self.eval_input_name = None
+            self.eval_output_names = []
 
     @staticmethod
     def _sigmoid(x):
@@ -623,72 +517,6 @@ class PatternMode:
             return pattern_mask
         pattern_mask[sy1:sy2, sx1:sx2] = (cam_crop > 0).astype(np.uint8) * 255
         return pattern_mask
-
-    # ── Background inference thread ───────────────────────────────────────────
-
-    def _start_inference_thread(self):
-        """Start the background needle-check inference thread."""
-        if self._infer_thread is not None and self._infer_thread.is_alive():
-            return
-        self._infer_stop.clear()
-        self._infer_event.clear()
-        self._infer_thread = threading.Thread(
-            target=self._inference_loop, daemon=True, name="needle-infer")
-        self._infer_thread.start()
-
-    def _stop_inference_thread(self):
-        """Signal and join the background inference thread."""
-        if self._infer_thread is None:
-            return
-        self._infer_stop.set()
-        self._infer_event.set()   # unblock the waiting thread
-        self._infer_thread.join(timeout=2.0)
-        self._infer_thread = None
-
-    def _inference_loop(self):
-        """Worker: wait for a frame, run _run_needle_check, store result.
-
-        This runs entirely off the render thread, keeping the UI loop
-        unblocked while ONNX inference executes (~120–180 ms on RPi4).
-        """
-        while not self._infer_stop.is_set():
-            # Block until the render loop queues a new frame (or stop signal).
-            signalled = self._infer_event.wait(timeout=0.5)
-            if not signalled:
-                continue
-            self._infer_event.clear()
-            if self._infer_stop.is_set():
-                break
-
-            # Grab the latest pending frame (render loop may have updated it).
-            with self._infer_lock:
-                frame = self._infer_pending_frame
-                self._infer_pending_frame = None
-
-            if frame is None:
-                continue
-
-            # Run the (slow) ONNX needle check.
-            result = self._run_needle_check(frame)
-
-            # Write result back — needle_confirmed is read by the render loop.
-            self.needle_confirmed = result
-
-    def _submit_needle_check(self, cam_frame):
-        """Queue a frame for async needle inference and return immediately.
-
-        Should be called from the render loop instead of _run_needle_check.
-        The result is available in self.needle_confirmed on the next frame.
-        """
-        if self.needle_model is None:
-            return
-        # Make a lightweight copy so the render loop can keep mutating cam_frame.
-        frame_copy = cam_frame.copy()
-        with self._infer_lock:
-            self._infer_pending_frame = frame_copy
-        self._infer_event.set()
-
-    # ── End background inference thread ──────────────────────────────────────
 
     def load_blueprint(self, level):
         """Load binary mask for the pattern"""
@@ -868,236 +696,6 @@ class PatternMode:
             colored_overlay[missed_pixels] = self.segment_colors['missed']
 
         return colored_overlay
-    
-
-    # ──────────────────────────────────────────────────────────────────────────
-    # Needle ROI pipeline
-    # ──────────────────────────────────────────────────────────────────────────
-
-    def _update_needle_optical_flow(self, gray_frame):
-        """No-op: needle position is fixed; cloth motion drives overlay via optical flow."""
-        pass
-
-    def _update_cloth_optical_flow(self, cam_frame):
-        """Removed: cloth detection is no longer used. Kept as no-op for compatibility."""
-        pass
-
-    def _infer_centerline_step_direction(self, centerline_path, current_idx):
-        """Always advance forward along the centerline (cloth motion removed)."""
-        return 1
-
-    def run_needle_pipeline(self, cam_frame, pattern_alpha,
-                            x_offset, y_offset, actual_w, actual_h,
-                            run_detection=True, hsv_frame=None,
-                            expected_trace_y=None, corridor_mask=None,
-                            centerline_path=None, expected_path_idx=None):
-
-        if pattern_alpha is None:
-            return
-
-        # _update_needle_optical_flow is a no-op, so skip the expensive gray
-        # conversion when we are only called for its (unused) side-effects.
-        if not run_detection or self.needle_model is None:
-            return
-
-        gray = cv2.cvtColor(cam_frame, cv2.COLOR_BGR2GRAY)
-        self._update_needle_optical_flow(gray)
-
-        half = self.NEEDLE_ROI_SIZE // 2
-        rx1 = max(0, int(self.needle_pos_x) - half)
-        ry1 = max(0, int(self.needle_pos_y) - half)
-        rx2 = min(self.camera_width,  rx1 + self.NEEDLE_ROI_SIZE)
-        ry2 = min(self.camera_height, ry1 + self.NEEDLE_ROI_SIZE)
-
-        roi = cam_frame[ry1:ry2, rx1:rx2]
-        if roi.size == 0:
-            return
-
-        try:
-            # Run needle model via direct ONNX Runtime (no Ultralytics overhead).
-            imgsz = self.needle_model_imgsz
-            _inp = cv2.resize(roi, (imgsz, imgsz))
-            _inp = cv2.cvtColor(_inp, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
-            _inp = np.transpose(_inp, (2, 0, 1))[np.newaxis]  # [1,3,H,W]
-            _preds = self.needle_model.run(None, {self.needle_input_name: _inp})[0]
-            # YOLOv8 ONNX output: [1, 5, anchors] → [anchors, 5]
-            _preds = _preds[0].T
-            _scores = _preds[:, 4]
-            _mask   = _scores >= self.confidence_threshold
-            num_boxes = int(np.sum(_mask))
-
-            # ── Canny fallback when ONNX finds nothing ─────────────────────────
-            # needle.onnx is trained for cloth-level detection and won't fire on
-            # a small 64×64 stitch crop.  Use edge+contour centroid instead.
-            if num_boxes == 0:
-                gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-                # Enhance contrast before edge detection
-                gray_roi = cv2.equalizeHist(gray_roi)
-                edges = cv2.Canny(gray_roi, 40, 120)
-                cnts, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL,
-                                           cv2.CHAIN_APPROX_SIMPLE)
-                # Pick contours large enough to be a real stitch (>= 15 px²)
-                cnts = [c for c in cnts if cv2.contourArea(c) >= 15]
-                if cnts:
-                    # Use the contour closest to the ROI centre
-                    roi_cx, roi_cy = roi.shape[1] / 2, roi.shape[0] / 2
-                    def dist_to_centre(c):
-                        M = cv2.moments(c)
-                        if M["m00"] == 0: return 9999
-                        return math.hypot(M["m10"]/M["m00"] - roi_cx,
-                                          M["m01"]/M["m00"] - roi_cy)
-                    best_cnt = min(cnts, key=dist_to_centre)
-                    M = cv2.moments(best_cnt)
-                    if M["m00"] != 0:
-                        fx = rx1 + M["m10"] / M["m00"]
-                        fy = ry1 + M["m01"] / M["m00"]
-                        self._register_stitch(fx, fy, cam_frame,
-                                              pattern_alpha, x_offset, y_offset,
-                                              actual_w, actual_h, source="canny", hsv_frame=hsv_frame,
-                                              expected_trace_y=expected_trace_y,
-                                              corridor_mask=corridor_mask,
-                                              centerline_path=centerline_path,
-                                              expected_path_idx=expected_path_idx)
-                return   # done whether canny fired or not
-            # ──────────────────────────────────────────────────────────────────
-
-            if num_boxes > 0:
-                filtered = _preds[_mask]
-                best     = int(np.argmax(filtered[:, 4]))
-                roi_h_c, roi_w_c = roi.shape[:2]
-                # ORT outputs cx,cy,w,h normalised to imgsz — scale back to ROI pixels
-                cx_roi = float(filtered[best, 0]) / imgsz * roi_w_c
-                cy_roi = float(filtered[best, 1]) / imgsz * roi_h_c
-                cx_cam = rx1 + cx_roi
-                cy_cam = ry1 + cy_roi
-                conf_val = float(filtered[best, 4])
-
-                self._register_stitch(cx_cam, cy_cam, cam_frame,
-                                      pattern_alpha, x_offset, y_offset,
-                                      actual_w, actual_h,
-                                      source=f"onnx conf={conf_val:.2f}", hsv_frame=hsv_frame,
-                                      expected_trace_y=expected_trace_y,
-                                      corridor_mask=corridor_mask,
-                                      centerline_path=centerline_path,
-                                      expected_path_idx=expected_path_idx)
-        except Exception as e:
-            import traceback
-            print(f"Needle detection error: {e}")
-            traceback.print_exc()
-
-    def _register_stitch(self, cx_cam, cy_cam, cam_frame,
-                         pattern_alpha, x_offset, y_offset, actual_w, actual_h,
-                         source="", hsv_frame=None,
-                         expected_trace_y=None, corridor_mask=None,
-                         centerline_path=None, expected_path_idx=None):
-        """Check if a candidate stitch position overlaps the pattern and record it."""
-        if source != "center" and not self.use_model_stitch_points:
-            return
-
-        if not self._matches_selected_color(cam_frame, cx_cam, cy_cam, hsv_frame=hsv_frame):
-            return
-
-        pat_h, pat_w = pattern_alpha.shape[:2]
-
-        # Map from camera-frame coords to pattern-overlay coords
-        px = int(np.clip(cx_cam - x_offset, 0, actual_w - 1))
-        py = int(np.clip(cy_cam - y_offset, 0, actual_h - 1))
-
-        is_valid_stitch, on_corridor, order_valid, snapped_x, snapped_y, nearest_idx = self._validate_pattern_position(
-            px, py, pattern_alpha, actual_w, actual_h,
-            expected_trace_y=expected_trace_y,
-            corridor_mask=corridor_mask,
-            centerline_path=centerline_path,
-            expected_path_idx=expected_path_idx,
-            return_snap_point=True
-        )
-
-        print(f"🪡 [{source}] cam=({cx_cam:.0f},{cy_cam:.0f})  "
-              f"pat=({px},{py})  corridor={on_corridor}  order={order_valid}")
-
-        if not is_valid_stitch:
-            # Color detected but outside the pattern — paint missed mask
-            if self.missed_stitch_mask is None:
-                self.missed_stitch_mask = np.zeros((pat_h, pat_w), dtype=np.uint8)
-            cv2.circle(self.missed_stitch_mask, (px, py), self.missed_stitch_draw_radius, 255, -1)
-            self._realtime_pat_dirty = True
-            # Trigger a visible warning banner for wrong stitch
-            try:
-                self.out_of_segment_warning = True
-                self.warning_message = "FOLLOW THE PATTERN"
-                self.warning_flash_phase = 0
-                # Show for ~40 frames (~1 second at 30-40 FPS)
-                self.warning_until_frame = int(self.stitch_frame_index) + 40
-            except Exception:
-                pass
-            return
-
-        if is_valid_stitch:
-            draw_x, draw_y = px, py
-            if self.snap_stitches_to_centerline and centerline_path is not None and len(centerline_path) > 0:
-                draw_x, draw_y = snapped_x, snapped_y
-
-            if source == "center":
-                if (self.stitch_frame_index - self.last_stitch_frame_index) < self.stitch_cooldown_frames:
-                    return
-                # In centerline mode we intentionally allow dense adjacent points.
-                # A strict movement check here can deadlock progression on tightly
-                # sampled paths where consecutive points overlap existing circles.
-                use_centerline_mode = (
-                    self.snap_stitches_to_centerline
-                    and centerline_path is not None
-                    and len(centerline_path) > 0
-                )
-                if (not use_centerline_mode) and self.last_stitch_point is not None:
-                    lx, ly = self.last_stitch_point
-                    min_move = float(self.min_stitch_move_px)
-                    if math.hypot(draw_x - lx, draw_y - ly) < min_move:
-                        return
-
-            if self.completed_stitch_mask is None:
-                self.completed_stitch_mask = np.zeros((pat_h, pat_w), dtype=np.uint8)
-
-            prev_pixels = int(np.count_nonzero(self.completed_stitch_mask))
-            # Use a smaller stamp for V/W levels so the circle can't reach
-            # the opposite branch and cause premature cyan bleed.
-            _stamp_r = 5 if self.current_level in (2, 3) else self.stitch_draw_radius
-            cv2.circle(self.completed_stitch_mask, (draw_x, draw_y), _stamp_r, 255, -1)
-            self._realtime_pat_dirty = True
-            new_pixels = int(np.count_nonzero(self.completed_stitch_mask))
-
-            if source == "center":
-                # Record accepted center sample even when no new pixels were
-                # added, so the next frame can progress to the next path point.
-                self.last_stitch_point = (draw_x, draw_y)
-                self.last_stitch_frame_index = self.stitch_frame_index
-                if centerline_path is not None and nearest_idx is not None and len(centerline_path) > 0:
-                    max_idx = len(centerline_path) - 1
-                    nearest_idx = int(np.clip(nearest_idx, 0, max_idx))
-                    if not self.centerline_progress_initialized:
-                        self.centerline_progress_idx = nearest_idx
-                        self.centerline_progress_initialized = True
-                    else:
-                        current_idx = int(self.centerline_progress_idx)
-                        # Usually we move toward nearest_idx. If nearest_idx ==
-                        # current_idx (common with needle-anchored overlay),
-                        # infer direction from cloth motion to keep progression moving.
-                        delta = nearest_idx - current_idx
-                        if delta == 0:
-                            delta = self._infer_centerline_step_direction(centerline_path, current_idx)
-
-                        step_limit = max(1, int(self.centerline_step_limit))
-                        if delta > step_limit:
-                            delta = step_limit
-                        elif delta < -step_limit:
-                            delta = -step_limit
-
-                        if delta != 0:
-                            self.centerline_progress_idx = int(np.clip(current_idx + delta, 0, max_idx))
-
-            # Only advance stats/progress when this stitch added new coverage.
-            if new_pixels > prev_pixels:
-                self._update_progress_from_mask(pattern_alpha)
-                self.stitches_detected += 1
 
     def _matches_selected_color(self, cam_frame, cx_cam, cy_cam, hsv_frame=None):
         """Return True when the sampled stitch area matches the currently selected color."""
@@ -1636,12 +1234,6 @@ class PatternMode:
         # Draw evaluate button (right, below stats)
         self.draw_evaluate_button(frame)
 
-        # Draw needle detection toggle button
-        try:
-            self.draw_needle_toggle_button(frame)
-        except Exception:
-            pass
-
         # Draw thread colour panel (left, top)
         self.draw_thread_color_panel(frame)
 
@@ -1673,45 +1265,6 @@ class PatternMode:
         text_x = bb['x'] + (bb['w'] - text_w) // 2
         text_y = bb['y'] + (bb['h'] + text_h) // 2
         self._put_text(frame, text, text_x, text_y, font_scale, self.COLORS['text_primary'], thickness)
-
-    def _run_needle_check(self, cam_frame):
-        """Crop the column ROI and run needle.onnx to check needle centring.
-        Returns True when the highest-confidence detection centre-X is within
-        NEEDLE_CENTER_TOLERANCE pixels of the column's horizontal midpoint."""
-        # Skip heavy model check when needle detection is disabled to save CPU/GPU.
-        if not getattr(self, 'needle_detection_enabled', True):
-            return False
-        if self.needle_model is None:
-            return False
-        h, w = cam_frame.shape[:2]
-        x1 = max(0, self.ROI_CENTER_X - self.ROI_COL_WIDTH // 2)
-        x2 = min(w, self.ROI_CENTER_X + self.ROI_COL_WIDTH // 2)
-        y1 = int(self.ROI_TOP_Y)
-        y2 = max(y1 + 1, h - int(self.ROI_BOT_MARGIN))
-        roi_crop = cam_frame[y1:y2, x1:x2]
-        if roi_crop.size == 0:
-            return False
-        try:
-            imgsz = self.needle_model_imgsz
-            roi_h_c, roi_w_c = roi_crop.shape[:2]
-            inp = cv2.resize(roi_crop, (imgsz, imgsz))
-            inp = cv2.cvtColor(inp, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
-            inp = np.transpose(inp, (2, 0, 1))[np.newaxis]  # [1, 3, H, W]
-            preds = self.needle_model.run(None, {self.needle_input_name: inp})[0]
-            # YOLOv8 ONNX output: [1, 4+nc, anchors] → transpose to [anchors, 4+nc]
-            preds = preds[0].T  # [anchors, 5] for a 1-class model
-            scores = preds[:, 4]
-            mask = scores >= self.NEEDLE_CONF_THRESHOLD
-            if not np.any(mask):
-                return False
-            filtered = preds[mask]
-            best = int(np.argmax(filtered[:, 4]))
-            cx_320 = float(filtered[best, 0])
-            cx_roi = cx_320 / imgsz * roi_w_c
-            return abs(cx_roi - roi_w_c / 2.0) <= self.NEEDLE_CENTER_TOLERANCE
-        except Exception as e:
-            print(f"Needle column check error: {e}")
-        return False
 
     def draw_camera_feed(self, frame, camera_frame):
         """Draw camera feed with pattern overlay"""
@@ -2065,17 +1618,6 @@ class PatternMode:
                         roi_blended = a3 * pattern_crop + (1.0 - a3) * roi
                         cam_frame[blend_y1:blend_y2, blend_x1:blend_x2] = roi_blended.astype(np.uint8)
                     # ─────────────────────────────────────────────────────────────
-                    
-                    self.run_needle_pipeline(
-                        detection_frame, pattern_alpha,
-                        x_offset, y_offset, actual_w, actual_h,
-                        run_detection=False,
-                        hsv_frame=hsv_detection_frame,
-                        expected_trace_y=trace_y,
-                        corridor_mask=corridor_mask,
-                        centerline_path=validation_path,
-                        expected_path_idx=expected_path_idx
-                    )
 
                     # Use the updated index immediately for follow validation.
                     if validation_path is not None and len(validation_path) > 0:
@@ -2098,45 +1640,10 @@ class PatternMode:
                     self._update_follow_hysteresis(follow_valid, center_color_match)
                     follow_check_ready = True
 
-            # ── Column ROI overlay (wallet-style, needle centring) ────────────
-            # Only show the column ROI and centering checks when needle
-            # detection is enabled.
-            if self.needle_detection_enabled:
-                self._needle_check_counter += 1
-                if self._needle_check_counter >= self.NEEDLE_CHECK_INTERVAL:
-                    self._needle_check_counter = 0
-                    # Submit to background thread — returns immediately.
-                    # needle_confirmed is updated by _inference_loop asynchronously.
-                    self._submit_needle_check(cam_frame)
-                col_x1    = max(0, self.ROI_CENTER_X - self.ROI_COL_WIDTH // 2)
-                col_x2    = min(self.camera_width, self.ROI_CENTER_X + self.ROI_COL_WIDTH // 2)
-                glow_a    = 0.5 + 0.5 * abs(math.sin(self.glow_phase))
-                col_color = tuple(int(c * glow_a) for c in self.ROI_COL_COLOR)
-                cv2.rectangle(cam_frame, (col_x1, 0), (col_x2, self.camera_height), col_color, 2)
-                if not self.needle_confirmed:
-                    warn_h  = 44
-                    warn_y  = 8
-                    _overlay = cam_frame.copy()
-                    cv2.rectangle(_overlay, (4, warn_y),
-                                  (self.camera_width - 4, warn_y + warn_h),
-                                  (0, 60, 180), -1)
-                    cv2.addWeighted(_overlay, 0.78, cam_frame, 0.22, 0, cam_frame)
-                    warn_txt = "SEWING NEEDLE NOT CENTRED"
-                    warn_scale, warn_thick = 0.62, 2
-                    (ww, wh), _ = cv2.getTextSize(warn_txt, cv2.FONT_HERSHEY_DUPLEX,
-                                                   warn_scale, warn_thick)
-                    wx = (self.camera_width - ww) // 2
-                    wy = warn_y + (warn_h + wh) // 2
-                    cv2.putText(cam_frame, warn_txt, (wx + 1, wy + 1), cv2.FONT_HERSHEY_DUPLEX,
-                                warn_scale, (0, 0, 0), warn_thick + 2, cv2.LINE_AA)
-                    cv2.putText(cam_frame, warn_txt, (wx, wy), cv2.FONT_HERSHEY_DUPLEX,
-                                warn_scale, (0, 220, 255), warn_thick, cv2.LINE_AA)
-            # ─────────────────────────────────────────────────────────────────
-
             # Outside-pattern warning (color-gated + hysteresis stabilized)
-            if follow_check_ready and self.needle_confirmed and not self.needle_on_pattern and self.raw_progress >= 2.0:
+            if follow_check_ready and not self.needle_on_pattern and self.raw_progress >= 2.0:
                 ow_h = 36
-                ow_y = 60 if self.needle_confirmed else 60
+                ow_y = 60
                 _ov2 = cam_frame.copy()
                 cv2.rectangle(_ov2, (4, ow_y), (self.camera_width - 4, ow_y + ow_h), (0, 0, 160), -1)
                 cv2.addWeighted(_ov2, 0.78, cam_frame, 0.22, 0, cam_frame)
@@ -2182,31 +1689,28 @@ class PatternMode:
                         if blended is not None:
                             patch_roi[match_pixels] = blended
 
-            if self.needle_detection_enabled:
-                # Draw a filled square marker for the needle (all states)
-                cx = int(self.needle_pos_x)
-                cy = int(self.needle_pos_y)
-                half = 3
-                cv2.rectangle(cam_frame, (cx - half, cy - half), (cx + half, cy + half), marker_color, -1)
+            # Draw a filled square marker for the needle.
+            cx = int(self.needle_pos_x)
+            cy = int(self.needle_pos_y)
+            half = 3
+            cv2.rectangle(cam_frame, (cx - half, cy - half), (cx + half, cy + half), marker_color, -1)
 
-                marker_scale = text_scale(0.52, self.width, self.height, floor=0.46, ceiling=0.62)
-                marker_thick = text_thickness(1, self.width, self.height, min_thickness=1, max_thickness=2)
-                marker_scale = fit_text_scale(marker_text, FONT_MAIN, self.camera_width - col_x1 - 6, marker_scale, marker_thick, min_scale=0.4)
-                draw_text(
-                    cam_frame,
-                    marker_text,
-                    col_x1,
-                    self.camera_height - 8,
-                    marker_scale,
-                    marker_color,
-                    marker_thick,
-                    font=FONT_MAIN,
-                    outline_color=(0, 0, 0),
-                    outline_extra=1,
-                )
-            else:
-                # When needle detection is off, hide detection UI
-                pass
+            marker_scale = text_scale(0.52, self.width, self.height, floor=0.46, ceiling=0.62)
+            marker_thick = text_thickness(1, self.width, self.height, min_thickness=1, max_thickness=2)
+            marker_left = 8
+            marker_scale = fit_text_scale(marker_text, FONT_MAIN, self.camera_width - marker_left - 6, marker_scale, marker_thick, min_scale=0.4)
+            draw_text(
+                cam_frame,
+                marker_text,
+                marker_left,
+                self.camera_height - 8,
+                marker_scale,
+                marker_color,
+                marker_thick,
+                font=FONT_MAIN,
+                outline_color=(0, 0, 0),
+                outline_extra=1,
+            )
             
             frame[self.camera_y:self.camera_y+self.camera_height, 
                   self.camera_x:self.camera_x+self.camera_width] = cam_frame
@@ -2990,27 +2494,6 @@ class PatternMode:
         text_y = eb['y'] + (eb['h'] + text_h) // 2
         
         self._put_text(frame, text, text_x, text_y, font_scale, self.COLORS['text_primary'], thickness, font=FONT_DISPLAY)
-
-    def draw_needle_toggle_button(self, frame):
-        """Draw a button that toggles needle detection on/off"""
-        nb = self.needle_toggle_button
-        pulse = 0.35 + 0.25 * abs(math.sin(self.glow_phase * 1.0))
-        self.draw_glow_rect(frame, nb['x'], nb['y'], nb['w'], nb['h'], self.COLORS['medium_blue'], pulse)
-
-        overlay = frame.copy()
-        cv2.rectangle(overlay, (nb['x'] + 2, nb['y'] + 2), (nb['x'] + nb['w'] - 2, nb['y'] + nb['h'] - 2), self.COLORS['button_normal'], -1)
-        cv2.addWeighted(overlay, 0.75, frame, 0.25, 0, frame)
-
-        state_text = "ON" if self.needle_detection_enabled else "OFF"
-        text = f"NEEDLE: {state_text}"
-        txt_col = (0, 200, 0) if self.needle_detection_enabled else (0, 0, 200)
-        font_scale = text_scale(0.64, self.width, self.height, floor=0.56, ceiling=0.74)
-        thickness = text_thickness(2, self.width, self.height, min_thickness=1, max_thickness=2)
-        font_scale = fit_text_scale(text, FONT_MAIN, nb['w'] - 14, font_scale, thickness, min_scale=0.6)
-        (text_w, text_h), _ = get_text_size(text, FONT_MAIN, font_scale, thickness)
-        text_x = nb['x'] + (nb['w'] - text_w) // 2
-        text_y = nb['y'] + (nb['h'] + text_h) // 2
-        self._put_text(frame, text, text_x, text_y, font_scale, txt_col, thickness)
     
     def draw_evaluation_results(self, frame):
         """Draw evaluation results as a large centered modal window"""
@@ -3260,28 +2743,6 @@ class PatternMode:
                 print(f"🧵 Cloth color set to: {self.cloth_color_profiles[color_name]['label']}")
                 return None
 
-        # Needle detection toggle button
-        nb = getattr(self, 'needle_toggle_button', None)
-        if nb is not None and nb['x'] <= x <= nb['x'] + nb['w'] and nb['y'] <= y <= nb['y'] + nb['h']:
-            self.play_button_click_sound()
-            self.needle_detection_enabled = not bool(self.needle_detection_enabled)
-            # Load or unload the ONNX model depending on new state to save resources
-            if self.needle_detection_enabled:
-                try:
-                    self.load_needle_model()
-                except Exception:
-                    pass
-            else:
-                try:
-                    # Unload model and clear detection state + bbox
-                    self.unload_needle_model()
-                    self.smooth_cloth_bbox = None
-                    self.needle_confirmed = False
-                except Exception:
-                    pass
-            print(f"🪡 Needle detection {'ENABLED' if self.needle_detection_enabled else 'DISABLED'}")
-            return None
-
         # Check confidence buttons
         if (self.conf_minus_button['x'] <= x <= self.conf_minus_button['x'] + self.conf_minus_button['w'] and
                 self.conf_minus_button['y'] <= y <= self.conf_minus_button['y'] + self.conf_minus_button['h']):
@@ -3309,6 +2770,7 @@ class PatternMode:
             tb = self.try_again_button
             if tb['x'] <= x <= tb['x'] + tb['w'] and tb['y'] <= y <= tb['y'] + tb['h']:
                 self.play_button_click_sound()
+                self.unload_evaluation_model()
                 # Fully reset all progress and caches
                 self.reset_progress()
                 self.highest_segment_reached = 1
@@ -3326,6 +2788,7 @@ class PatternMode:
             nb = self.next_level_button
             if nb['x'] <= x <= nb['x'] + nb['w'] and nb['y'] <= y <= nb['y'] + nb['h']:
                 self.play_button_click_sound()
+                self.unload_evaluation_model()
                 return 'next_level'
         
         return None
@@ -3344,6 +2807,14 @@ class PatternMode:
             print("🧪 EVALUATE ABORTED")
             print("=" * 72)
             return
+        if self.eval_model is None:
+            try:
+                self.load_evaluation_model()
+            except Exception as e:
+                print(f"⚠ Cannot evaluate: failed to load evaluation model: {e}")
+                print("🧪 EVALUATE ABORTED")
+                print("=" * 72)
+                return
         if self.eval_model is None:
             print(f"⚠ Cannot evaluate: AI model missing at {self.eval_model_path}")
             print("🧪 EVALUATE ABORTED")
