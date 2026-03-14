@@ -150,6 +150,9 @@ class PatternMode:
         
         # Next level button (centered in modal) - will be calculated dynamically
         self.next_level_button = {'x': 0, 'y': 0, 'w': 200, 'h': 60}
+        # Evaluation flow button/state: stage 0 = comparison preview, stage 1 = score modal
+        self.eval_next_button = {'x': 0, 'y': 0, 'w': 200, 'h': 60}
+        self.eval_screen_stage = 0
         
         # Game tracking variables
         self.current_accuracy = 0.0
@@ -165,6 +168,9 @@ class PatternMode:
         self.is_evaluated = False
         self.level_completed = False
         self.last_evaluation_screenshot_path = None
+        self.eval_vis_detected = None     # Camera snapshot with detected thread highlighted
+        self.eval_vis_mask = None         # Blueprint target mask image
+        self.eval_vis_comparison = None   # Pixel-level comparison image
 
         # Last camera frame/projection for screenshot-based AI evaluation
         self.last_camera_frame = None
@@ -821,8 +827,48 @@ class PatternMode:
         self.sewing_started = False  # Require Start button press again on reset
         self.last_evaluation_screenshot_path = None
         self.last_pattern_projection = None
+        self.eval_vis_detected = None
+        self.eval_vis_mask = None
+        self.eval_vis_comparison = None
+        self.eval_screen_stage = 0
         print(f"🔄 Progress reset for Level {self.current_level}")
-    
+
+    def _evaluate_image_processing(self, camera_frame):
+        """Detect thread-colored pixels in *camera_frame* using HSV color detection.
+
+        This is the image-processing evaluation path.  It applies the currently
+        selected thread-color HSV ranges to the full camera snapshot, closes small
+        inter-stitch gaps with morphological operations to bridge the tiny spaces
+        between individual stitches, and removes noise with an opening step.
+
+        Returns a binary uint8 mask (0 / 255) in camera-frame coordinates where
+        255 marks pixels identified as belonging to the sewn thread.
+        """
+        try:
+            h, w = camera_frame.shape[:2]
+            hsv = cv2.cvtColor(camera_frame, cv2.COLOR_BGR2HSV)
+            color_cfg = self.color_profiles[self.selected_detection_color]
+            mask = np.zeros((h, w), dtype=np.uint8)
+            for lo, hi in color_cfg['hsv_ranges']:
+                mask = cv2.bitwise_or(
+                    mask,
+                    cv2.inRange(hsv,
+                                np.array(lo, dtype=np.uint8),
+                                np.array(hi, dtype=np.uint8))
+                )
+            # Close small inter-stitch gaps so nearby stitch points merge.
+            k_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k_close)
+            # Remove isolated noise blobs smaller than a few pixels.
+            k_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k_open)
+            detected_px = int(np.count_nonzero(mask))
+            print(f"🔍 IP detection: {detected_px} px of {color_cfg['label']} thread detected in frame")
+            return mask
+        except Exception as e:
+            print(f"⚠ Image-processing evaluation failed: {e}")
+            return np.zeros(camera_frame.shape[:2], dtype=np.uint8)
+
     def create_realtime_pattern(self, overlay, alpha, trace_y=None):
         """Create real-time colored pattern overlay.
 
@@ -3016,6 +3062,79 @@ class PatternMode:
         cv2.rectangle(overlay, (0, 0), (self.width, self.height), 
                      (20, 10, 5), -1)
         cv2.addWeighted(overlay, 0.7, frame, 0.3, 0, frame)
+
+        # Stage 0: show comparison preview first (centered), then NEXT to view score.
+        if getattr(self, 'eval_screen_stage', 0) == 0:
+            title = "COMPARISON PREVIEW"
+            title_scale = text_scale(1.05, self.width, self.height, floor=0.92, ceiling=1.18)
+            title_thick = text_thickness(3, self.width, self.height, min_thickness=2, max_thickness=4)
+            title_scale = fit_text_scale(title, FONT_DISPLAY, self.width - 60, title_scale, title_thick, min_scale=0.84)
+            (tw, th), _ = get_text_size(title, FONT_DISPLAY, title_scale, title_thick)
+            tx = (self.width - tw) // 2
+            ty = 56
+            draw_text(
+                frame,
+                title,
+                tx,
+                ty,
+                title_scale,
+                self.COLORS['bright_blue'],
+                title_thick,
+                font=FONT_DISPLAY,
+                outline_color=self.COLORS['glow_cyan'],
+                outline_extra=2,
+            )
+
+            # Center comparison image in the middle of the screen.
+            cmp_img = self.eval_vis_comparison
+            if cmp_img is not None:
+                avail_w = self.width - 120
+                avail_h = self.height - 230
+                h, w = cmp_img.shape[:2]
+                scale = min(float(avail_w) / float(max(1, w)), float(avail_h) / float(max(1, h)))
+                draw_w = max(1, int(w * scale))
+                draw_h = max(1, int(h * scale))
+                comp = cv2.resize(cmp_img, (draw_w, draw_h), interpolation=cv2.INTER_AREA)
+                ix = (self.width - draw_w) // 2
+                iy = 90 + (avail_h - draw_h) // 2
+
+                cv2.rectangle(frame, (ix - 4, iy - 4), (ix + draw_w + 4, iy + draw_h + 4), (15, 10, 8), -1)
+                cv2.rectangle(frame, (ix - 4, iy - 4), (ix + draw_w + 4, iy + draw_h + 4), (100, 200, 100), 2)
+                frame[iy:iy + draw_h, ix:ix + draw_w] = comp
+            else:
+                msg = "No comparison image available"
+                msg_scale = text_scale(0.8, self.width, self.height, floor=0.7, ceiling=0.9)
+                msg_thick = text_thickness(2, self.width, self.height, min_thickness=1, max_thickness=2)
+                (mw, mh), _ = get_text_size(msg, FONT_MAIN, msg_scale, msg_thick)
+                mx = (self.width - mw) // 2
+                my = self.height // 2 + mh // 2
+                self._put_text(frame, msg, mx, my, msg_scale, self.COLORS['text_secondary'], msg_thick)
+
+            # NEXT button to move to score stage.
+            nb_w = 200
+            nb_h = 56
+            nb_x = (self.width - nb_w) // 2
+            nb_y = self.height - nb_h - 18
+            self.eval_next_button['x'] = nb_x
+            self.eval_next_button['y'] = nb_y
+            self.eval_next_button['w'] = nb_w
+            self.eval_next_button['h'] = nb_h
+
+            pulse = 0.5 + 0.35 * abs(math.sin(self.glow_phase * 1.2))
+            self.draw_glow_rect(frame, nb_x, nb_y, nb_w, nb_h, self.COLORS['neon_blue'], pulse)
+            _ov = frame.copy()
+            cv2.rectangle(_ov, (nb_x + 2, nb_y + 2), (nb_x + nb_w - 2, nb_y + nb_h - 2), self.COLORS['button_hover'], -1)
+            cv2.addWeighted(_ov, 0.8, frame, 0.2, 0, frame)
+
+            ntext = "NEXT"
+            ns = text_scale(0.92, self.width, self.height, floor=0.8, ceiling=1.04)
+            nt = text_thickness(3, self.width, self.height, min_thickness=2, max_thickness=4)
+            ns = fit_text_scale(ntext, FONT_DISPLAY, nb_w - 18, ns, nt, min_scale=0.72)
+            (nw, nh), _ = get_text_size(ntext, FONT_DISPLAY, ns, nt)
+            ntx = nb_x + (nb_w - nw) // 2
+            nty = nb_y + (nb_h + nh) // 2
+            self._put_text(frame, ntext, ntx, nty, ns, self.COLORS['text_primary'], nt, font=FONT_DISPLAY)
+            return
         
         # Large centered results panel
         panel_w = 500
@@ -3085,7 +3204,7 @@ class PatternMode:
             self.draw_next_level_button_centered(frame, panel_x, panel_y, panel_w, panel_h)
         else:
             self.draw_try_again_button(frame, panel_x, panel_y, panel_w, panel_h)
-    
+
     def draw_try_again_button(self, frame, panel_x, panel_y, panel_w, panel_h):
         """Draw try again button in the centered modal"""
         button_w = 200
@@ -3300,9 +3419,17 @@ class PatternMode:
                 self.play_button_click_sound()
                 self.evaluate_pattern()
                 return None
+
+        # Evaluation stage-next button: comparison preview -> score modal
+        if self.is_evaluated and getattr(self, 'eval_screen_stage', 0) == 0:
+            nb = self.eval_next_button
+            if nb['x'] <= x <= nb['x'] + nb['w'] and nb['y'] <= y <= nb['y'] + nb['h']:
+                self.play_button_click_sound()
+                self.eval_screen_stage = 1
+                return None
         
         # Check try again button (only if evaluated and failed)
-        if self.is_evaluated and not self.level_completed:
+        if self.is_evaluated and getattr(self, 'eval_screen_stage', 0) == 1 and not self.level_completed:
             tb = self.try_again_button
             if tb['x'] <= x <= tb['x'] + tb['w'] and tb['y'] <= y <= tb['y'] + tb['h']:
                 self.play_button_click_sound()
@@ -3319,7 +3446,7 @@ class PatternMode:
                 return None
         
         # Check next level button (only if evaluated and passed)
-        if self.is_evaluated and self.level_completed:
+        if self.is_evaluated and getattr(self, 'eval_screen_stage', 0) == 1 and self.level_completed:
             nb = self.next_level_button
             if nb['x'] <= x <= nb['x'] + nb['w'] and nb['y'] <= y <= nb['y'] + nb['h']:
                 self.play_button_click_sound()
@@ -3328,9 +3455,24 @@ class PatternMode:
         return None
     
     def evaluate_pattern(self):
-        """Take screenshot, run AI stitch detection, and score against target pattern."""
+        """Take a screenshot of the camera frame, compare it to the level blueprint mask
+        using image processing, and compute a stitch-quality score.
+
+        Detection pipeline:
+          1. Save a snapshot of the current camera frame.
+          2. Apply the selected thread-color HSV mask to the snapshot to locate all
+             thread pixels (image-processing path).  If an AI ONNX model is also
+             loaded it is tried first; the IP method is used as primary/fallback.
+          3. Supplement with the in-session accumulated stitch mask so any stitches
+             tracked in real time but not visible in the snapshot are also counted.
+          4. Map the combined detected mask into pattern (blueprint) coordinates.
+          5. Score: coverage % = on-pattern detections / total pattern pixels.
+             Wrong % = off-pattern detections / total detections.
+             Final score = coverage × (1 − wrong/100).  Pass threshold is 80 %.
+        """
         print("\n" + "=" * 72)
         print(f"🧪 EVALUATE START | Level {self.current_level}")
+
         if self.last_camera_frame is None:
             print("⚠ Cannot evaluate: no camera frame available yet.")
             print("🧪 EVALUATE ABORTED")
@@ -3341,40 +3483,60 @@ class PatternMode:
             print("🧪 EVALUATE ABORTED")
             print("=" * 72)
             return
-        if self.eval_model is None:
-            print(f"⚠ Cannot evaluate: AI model missing at {self.eval_model_path}")
-            print("🧪 EVALUATE ABORTED")
-            print("=" * 72)
-            return
 
-        # 1) Capture screenshot of current camera frame.
+        # 1) Detect stitches from the current camera snapshot.
+        #    Try AI model first (if available); fall through to image processing.
+        detected_camera_mask = None
+        if self.eval_model is not None:
+            try:
+                ai_mask = self._run_evaluation_inference(self.last_camera_frame)
+                if ai_mask is not None and int(np.count_nonzero(ai_mask > 0)) > 0:
+                    detected_camera_mask = ai_mask
+                    print(f"✓ AI model detection used ({int(np.count_nonzero(ai_mask > 0))} px)")
+            except Exception as e:
+                print(f"⚠ AI inference error: {e}")
+
+        if detected_camera_mask is None or not np.any(detected_camera_mask > 0):
+            print("🔍 Using color-based image processing for stitch detection")
+            detected_camera_mask = self._evaluate_image_processing(self.last_camera_frame)
+
+        # Ensure we have a valid mask array even if detection produced nothing.
+        if detected_camera_mask is None:
+            detected_camera_mask = np.zeros(self.last_camera_frame.shape[:2], dtype=np.uint8)
+
+        # Create a "cleaned" camera image: clear everything except detected stitch pixels
+        try:
+            cleaned_cam = np.zeros_like(self.last_camera_frame)
+            # Slight dilation so stitches are more visible when isolated
+            k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+            dil = cv2.dilate((detected_camera_mask > 0).astype(np.uint8) * 255, k, iterations=1)
+            mask_bool = dil > 0
+            cleaned_cam[mask_bool] = self.last_camera_frame[mask_bool]
+        except Exception:
+            cleaned_cam = self.last_camera_frame.copy()
+
+        # 2) Save the cleaned screenshot (only stitch visible) for records.
         captures_dir = os.path.join(os.path.dirname(__file__), 'captures', 'evaluations')
         os.makedirs(captures_dir, exist_ok=True)
         ts = datetime.now().strftime('%Y%m%d_%H%M%S')
         screenshot_path = os.path.join(captures_dir, f'level{self.current_level}_{ts}.png')
-        cv2.imwrite(screenshot_path, self.last_camera_frame)
+        cv2.imwrite(screenshot_path, cleaned_cam)
         self.last_evaluation_screenshot_path = screenshot_path
-        print(f"📸 Evaluation screenshot saved: {screenshot_path}")
+        print(f"📸 Cleaned screenshot saved: {screenshot_path}")
         print(f"🧪 Frame size: {self.last_camera_frame.shape[1]}x{self.last_camera_frame.shape[0]}")
 
-        # 2) Run AI model on screenshot.
-        detected_camera_mask = self._run_evaluation_inference(self.last_camera_frame)
-        if detected_camera_mask is None:
-            print("⚠ Evaluation failed: AI inference returned no result.")
-            print("🧪 EVALUATE ABORTED")
-            print("=" * 72)
-            return
-
+        # 3) Load the target blueprint mask for this level.
         try:
             _, pattern_alpha = self.load_blueprint(self.current_level)
         except Exception:
             pattern_alpha = None
         if pattern_alpha is None:
-            print("⚠ Evaluation failed: target pattern mask unavailable.")
+            print("⚠ Evaluation failed: blueprint mask unavailable.")
             print("🧪 EVALUATE ABORTED")
             print("=" * 72)
             return
 
+        # 4) Map detected camera-space pixels → pattern space.
         proj = self.last_pattern_projection
         print(
             f"🧪 Projection | x_offset={int(proj['x_offset'])} y_offset={int(proj['y_offset'])} "
@@ -3389,40 +3551,88 @@ class PatternMode:
         )
         camera_detected_px = int(np.count_nonzero(detected_camera_mask > 0))
         pattern_detected_px = int(np.count_nonzero(detected_pattern_mask > 0))
-        print(f"🧪 AI detections | camera_px={camera_detected_px} mapped_pattern_px={pattern_detected_px}")
+        print(f"🧪 Detections | camera_px={camera_detected_px} mapped_pattern_px={pattern_detected_px}")
 
-        # 3) Compute score from overlap between user's stitched detections and AI target pattern.
-        pat_mask = (pattern_alpha > self.pattern_alpha_threshold)
+        # 5) Merge the session accumulated stitch mask so stitches tracked in real
+        #    time (but not necessarily visible in the snapshot) also count toward
+        #    coverage.  This gives a fairer score when the camera moved slightly.
+        pat_h, pat_w = int(proj['pattern_h']), int(proj['pattern_w'])
         det_mask = (detected_pattern_mask > 0)
+        if self.completed_stitch_mask is not None:
+            cs = self.completed_stitch_mask
+            if cs.shape[0] == pat_h and cs.shape[1] == pat_w:
+                det_mask = np.logical_or(det_mask, (cs > 0))
+            else:
+                cs_r = cv2.resize(cs, (pat_w, pat_h), interpolation=cv2.INTER_NEAREST)
+                det_mask = np.logical_or(det_mask, (cs_r > 0))
 
-        total_pattern = int(np.count_nonzero(pat_mask))
-        total_detected = int(np.count_nonzero(det_mask))
-        on_pattern = int(np.count_nonzero(np.logical_and(det_mask, pat_mask)))
-        off_pattern = int(np.count_nonzero(np.logical_and(det_mask, np.logical_not(pat_mask))))
+        # 6) Compare detected stitches against the blueprint mask and score.
+        pat_mask = (pattern_alpha > self.pattern_alpha_threshold)
+        # Crop both masks to the same region in case of minor size differences.
+        h_cmp = min(pat_mask.shape[0], det_mask.shape[0])
+        w_cmp = min(pat_mask.shape[1], det_mask.shape[1])
+        pat_cmp = pat_mask[:h_cmp, :w_cmp]
+        det_cmp = det_mask[:h_cmp, :w_cmp]
+
+        total_pattern = int(np.count_nonzero(pat_cmp))
+        total_detected = int(np.count_nonzero(det_cmp))
+        on_pattern  = int(np.count_nonzero(np.logical_and(det_cmp, pat_cmp)))
+        off_pattern = int(np.count_nonzero(np.logical_and(det_cmp, ~pat_cmp)))
         print(
-            f"🧪 Pixel stats | total_pattern={total_pattern} total_detected={total_detected} "
-            f"on_pattern={on_pattern} off_pattern={off_pattern}"
+            f"🧪 Pixel stats | total_pattern={total_pattern}  total_detected={total_detected} "
+            f"on_pattern={on_pattern}  off_pattern={off_pattern}"
         )
 
         coverage_pct = (float(on_pattern) / float(total_pattern) * 100.0) if total_pattern > 0 else 0.0
-        wrong_pct = (float(off_pattern) / float(total_detected) * 100.0) if total_detected > 0 else 0.0
+        wrong_pct    = (float(off_pattern) / float(total_detected) * 100.0) if total_detected > 0 else 0.0
 
         self.evaluation_wrong_pct = wrong_pct
-        # Penalize by wrong detections while rewarding target coverage.
+        # Final score rewards coverage and penalises wrong-area stitches.
         self.final_score = max(0.0, coverage_pct * (1.0 - wrong_pct / 100.0))
 
+        # ── Build evaluation visualization images for the results screen ─────
+        # Image 1: Camera snapshot with detected thread pixels highlighted cyan.
+        try:
+            _det_vis = self.last_camera_frame.copy()
+            _hl = np.zeros_like(_det_vis)
+            _hl[detected_camera_mask > 0] = (0, 230, 200)
+            cv2.addWeighted(_det_vis, 0.55, _hl, 1.0, 0, _det_vis)
+            self.eval_vis_detected = _det_vis
+        except Exception:
+            self.eval_vis_detected = None
+
+        # Image 2: Blueprint target mask (pattern-space).
+        try:
+            _mask_vis = np.full((h_cmp, w_cmp, 3), (30, 20, 15), dtype=np.uint8)
+            _mask_vis[pat_cmp] = (80, 200, 200)  # teal for pattern pixels
+            self.eval_vis_mask = _mask_vis
+        except Exception:
+            self.eval_vis_mask = None
+
+        # Image 3: Pixel-level comparison (green=correct, red=wrong, dim=missed).
+        try:
+            _comp_vis = np.full((h_cmp, w_cmp, 3), (30, 20, 15), dtype=np.uint8)
+            _comp_vis[np.logical_and(pat_cmp, ~det_cmp)] = (50, 40, 20)   # dim: missed
+            _comp_vis[np.logical_and(det_cmp, pat_cmp)] = (50, 200, 50)   # green: correct
+            _comp_vis[np.logical_and(det_cmp, ~pat_cmp)] = (30, 30, 200)  # red: wrong
+            self.eval_vis_comparison = _comp_vis
+        except Exception:
+            self.eval_vis_comparison = None
+        # ─────────────────────────────────────────────────────────────────────
+
         self.is_evaluated = True
+        self.eval_screen_stage = 0
         if self.final_score >= 80.0:
             self.level_completed = True
             print(
-                f"✅ Level {self.current_level} completed! "
-                f"Score: {self.final_score:.1f}% | Coverage: {coverage_pct:.1f}% | Wrong: {self.evaluation_wrong_pct:.1f}%"
+                f"✅ Level {self.current_level} PASSED! "
+                f"Score: {self.final_score:.1f}% | Coverage: {coverage_pct:.1f}% | Wrong: {wrong_pct:.1f}%"
             )
         else:
             self.level_completed = False
             print(
-                f"📊 Evaluation: Score {self.final_score:.1f}% | "
-                f"Coverage: {coverage_pct:.1f}% | Wrong: {self.evaluation_wrong_pct:.1f}%. Need 80%+."
+                f"📊 Score: {self.final_score:.1f}% | "
+                f"Coverage: {coverage_pct:.1f}% | Wrong: {wrong_pct:.1f}%  (need 80 %+)"
             )
         print("🧪 EVALUATE END")
         print("=" * 72)
