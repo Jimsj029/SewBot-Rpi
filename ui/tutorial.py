@@ -92,6 +92,102 @@ def _discover_video_files(folder_path):
     return sorted(video_paths, key=lambda path: _natural_sort_key(os.path.basename(path)))
 
 
+def _find_videos_folder(videos_subfolder):
+    """Find the videos folder using multiple fallback strategies.
+
+    Priority:
+    1. If `SEWBOT_VIDEOS_DIR` env var is set, use it (optionally join subfolder).
+    2. If an absolute path is provided, use it.
+    3. Check packaged videos directory next to project.
+    4. Search common mount points (/home, /media, /mnt, C:\\Users/*/Videos) for a matching subfolder
+       with limited depth to avoid expensive full-disk scans.
+    Returns the first existing folder path or the original constructed path.
+    """
+    # 1. Environment override
+    env_override = os.environ.get('SEWBOT_VIDEOS_DIR')
+    if env_override:
+        candidate = os.path.join(env_override, videos_subfolder) if videos_subfolder else env_override
+        if os.path.isdir(candidate):
+            return os.path.abspath(candidate)
+
+    # 2. If videos_subfolder is absolute path
+    if os.path.isabs(videos_subfolder):
+        if os.path.isdir(videos_subfolder):
+            return videos_subfolder
+
+    # 3. Packaged videos directory (project relative)
+    packaged = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'videos', videos_subfolder)
+    if os.path.isdir(packaged):
+        return packaged
+
+    # 4. Prefer project's `videos` folder and try fuzzy matches for the subfolder name
+    project_root = os.path.dirname(os.path.dirname(__file__))
+    project_videos_dir = os.path.join(project_root, 'videos')
+    target = (videos_subfolder or '').strip()
+
+    def _match_candidate(name):
+        n = name.lower()
+        t = target.lower()
+        if n == t:
+            return True
+        # normalize separators
+        n2 = n.replace('_', ' ').replace('-', ' ')
+        t2 = t.replace('_', ' ').replace('-', ' ')
+        if n2 == t2:
+            return True
+        # contains (e.g., 'sewing' -> 'Sewing Machine')
+        if t2 in n2:
+            return True
+        # startswith (e.g., 'wallet' -> 'Wallet Making')
+        if n2.startswith(t2) or t2.startswith(n2):
+            return True
+        return False
+
+    if os.path.isdir(project_videos_dir):
+        try:
+            for entry in os.listdir(project_videos_dir):
+                full = os.path.join(project_videos_dir, entry)
+                if os.path.isdir(full) and _match_candidate(entry):
+                    return full
+        except Exception:
+            pass
+
+    # 5. Look in common user/video locations with same fuzzy matching
+    search_roots = [os.getcwd()]
+    home = os.path.expanduser('~')
+    if home:
+        # common on Windows and Linux
+        search_roots.append(os.path.join(home, 'Videos'))
+        search_roots.append(home)
+    if os.name != 'nt':
+        search_roots.extend(['/media', '/mnt', '/home'])
+
+    for root in search_roots:
+        if not root or not os.path.isdir(root):
+            continue
+        try:
+            for entry in os.listdir(root):
+                full = os.path.join(root, entry)
+                # direct match under root
+                if os.path.isdir(full) and _match_candidate(entry):
+                    return full
+                # common pattern: root/<device>/videos/<subfolder>
+                videos_dir = os.path.join(full, 'videos')
+                if os.path.isdir(videos_dir):
+                    try:
+                        for sub in os.listdir(videos_dir):
+                            subfull = os.path.join(videos_dir, sub)
+                            if os.path.isdir(subfull) and _match_candidate(sub):
+                                return subfull
+                    except Exception:
+                        pass
+        except Exception:
+            continue
+
+    # Give up and return packaged path (may not exist) to preserve behavior
+    return packaged
+
+
 class TutorialPlayer:
     def __init__(self, width=800, height=600, video_path=None, audio_path=None,
                  videos_subfolder='Sewing', tutorial_label='TUTORIAL'):
@@ -109,8 +205,15 @@ class TutorialPlayer:
         # Multi-video support for tutorial steps
         self.current_step = 0
         self.total_steps = 1
-        self.videos_base_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'videos', videos_subfolder)
+        # Resolve videos folder using robust discovery (supports env override, removable media, and project folder)
+        self.videos_base_path = _find_videos_folder(videos_subfolder)
+        print(f"Tutorial videos base path resolved to: {self.videos_base_path}")
         self.video_files = []
+        self._preferred_order = []
+        # Optional ordering via env var: comma-separated keywords (files containing keyword prioritized in that order)
+        env_order = os.environ.get('SEWBOT_TUTORIAL_ORDER')
+        if env_order:
+            self._preferred_order = [p.strip().lower() for p in env_order.split(',') if p.strip()]
         self.load_video_list()
         
         # Video capture
@@ -212,6 +315,19 @@ class TutorialPlayer:
             self.total_steps = 1
             print(f"Warning: no tutorial videos found in {self.videos_base_path}")
             return
+
+        # If a preferred ordering is provided, sort files to match those keywords first
+        if self._preferred_order:
+            ordered = []
+            remaining = list(self.video_files)
+            for keyword in self._preferred_order:
+                for p in list(remaining):
+                    if keyword in os.path.basename(p).lower():
+                        ordered.append(p)
+                        remaining.remove(p)
+            # append any files not matched
+            ordered.extend(sorted(remaining, key=lambda path: _natural_sort_key(os.path.basename(path))))
+            self.video_files = ordered
 
         self.total_steps = len(self.video_files)
         for video_path in self.video_files:
