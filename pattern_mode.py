@@ -166,6 +166,9 @@ class PatternMode:
         self.level_completed = False
         self.last_evaluation_screenshot_path = None
 
+        # Screenshot folder for saving evaluation screenshots
+        self.screenshot_folder = os.path.join(os.path.dirname(__file__), 'screenshot')
+
         # Last camera frame/projection for screenshot-based AI evaluation
         self.last_camera_frame = None
         self.last_pattern_projection = None
@@ -472,7 +475,7 @@ class PatternMode:
         """Load the stitch evaluation ONNX model (best.onnx) if available."""
         if models_dir is None:
             models_dir = os.path.join(os.path.dirname(__file__), 'models')
-        model_path = os.path.join(models_dir, 'best.onnx')
+        model_path = os.path.join(models_dir, 'evaluation.onnx')
         self.eval_model_path = model_path
 
         if not os.path.exists(model_path):
