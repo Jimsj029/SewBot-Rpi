@@ -594,6 +594,11 @@ class PatternMode:
         elif level == 2:
             dil_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
             mask = cv2.dilate(mask, dil_kernel, iterations=1)
+        elif level == 1:
+            dil_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+            mask = cv2.dilate(mask, dil_kernel, iterations=2)
+     
+
 
         # Convert mask to white overlay (pattern lines)
         overlay = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
