@@ -879,9 +879,13 @@ class WalletTutorialPlayer:
             self.draw_button(img, self.continue_button, COLORS['button_hover'])
     
     def draw_step_indicator(self, img):
-        """Draw the current wallet tutorial label based on the discovered file order."""
+        """Draw the current wallet tutorial label, showing step X/13 for steps 1-13."""
         current_entry = self._get_current_step_entry()
-        text = current_entry['display_label'] if current_entry is not None else f"Wallet Step {self.current_step + 1}"
+        step_number = current_entry['step_number'] if current_entry is not None else None
+        if step_number is not None and 1 <= step_number <= 13:
+            text = f"Step {step_number} Of 13 - {current_entry['display_label']}"
+        else:
+            text = current_entry['display_label'] if current_entry is not None else f"Wallet Step {self.current_step + 1}"
 
         font_scale = text_scale(0.9, self.width, self.height, floor=0.78, ceiling=1.04)
         thickness = text_thickness(2, self.width, self.height, min_thickness=2, max_thickness=3)

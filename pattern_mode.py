@@ -155,6 +155,13 @@ class PatternMode:
         # Evaluation metrics
         self.evaluation_wrong_pct = 0.0  # % of wrong/off-pattern stitches among detections
         self.final_score = 0.0  # Adjusted score after accounting for wrong stitches
+        self.level_pass_thresholds = {
+            1: 60.0,
+            2: 35.0,
+            3: 40.0,
+            4: 30.0,
+            5: 25.0,
+        }
         self.session_start_time = None
         
         # Evaluation state
@@ -2442,7 +2449,7 @@ class PatternMode:
                 ("you finish sewing.", self.COLORS['text_secondary'], 0.7, 2),
                 "",
                 ("Reach 100% progress to unlock", self.COLORS['text_secondary'], 0.7, 2),
-                ("EVALUATE, then score 80%+ to pass.", self.COLORS['text_secondary'], 0.7, 2),
+                (f"EVALUATE, then score {self.level_pass_thresholds.get(self.current_level, 80.0):.0f}%+ to pass.", self.COLORS['text_secondary'], 0.7, 2),
             ]
         
         y_pos = content_y
@@ -3179,7 +3186,7 @@ class PatternMode:
           4. Map the combined detected mask into pattern (blueprint) coordinates.
           5. Score: coverage % = on-pattern detections / total pattern pixels.
              Wrong % = off-pattern detections / total detections.
-             Final score = coverage × (1 − wrong/100).  Pass threshold is 80 %.
+                 Final score = coverage × (1 − wrong/100).  Pass threshold depends on level.
         """
         print("\n" + "=" * 72)
         print(f"🧪 EVALUATE START | Level {self.current_level}")
@@ -3313,6 +3320,7 @@ class PatternMode:
         # Final score = percentage of the pattern mask covered by detected stitches.
         raw_final_score = max(0.0, coverage_pct)
         self.final_score = min(100.0, raw_final_score)
+        pass_threshold = float(self.level_pass_thresholds.get(self.current_level, 80.0))
 
         # ── Build evaluation visualization images for the results screen ─────
         # Image 1: Camera snapshot with only in-overlay detected stitches highlighted.
@@ -3370,7 +3378,7 @@ class PatternMode:
 
         self.is_evaluated = True
         self.eval_screen_stage = 0
-        if self.final_score >= 80.0:
+        if self.final_score >= pass_threshold:
             self.level_completed = True
             print(
                 f"✅ Level {self.current_level} PASSED! "
@@ -3382,7 +3390,7 @@ class PatternMode:
             print(
                 f"📊 Score: {self.final_score:.1f}% | "
                 f"Mask Coverage: {coverage_pct:.1f}% "
-                f"(raw: {raw_final_score:.1f}% | need 80 %+)"
+                f"(raw: {raw_final_score:.1f}% | need {pass_threshold:.0f}%+)"
             )
         print("🧪 EVALUATE END")
         print("=" * 72)
