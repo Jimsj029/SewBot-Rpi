@@ -150,9 +150,6 @@ class PatternMode:
         
         # Next level button (centered in modal) - will be calculated dynamically
         self.next_level_button = {'x': 0, 'y': 0, 'w': 200, 'h': 60}
-
-        # Evaluation flow button/state (comparison -> next -> score)
-        self.evaluation_next_button = {'x': 0, 'y': 0, 'w': 200, 'h': 60}
         
         # Game tracking variables
         self.current_accuracy = 0.0
@@ -168,9 +165,6 @@ class PatternMode:
         self.is_evaluated = False
         self.level_completed = False
         self.last_evaluation_screenshot_path = None
-        self.last_evaluation_comparison_path = None
-        self.last_evaluation_comparison_image = None
-        self.show_evaluation_comparison = False
 
         # Last camera frame/projection for screenshot-based AI evaluation
         self.last_camera_frame = None
@@ -603,45 +597,6 @@ class PatternMode:
             print(f"⚠ Evaluation inference failed: {e}")
             return None
 
-    def _extract_stitch_mask_from_screenshot(self, camera_frame):
-        """Extract stitched-thread pixels from screenshot using HSV color thresholding."""
-        hsv_frame = cv2.cvtColor(camera_frame, cv2.COLOR_BGR2HSV)
-        stitch_mask = self._get_selected_color_mask(camera_frame, hsv_patch=hsv_frame)
-
-        open_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-        stitch_mask = cv2.morphologyEx(stitch_mask, cv2.MORPH_OPEN, open_kernel, iterations=1)
-        stitch_mask = cv2.morphologyEx(stitch_mask, cv2.MORPH_CLOSE, close_kernel, iterations=1)
-        return stitch_mask
-
-    def _build_evaluation_comparison_image(self, pattern_mask, detected_mask):
-        """Build a side-by-side visual: target mask, stitched mask, and color-coded diff."""
-        target = (pattern_mask.astype(np.uint8) * 255)
-        detected = (detected_mask.astype(np.uint8) * 255)
-
-        target_bgr = cv2.cvtColor(target, cv2.COLOR_GRAY2BGR)
-        detected_bgr = cv2.cvtColor(detected, cv2.COLOR_GRAY2BGR)
-
-        tp = np.logical_and(detected_mask, pattern_mask)
-        fp = np.logical_and(detected_mask, np.logical_not(pattern_mask))
-        fn = np.logical_and(pattern_mask, np.logical_not(detected_mask))
-
-        overlay = np.zeros_like(target_bgr)
-        overlay[tp] = (0, 220, 0)
-        overlay[fp] = (0, 255, 255)
-        overlay[fn] = (0, 0, 255)
-
-        h, w = target.shape[:2]
-        panel = np.zeros((h, w * 3, 3), dtype=np.uint8)
-        panel[:, :w] = target_bgr
-        panel[:, w:w * 2] = detected_bgr
-        panel[:, w * 2:] = overlay
-
-        cv2.putText(panel, "Target Mask", (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2, cv2.LINE_AA)
-        cv2.putText(panel, "Stitched (Screenshot)", (w + 10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2, cv2.LINE_AA)
-        cv2.putText(panel, "Diff (G=TP, Y=FP, R=FN)", (w * 2 + 10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2, cv2.LINE_AA)
-        return panel
-
     def _map_camera_mask_to_pattern(self, camera_mask, x_offset, y_offset, pattern_w, pattern_h):
         """Map camera-space detections into pattern-space mask using current overlay offsets."""
         pattern_mask = np.zeros((pattern_h, pattern_w), dtype=np.uint8)
@@ -865,9 +820,6 @@ class PatternMode:
         self.follow_on_count = 0
         self.sewing_started = False  # Require Start button press again on reset
         self.last_evaluation_screenshot_path = None
-        self.last_evaluation_comparison_path = None
-        self.last_evaluation_comparison_image = None
-        self.show_evaluation_comparison = False
         self.last_pattern_projection = None
         print(f"🔄 Progress reset for Level {self.current_level}")
     
@@ -3059,10 +3011,6 @@ class PatternMode:
     
     def draw_evaluation_results(self, frame):
         """Draw evaluation results as a large centered modal window"""
-        if self.show_evaluation_comparison:
-            self.draw_evaluation_comparison(frame)
-            return
-
         # Semi-transparent dark overlay
         overlay = frame.copy()
         cv2.rectangle(overlay, (0, 0), (self.width, self.height), 
@@ -3131,120 +3079,12 @@ class PatternMode:
         (wt_w, _), _ = get_text_size(wrong_text, FONT_MAIN, wrong_scale, wrong_thick)
         wrong_x = panel_x + (panel_w - wt_w) // 2
         self._put_text(frame, wrong_text, wrong_x, content_y, wrong_scale, self.COLORS['text_secondary'], wrong_thick)
-
-        if self.last_evaluation_comparison_path:
-            content_y += 30
-            compare_text = f"Comparison: {os.path.basename(self.last_evaluation_comparison_path)}"
-            compare_scale = text_scale(0.56, self.width, self.height, floor=0.50, ceiling=0.66)
-            compare_thick = text_thickness(1, self.width, self.height, min_thickness=1, max_thickness=2)
-            compare_scale = fit_text_scale(compare_text, FONT_MAIN, panel_w - 40, compare_scale, compare_thick, min_scale=0.44)
-            (cp_w, _), _ = get_text_size(compare_text, FONT_MAIN, compare_scale, compare_thick)
-            compare_x = panel_x + (panel_w - cp_w) // 2
-            self._put_text(frame, compare_text, compare_x, content_y, compare_scale, self.COLORS['text_secondary'], compare_thick)
         
         # Action button (Try Again or Next Level)
         if self.level_completed:
             self.draw_next_level_button_centered(frame, panel_x, panel_y, panel_w, panel_h)
         else:
             self.draw_try_again_button(frame, panel_x, panel_y, panel_w, panel_h)
-
-    def draw_evaluation_comparison(self, frame):
-        """Draw comparison image modal before showing the score modal."""
-        overlay = frame.copy()
-        cv2.rectangle(overlay, (0, 0), (self.width, self.height), (20, 10, 5), -1)
-        cv2.addWeighted(overlay, 0.82, frame, 0.18, 0, frame)
-
-        panel_w = min(self.width - 80, 940)
-        panel_h = min(self.height - 80, 520)
-        panel_x = (self.width - panel_w) // 2
-        panel_y = (self.height - panel_h) // 2
-
-        pulse = 0.6 + 0.4 * abs(math.sin(self.glow_phase * 0.8))
-        for i in range(3):
-            offset = i * 3
-            alpha = pulse * (1 - i * 0.3)
-            glow_color = tuple(int(c * alpha) for c in self.COLORS['glow_cyan'])
-            cv2.rectangle(
-                frame,
-                (panel_x - offset, panel_y - offset),
-                (panel_x + panel_w + offset, panel_y + panel_h + offset),
-                glow_color,
-                3,
-            )
-
-        cv2.rectangle(frame, (panel_x, panel_y), (panel_x + panel_w, panel_y + panel_h), self.COLORS['dark_blue'], -1)
-
-        title = "EVALUATION COMPARISON"
-        title_scale = text_scale(1.0, self.width, self.height, floor=0.9, ceiling=1.16)
-        title_thickness = text_thickness(3, self.width, self.height, min_thickness=2, max_thickness=4)
-        title_scale = fit_text_scale(title, FONT_DISPLAY, panel_w - 40, title_scale, title_thickness, min_scale=0.8)
-        (title_w, _), _ = get_text_size(title, FONT_DISPLAY, title_scale, title_thickness)
-        title_x = panel_x + (panel_w - title_w) // 2
-        title_y = panel_y + 42
-        self._put_text(frame, title, title_x, title_y, title_scale, self.COLORS['bright_blue'], title_thickness, font=FONT_DISPLAY)
-
-        img = self.last_evaluation_comparison_image
-        if img is None and self.last_evaluation_comparison_path and os.path.exists(self.last_evaluation_comparison_path):
-            img = cv2.imread(self.last_evaluation_comparison_path)
-            self.last_evaluation_comparison_image = img
-
-        image_area_x = panel_x + 20
-        image_area_y = panel_y + 60
-        image_area_w = panel_w - 40
-        image_area_h = panel_h - 140
-
-        if img is not None and img.size > 0:
-            ih, iw = img.shape[:2]
-            if iw > 0 and ih > 0:
-                scale = min(image_area_w / float(iw), image_area_h / float(ih))
-                draw_w = max(1, int(iw * scale))
-                draw_h = max(1, int(ih * scale))
-                resized = cv2.resize(img, (draw_w, draw_h), interpolation=cv2.INTER_AREA)
-                dx = image_area_x + (image_area_w - draw_w) // 2
-                dy = image_area_y + (image_area_h - draw_h) // 2
-                frame[dy:dy + draw_h, dx:dx + draw_w] = resized
-                cv2.rectangle(frame, (dx, dy), (dx + draw_w, dy + draw_h), self.COLORS['medium_blue'], 2)
-        else:
-            msg = "Comparison image unavailable"
-            msg_scale = text_scale(0.8, self.width, self.height, floor=0.7, ceiling=0.92)
-            msg_thick = text_thickness(2, self.width, self.height, min_thickness=1, max_thickness=2)
-            (msg_w, msg_h), _ = get_text_size(msg, FONT_MAIN, msg_scale, msg_thick)
-            self._put_text(
-                frame,
-                msg,
-                image_area_x + (image_area_w - msg_w) // 2,
-                image_area_y + (image_area_h + msg_h) // 2,
-                msg_scale,
-                self.COLORS['text_secondary'],
-                msg_thick,
-            )
-
-        button_w = 170
-        button_h = 50
-        button_x = panel_x + panel_w - button_w - 24
-        button_y = panel_y + panel_h - button_h - 20
-        self.evaluation_next_button = {'x': button_x, 'y': button_y, 'w': button_w, 'h': button_h}
-
-        pulse_btn = 0.5 + 0.35 * abs(math.sin(self.glow_phase * 1.4))
-        self.draw_glow_rect(frame, button_x, button_y, button_w, button_h, self.COLORS['neon_blue'], pulse_btn)
-        btn_overlay = frame.copy()
-        cv2.rectangle(btn_overlay, (button_x + 2, button_y + 2), (button_x + button_w - 2, button_y + button_h - 2), self.COLORS['button_hover'], -1)
-        cv2.addWeighted(btn_overlay, 0.78, frame, 0.22, 0, frame)
-
-        next_text = "NEXT"
-        next_scale = text_scale(0.86, self.width, self.height, floor=0.74, ceiling=0.96)
-        next_thick = text_thickness(2, self.width, self.height, min_thickness=2, max_thickness=3)
-        (next_w, next_h), _ = get_text_size(next_text, FONT_DISPLAY, next_scale, next_thick)
-        self._put_text(
-            frame,
-            next_text,
-            button_x + (button_w - next_w) // 2,
-            button_y + (button_h + next_h) // 2,
-            next_scale,
-            self.COLORS['text_primary'],
-            next_thick,
-            font=FONT_DISPLAY,
-        )
     
     def draw_try_again_button(self, frame, panel_x, panel_y, panel_w, panel_h):
         """Draw try again button in the centered modal"""
@@ -3460,14 +3300,6 @@ class PatternMode:
                 self.play_button_click_sound()
                 self.evaluate_pattern()
                 return None
-
-        if self.is_evaluated and self.show_evaluation_comparison:
-            nb = self.evaluation_next_button
-            if nb['x'] <= x <= nb['x'] + nb['w'] and nb['y'] <= y <= nb['y'] + nb['h']:
-                self.play_button_click_sound()
-                self.show_evaluation_comparison = False
-                return None
-            return None
         
         # Check try again button (only if evaluated and failed)
         if self.is_evaluated and not self.level_completed:
@@ -3496,12 +3328,9 @@ class PatternMode:
         return None
     
     def evaluate_pattern(self):
-        """Take screenshot, extract stitches via image processing, and score against target mask."""
+        """Take screenshot, run AI stitch detection, and score against target pattern."""
         print("\n" + "=" * 72)
         print(f"🧪 EVALUATE START | Level {self.current_level}")
-        self.last_evaluation_comparison_path = None
-        self.last_evaluation_comparison_image = None
-        self.show_evaluation_comparison = False
         if self.last_camera_frame is None:
             print("⚠ Cannot evaluate: no camera frame available yet.")
             print("🧪 EVALUATE ABORTED")
@@ -3509,6 +3338,11 @@ class PatternMode:
             return
         if self.last_pattern_projection is None:
             print("⚠ Cannot evaluate: pattern projection not ready yet.")
+            print("🧪 EVALUATE ABORTED")
+            print("=" * 72)
+            return
+        if self.eval_model is None:
+            print(f"⚠ Cannot evaluate: AI model missing at {self.eval_model_path}")
             print("🧪 EVALUATE ABORTED")
             print("=" * 72)
             return
@@ -3523,10 +3357,10 @@ class PatternMode:
         print(f"📸 Evaluation screenshot saved: {screenshot_path}")
         print(f"🧪 Frame size: {self.last_camera_frame.shape[1]}x{self.last_camera_frame.shape[0]}")
 
-        # 2) Build stitched-thread mask from screenshot (no AI model).
-        detected_camera_mask = self._extract_stitch_mask_from_screenshot(self.last_camera_frame)
-        if detected_camera_mask is None or detected_camera_mask.size == 0:
-            print("⚠ Evaluation failed: stitch mask extraction returned no result.")
+        # 2) Run AI model on screenshot.
+        detected_camera_mask = self._run_evaluation_inference(self.last_camera_frame)
+        if detected_camera_mask is None:
+            print("⚠ Evaluation failed: AI inference returned no result.")
             print("🧪 EVALUATE ABORTED")
             print("=" * 72)
             return
@@ -3555,9 +3389,9 @@ class PatternMode:
         )
         camera_detected_px = int(np.count_nonzero(detected_camera_mask > 0))
         pattern_detected_px = int(np.count_nonzero(detected_pattern_mask > 0))
-        print(f"🧪 Stitch mask pixels | camera_px={camera_detected_px} mapped_pattern_px={pattern_detected_px}")
+        print(f"🧪 AI detections | camera_px={camera_detected_px} mapped_pattern_px={pattern_detected_px}")
 
-        # 3) Compute score from overlap between screenshot stitch mask and target pattern.
+        # 3) Compute score from overlap between user's stitched detections and AI target pattern.
         pat_mask = (pattern_alpha > self.pattern_alpha_threshold)
         det_mask = (detected_pattern_mask > 0)
 
@@ -3565,35 +3399,17 @@ class PatternMode:
         total_detected = int(np.count_nonzero(det_mask))
         on_pattern = int(np.count_nonzero(np.logical_and(det_mask, pat_mask)))
         off_pattern = int(np.count_nonzero(np.logical_and(det_mask, np.logical_not(pat_mask))))
-        missing_pattern = int(np.count_nonzero(np.logical_and(pat_mask, np.logical_not(det_mask))))
         print(
             f"🧪 Pixel stats | total_pattern={total_pattern} total_detected={total_detected} "
-            f"on_pattern={on_pattern} off_pattern={off_pattern} missing={missing_pattern}"
+            f"on_pattern={on_pattern} off_pattern={off_pattern}"
         )
 
         coverage_pct = (float(on_pattern) / float(total_pattern) * 100.0) if total_pattern > 0 else 0.0
         wrong_pct = (float(off_pattern) / float(total_detected) * 100.0) if total_detected > 0 else 0.0
-        precision_pct = (float(on_pattern) / float(total_detected) * 100.0) if total_detected > 0 else 0.0
-        iou = (float(on_pattern) / float(on_pattern + off_pattern + missing_pattern) * 100.0) if (on_pattern + off_pattern + missing_pattern) > 0 else 0.0
 
         self.evaluation_wrong_pct = wrong_pct
         # Penalize by wrong detections while rewarding target coverage.
         self.final_score = max(0.0, coverage_pct * (1.0 - wrong_pct / 100.0))
-
-        comparison_img = self._build_evaluation_comparison_image(pat_mask, det_mask)
-        comparison_path = os.path.join(captures_dir, f'level{self.current_level}_{ts}_comparison.png')
-        cv2.imwrite(comparison_path, comparison_img)
-        self.last_evaluation_comparison_path = comparison_path
-        self.last_evaluation_comparison_image = comparison_img
-        self.show_evaluation_comparison = True
-        print(f"🖼️ Comparison image saved: {comparison_path}")
-        print(
-            "🧮 Formula | "
-            f"coverage={coverage_pct:.1f}% (on_pattern/total_pattern), "
-            f"wrong={wrong_pct:.1f}% (off_pattern/total_detected), "
-            f"final_score=max(0, coverage*(1-wrong/100))={self.final_score:.1f}%"
-        )
-        print(f"🧮 Extra metrics | precision={precision_pct:.1f}% | IoU={iou:.1f}%")
 
         self.is_evaluated = True
         if self.final_score >= 80.0:
