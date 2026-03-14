@@ -635,26 +635,20 @@ class TutorialPlayer:
         font_scale = text_scale(0.88, self.width, self.height, floor=0.76, ceiling=0.98)
         thickness = text_thickness(2, self.width, self.height, min_thickness=2, max_thickness=3)
         font_scale = fit_text_scale(text, UI_FONT, self.width - 220, font_scale, thickness, min_scale=0.68)
-        
+
         (text_w, text_h), baseline = get_text_size(text, UI_FONT, font_scale, thickness)
-        # Keep centered horizontally, align vertically with skip all button
         text_x = (self.width - text_w) // 2
-        text_y = 20 + (50 + text_h) // 2  # Same Y position as skip all button
-        
-        # Background for better visibility
+        text_y = 20 + (50 + text_h) // 2
+
         padding = 10
-        cv2.rectangle(img, 
+        cv2.rectangle(img,
                      (text_x - padding, text_y - text_h - padding),
                      (text_x + text_w + padding, text_y + padding),
                      (40, 40, 40), -1)
-        
-        # Border
-        cv2.rectangle(img, 
+        cv2.rectangle(img,
                      (text_x - padding, text_y - text_h - padding),
                      (text_x + text_w + padding, text_y + padding),
                      COLORS['cyan'], 2)
-        
-        # Text
         _put_text(img, text, text_x, text_y, font_scale, COLORS['text_accent'], thickness)
     
     def cleanup(self):
