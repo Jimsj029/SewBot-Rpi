@@ -1799,6 +1799,7 @@ class PatternMode:
                         _dx2 = min(detection_frame.shape[1], x_off + _pat_w)
                         _dy2 = min(detection_frame.shape[0], y_off + _pat_h)
                         contour_match_for_overlay_move = False
+                        thread_overlaps_pattern = False
                         if _dx2 > _dx1 and _dy2 > _dy1:
                             _sx1 = max(0, -x_off)
                             _sy1 = max(0, -y_off)
@@ -1862,6 +1863,15 @@ class PatternMode:
                                         and _ratio >= color_cfg['min_ratio']
                                     )
                                     contour_match_for_overlay_move = self.last_color_match
+                                    if self.last_color_match:
+                                        _thread_mask = np.logical_and(_color_mask > 0, _box_mask > 0)
+                                        _pattern_mask_crop = (
+                                            pattern_alpha[_sy1:_sy2, _sx1:_sx2] > self.pattern_alpha_threshold
+                                        )
+                                        if _pattern_mask_crop.shape == _thread_mask.shape:
+                                            thread_overlaps_pattern = bool(
+                                                np.any(np.logical_and(_thread_mask, _pattern_mask_crop))
+                                            )
 
                                     # Persist contour-box debug mask for on-frame highlight.
                                     if _bx2 > _bx1 and _by2 > _by1:
@@ -1908,56 +1918,18 @@ class PatternMode:
                     raw_needle_in_pat_x = exp_x
                     raw_needle_in_pat_y = exp_y
 
-                    # Credit/penalize only when motion and selected thread color are both valid.
+                    # Keep movement contour-gated, but classify correctness by
+                    # overlap between selected-thread contour region and pattern mask.
                     if moved_with_contour:
                         pat_h, pat_w = pattern_alpha.shape[:2]
-                        # Stitch is in the outline detection zone if its centre pixel
-                        # falls within the dilated outline mask.
-                        _outline = self._get_pattern_outline_mask(pattern_alpha, overlay_w, overlay_h)
-                        in_outline = bool(
-                            _outline is not None
-                            and exp_y < _outline.shape[0]
-                            and exp_x < _outline.shape[1]
-                            and _outline[exp_y, exp_x] > 0
-                        )
-                        # A stitch in the outline zone counts as CYAN (correct) when
-                        # the stitch box overlaps the actual pattern mask enough.
-                        # This means edge stitches that are mostly on the pattern are
-                        # accepted; stitches that are mostly outside are marked wrong.
                         _stamp_half = 4 if self.current_level in (2, 3) else self.stitch_box_half
-                        if in_outline:
-                            overlap_ratio = self._box_overlap_ratio(pattern_alpha, exp_x, exp_y, _stamp_half)
-                            mostly_on_pattern = overlap_ratio >= float(self.outline_on_pattern_ratio_min)
-                        else:
-                            mostly_on_pattern = False
-
-                        if in_outline and mostly_on_pattern:
+                        if thread_overlaps_pattern:
                             if self.completed_stitch_mask is None:
                                 self.completed_stitch_mask = np.zeros((pat_h, pat_w), dtype=np.uint8)
                             self._stamp_box(self.completed_stitch_mask, exp_x, exp_y, _stamp_half)
                             self._realtime_pat_dirty = True
                             self._update_progress_from_mask(pattern_alpha)
-                        elif in_outline and not mostly_on_pattern:
-                            # In outline zone but mostly outside the pattern — mark wrong.
-                            if self.missed_stitch_mask is None:
-                                self.missed_stitch_mask = np.zeros((pat_h, pat_w), dtype=np.uint8)
-                            self._stamp_box(
-                                self.missed_stitch_mask,
-                                raw_needle_in_pat_x,
-                                raw_needle_in_pat_y,
-                                self.missed_stitch_box_half,
-                            )
-                            self._realtime_pat_dirty = True
-                            self._update_progress_from_mask(pattern_alpha)
-                            try:
-                                self.out_of_segment_warning = True
-                                self.warning_message = "FOLLOW THE PATTERN"
-                                self.warning_flash_phase = 0
-                                self.warning_until_frame = int(self.stitch_frame_index) + 40
-                            except Exception:
-                                pass
                         else:
-                            # Completely outside the outline zone — mark wrong.
                             if self.missed_stitch_mask is None:
                                 self.missed_stitch_mask = np.zeros((pat_h, pat_w), dtype=np.uint8)
                             self._stamp_box(
