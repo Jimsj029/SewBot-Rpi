@@ -194,7 +194,7 @@ class PatternMode:
         self.outline_thickness = 8             # Outline extends pattern mask outward by this many pixels to form the detection zone (adjustable in code)
         self.outline_detect_local_radius = 5  # Kept for compatibility
         self.outline_detect_local_half_size = 20  # Local half-size for contour-box detection around expected stitch
-        self.outline_on_pattern_ratio_min = 0.1  # Lenient: accept as correct if >= this fraction of stitch box overlaps the real pattern
+        self.outline_on_pattern_ratio_min = 0.1  # Correct stitch if >=20% of detected color pixels overlap the real pattern; otherwise mark wrong stitch
         self.min_color_pixels_center = 50   # Minimum matched color pixels for center contour-box detection
         self.min_color_pixels_outline = 50  # Minimum matched color pixels inside contour-box detection area
         self.min_color_contour_area_center = 18
@@ -1669,20 +1669,13 @@ class PatternMode:
                         self.skeleton_seeded = True
                         self.centerline_progress_initialized = True
 
-                    # ── Auto-advance: contour-box detection uses current dynamic pattern offset ──
+                    # ── Auto-advance: color detection uses current dynamic pattern offset ──
                     # Compute where the pattern is sitting RIGHT NOW (before any advance)
                     # so the detection region matches the ink visible on camera.
-                    moved_with_contour = False
+                    moved_with_color = False
                     if _is_completed:
-                        # Freeze at the END of the skeleton path so the needle
-                        # always rests on the final stitch tip, not wherever
-                        # the traversal happened to be when 100% was first hit
-                        # (which for W/V shapes can be mid-path).
-                        if self.skeleton_completed_lock_idx is None:
-                            self.skeleton_completed_lock_idx = skel_max_idx
-                            _lock_xy = skeleton_path[self.skeleton_completed_lock_idx]
-                            self.skeleton_completed_lock_point = (int(_lock_xy[0]), int(_lock_xy[1]))
-                        self.skeleton_idx_f = float(self.skeleton_completed_lock_idx)
+                        # On completion, keep the pattern centered on screen.
+                        self.skeleton_idx_f = float(np.clip(self.skeleton_idx_f, 0.0, float(skel_max_idx)))
                     elif self.sewing_started:
                         _cur = int(np.clip(round(self.skeleton_idx_f), 0, skel_max_idx))
                         _ex  = int(skeleton_path[_cur][0])
@@ -1694,7 +1687,7 @@ class PatternMode:
                         _dy1 = max(0, y_off)
                         _dx2 = min(detection_frame.shape[1], x_off + _pat_w)
                         _dy2 = min(detection_frame.shape[0], y_off + _pat_h)
-                        contour_match_for_overlay_move = False
+                        color_match_for_overlay_move = False
                         thread_overlaps_pattern = False
                         if _dx2 > _dx1 and _dy2 > _dy1:
                             _sx1 = max(0, -x_off)
@@ -1709,88 +1702,68 @@ class PatternMode:
                             # within the tolerance border, not just on the pattern line.
                             _outline_full = self._get_pattern_outline_mask(pattern_alpha, _pat_w, _pat_h)
                             _outline_crop = _outline_full[_sy1:_sy2, _sx1:_sx2]
-                            # Restrict detection to the current expected stitch area
-                            # so each pattern segment is evaluated locally (lenient but targeted).
-                            _local_cx = int(np.clip(_ex - _sx1, 0, _outline_crop.shape[1] - 1))
-                            _local_cy = int(np.clip(_ey - _sy1, 0, _outline_crop.shape[0] - 1))
                             _color_mask = self._get_selected_color_mask(_cam_region, hsv_patch=_hsv_region)
-                            _contours, _ = cv2.findContours(_color_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                            _min_outline_contour_area = int(self.min_color_contour_area_outline)
-                            if self.current_level == 3:
-                                # Level 3 (W) has frequent sharp turns; be slightly more permissive.
-                                _min_outline_contour_area = max(10, int(round(_min_outline_contour_area * 0.65)))
-                            _best_contour = self._select_color_contour(
-                                _contours,
-                                _local_cx,
-                                _local_cy,
-                                _min_outline_contour_area,
-                            )
-                            if _best_contour is not None:
-                                _m = cv2.moments(_best_contour)
-                                if _m['m00'] > 0:
-                                    _ccx = float(_m['m10'] / _m['m00'])
-                                    _ccy = float(_m['m01'] / _m['m00'])
-                                    _max_dist = float(max(6, self.outline_detect_local_half_size))
-                                    if self.current_level == 3:
-                                        _max_dist = max(_max_dist, 30.0)
-                                    if ((_ccx - _local_cx) ** 2 + (_ccy - _local_cy) ** 2) > (_max_dist ** 2):
-                                        _best_contour = None
-                            if _best_contour is not None:
-                                _box_mask, (_bx1, _by1, _bx2, _by2) = self._build_contour_box_mask(
-                                    _color_mask.shape,
-                                    _best_contour,
-                                    padding=self.color_contour_padding,
+                            _ink_mask = (_outline_crop > 0)
+                            _ink_count = int(np.count_nonzero(_ink_mask))
+                            if _ink_count > 0:
+                                _color_in_ink = int(np.count_nonzero(_color_mask[_ink_mask]))
+                                _ratio = float(_color_in_ink) / float(_ink_count)
+                                _min_outline_pixels = int(self.min_color_pixels_outline)
+                                if self.current_level == 3:
+                                    _min_outline_pixels = max(10, int(round(_min_outline_pixels * 0.65)))
+                                _required_px = max(8, min(_min_outline_pixels, int(0.75 * _ink_count)))
+                                color_cfg = self.color_profiles[self.selected_detection_color]
+                                self.last_color_match_ratio = _ratio
+                                self.last_color_match = (
+                                    _color_in_ink >= _required_px
+                                    and _ratio >= color_cfg['min_ratio']
                                 )
-                                _ink_mask = np.logical_and(_outline_crop > 0, _box_mask > 0)
-                                if not np.any(_ink_mask):
-                                    _ink_mask = _box_mask > 0
-                                _ink_count = int(np.count_nonzero(_ink_mask))
-                                if _ink_count > 0:
-                                    _color_in_ink = int(np.count_nonzero(_color_mask[_ink_mask]))
-                                    _ratio = float(_color_in_ink) / float(_ink_count)
-                                    _min_outline_pixels = int(self.min_color_pixels_outline)
-                                    if self.current_level == 3:
-                                        _min_outline_pixels = max(10, int(round(_min_outline_pixels * 0.65)))
-                                    _required_px = max(8, min(_min_outline_pixels, int(0.75 * _ink_count)))
-                                    color_cfg = self.color_profiles[self.selected_detection_color]
-                                    self.last_color_match_ratio = _ratio
-                                    self.last_color_match = (
-                                        _color_in_ink >= _required_px
-                                        and _ratio >= color_cfg['min_ratio']
+                                color_match_for_overlay_move = self.last_color_match
+                                if self.last_color_match:
+                                    _thread_mask = (_color_mask > 0)
+                                    _pattern_mask_crop = (
+                                        pattern_alpha[_sy1:_sy2, _sx1:_sx2] > self.pattern_alpha_threshold
                                     )
-                                    contour_match_for_overlay_move = self.last_color_match
-                                    if self.last_color_match:
-                                        _thread_mask = np.logical_and(_color_mask > 0, _box_mask > 0)
-                                        _pattern_mask_crop = (
-                                            pattern_alpha[_sy1:_sy2, _sx1:_sx2] > self.pattern_alpha_threshold
-                                        )
-                                        if _pattern_mask_crop.shape == _thread_mask.shape:
-                                            thread_overlaps_pattern = bool(
-                                                np.any(np.logical_and(_thread_mask, _pattern_mask_crop))
+                                    if _pattern_mask_crop.shape == _thread_mask.shape:
+                                        _thread_px = int(np.count_nonzero(_thread_mask))
+                                        if _thread_px > 0:
+                                            _thread_on_pattern = int(np.count_nonzero(
+                                                np.logical_and(_thread_mask, _pattern_mask_crop)
+                                            ))
+                                            _thread_overlap_ratio = float(_thread_on_pattern) / float(_thread_px)
+                                            thread_overlaps_pattern = (
+                                                _thread_overlap_ratio >= float(self.outline_on_pattern_ratio_min)
                                             )
+                                        else:
+                                            thread_overlaps_pattern = False
 
-                                    # Persist contour-box debug mask for on-frame highlight.
-                                    if _bx2 > _bx1 and _by2 > _by1:
-                                        _masked = cv2.bitwise_and(_color_mask, _box_mask)
-                                        self.last_color_mask = _masked[_by1:_by2, _bx1:_bx2].copy()
-                                        self.last_color_mask_bounds = (
-                                            _dx1 + _bx1,
-                                            _dy1 + _by1,
-                                            _dx1 + _bx2,
-                                            _dy1 + _by2,
-                                        )
-                                        self.last_color_contour_box = self.last_color_mask_bounds
-                        # Movement is strictly contour-gated: no contour match, no overlay shift.
-                        if contour_match_for_overlay_move:
+                                # Persist color-in-outline debug mask for on-frame highlight.
+                                _masked = cv2.bitwise_and(_color_mask, _color_mask, mask=_outline_crop)
+                                self.last_color_mask = _masked.copy()
+                                self.last_color_mask_bounds = (
+                                    _dx1,
+                                    _dy1,
+                                    _dx2,
+                                    _dy2,
+                                )
+                                self.last_color_contour_box = self.last_color_mask_bounds
+                            else:
+                                self.last_color_match_ratio = 0.0
+                                self.last_color_match = False
+                        # Movement is color-gated: no color-on-pattern match, no overlay shift.
+                        if color_match_for_overlay_move:
                             self.skeleton_idx_f = float(np.clip(
                                 self.skeleton_idx_f + self.auto_move_speed,
                                 0.0, float(skel_max_idx)))
-                            moved_with_contour = True
+                            moved_with_color = True
 
                     # ── Pattern scrolls under a fixed needle position ─────────────────
                     cur_idx = int(np.clip(round(self.skeleton_idx_f), 0, skel_max_idx))
                     exp_x   = int(skeleton_path[cur_idx][0])
                     exp_y   = int(skeleton_path[cur_idx][1])
+                    if _is_completed:
+                        exp_x = overlay_w // 2
+                        exp_y = overlay_h // 2
 
                     if self.progress_from_path:
                         self._update_progress_from_path(cur_idx, skel_max_idx)
@@ -1814,9 +1787,9 @@ class PatternMode:
                     raw_needle_in_pat_x = exp_x
                     raw_needle_in_pat_y = exp_y
 
-                    # Keep movement contour-gated, but classify correctness by
-                    # overlap between selected-thread contour region and pattern mask.
-                    if moved_with_contour:
+                    # Keep movement color-gated, and classify correctness by
+                    # overlap between selected-thread region and pattern mask.
+                    if moved_with_color:
                         pat_h, pat_w = pattern_alpha.shape[:2]
                         _stamp_half = self.stitch_box_half
                         if thread_overlaps_pattern:
@@ -1844,16 +1817,13 @@ class PatternMode:
                             except Exception:
                                 pass
                 else:
-                    # Skeleton unavailable — keep completion lock point if set;
+                    # Skeleton unavailable — keep pattern centered on completion;
                     # otherwise fall back to fixed centre.
                     self.skeleton_seeded = False
                     self.centerline_progress_initialized = False
                     _is_completed = (self.raw_progress >= 100.0) or (self.is_evaluated and self.level_completed)
-                    if _is_completed and self.skeleton_completed_lock_point is not None:
-                        exp_x, exp_y = self.skeleton_completed_lock_point
-                    else:
-                        exp_x = overlay_w // 2
-                        exp_y = overlay_h // 2
+                    exp_x = overlay_w // 2
+                    exp_y = overlay_h // 2
                     x_offset = int(round(self.NEEDLE_ROI_X)) - exp_x
                     y_offset = int(round(self.NEEDLE_ROI_Y)) - exp_y
 
