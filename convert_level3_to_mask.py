@@ -3,7 +3,7 @@ import numpy as np
 
 # Load level3.png
 src = 'blueprint/image.png'
-out = 'blueprint/level2_mask.png'
+out = 'blueprint/level3_mask.png'
 img = Image.open(src).convert('L')
 arr = np.array(img)
 
