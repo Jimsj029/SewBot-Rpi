@@ -1291,67 +1291,44 @@ class PatternMode:
             else:
                 start = min(endpoints, key=lambda p: (p[0], p[1]))
 
-        # ── Walk path ─────────────────────────────────────────────────────────
-        if self.current_level in (2, 5):
-            # DFS with backtracking so every branch — including short
-            # bottom-corner spurs that a greedy longest-arm walk would skip —
-            # is visited in order.
-            path_yx = []
-            visited = set()
-            visited.add(start)
-            path_yx.append(start)
+        # ── Walk path — DFS visits EVERY skeleton pixel for accurate progress ──
+        # DFS with backtracking guarantees all branches are included so that
+        # path length equals the true pattern extent and 100% really means done.
+        # Neighbor ordering is tuned per level to follow the natural sewing direction.
+        def _sort_key_for_level(p):
+            y, x = p
+            if self.current_level in (2, 5):
+                return (-y, x)   # down-first, then left-to-right
+            elif self.current_level == 3:
+                return (y, x)    # top-to-bottom, left-to-right
+            elif self.current_level == 4:
+                return (x, y)    # left-to-right primary
+            else:
+                return (y, x)    # level 1 / default: top-to-bottom
 
-            def _unvisited_down_first(node):
-                return sorted(
-                    [nb for nb in get_neighbors_8(*node) if nb not in visited],
-                    key=lambda p: -p[0]   # larger y (lower on screen) first
-                )
+        path_yx = []
+        visited = set()
+        visited.add(start)
+        path_yx.append(start)
 
-            dfs_stack = [(start, _unvisited_down_first(start))]
-            while dfs_stack:
-                node, children = dfs_stack[-1]
-                # Drop children that became visited after we pushed them.
-                while children and children[0] in visited:
-                    children.pop(0)
-                if not children:
-                    dfs_stack.pop()
-                else:
-                    nxt = children.pop(0)
-                    visited.add(nxt)
-                    path_yx.append(nxt)
-                    dfs_stack.append((nxt, _unvisited_down_first(nxt)))
-        else:
-            # Greedy walk for all other levels: at junctions pick the longest arm.
-            # This avoids short spurious spurs that thinning creates at inner corners.
-            def _count_reachable(seed, base_visited):
-                q = [seed]
-                seen = set(base_visited)
-                seen.add(seed)
-                n = 0
-                while q:
-                    p = q.pop()
-                    n += 1
-                    for nb2 in get_neighbors_8(*p):
-                        if nb2 not in seen:
-                            seen.add(nb2)
-                            q.append(nb2)
-                return n
+        def _get_sorted_unvisited(node):
+            return sorted(
+                [nb for nb in get_neighbors_8(*node) if nb not in visited],
+                key=_sort_key_for_level
+            )
 
-            path_yx = [start]
-            visited = {start}
-            current = start
-            while True:
-                nbs = [nb for nb in get_neighbors_8(*current) if nb not in visited]
-                if not nbs:
-                    break
-                if len(nbs) == 1:
-                    next_pt = nbs[0]
-                else:
-                    # Junction: take the arm that leads to the most unvisited skeleton pixels.
-                    next_pt = max(nbs, key=lambda nb: _count_reachable(nb, visited))
-                visited.add(next_pt)
-                path_yx.append(next_pt)
-                current = next_pt
+        dfs_stack = [(start, _get_sorted_unvisited(start))]
+        while dfs_stack:
+            node, children = dfs_stack[-1]
+            while children and children[0] in visited:
+                children.pop(0)
+            if not children:
+                dfs_stack.pop()
+            else:
+                nxt = children.pop(0)
+                visited.add(nxt)
+                path_yx.append(nxt)
+                dfs_stack.append((nxt, _get_sorted_unvisited(nxt)))
 
         # ── Convert (y, x) list → (x, y) int32 array ─────────────────────────
         result = np.array([[x, y] for y, x in path_yx], dtype=np.int32)
@@ -1909,41 +1886,37 @@ class PatternMode:
 
                     pattern_src = realtime_pattern if realtime_pattern is not None else pattern_overlay
 
-                    # ── Restrict alpha blend to a window around the needle ─────────
-                    # The needle is fixed at (NEEDLE_ROI_X, NEEDLE_ROI_Y).  Blending
-                    # only this region instead of the full visible pattern area
-                    # dramatically reduces per-frame pixel work.
-                    # Adjust self.blend_roi_half in __init__ to show more/less context.
-                    nx = int(self.needle_pos_x)
-                    ny = int(self.needle_pos_y)
-                    blend_x1 = max(dst_x1, nx - self.blend_roi_half)
-                    blend_y1 = max(dst_y1, ny - self.blend_roi_half)
-                    blend_x2 = min(dst_x2, nx + self.blend_roi_half)
-                    blend_y2 = min(dst_y2, ny + self.blend_roi_half)
-                    b_w = blend_x2 - blend_x1
-                    b_h = blend_y2 - blend_y1
+                    # ── Blend full visible overlay ─────────────────────────────────
+                    b_w = dst_x2 - dst_x1
+                    b_h = dst_y2 - dst_y1
                     if b_w > 0 and b_h > 0:
-                        # Map the restricted blend window back to pattern source coords.
-                        bsrc_x1 = src_x1 + (blend_x1 - dst_x1)
-                        bsrc_y1 = src_y1 + (blend_y1 - dst_y1)
-                        bsrc_x2 = bsrc_x1 + b_w
-                        bsrc_y2 = bsrc_y1 + b_h
-                        roi = cam_frame[blend_y1:blend_y2, blend_x1:blend_x2]
-                        pattern_crop = pattern_src[bsrc_y1:bsrc_y2, bsrc_x1:bsrc_x2]
-                        alpha_crop = pattern_alpha[bsrc_y1:bsrc_y2, bsrc_x1:bsrc_x2]
+                        roi = cam_frame[dst_y1:dst_y2, dst_x1:dst_x2]
+                        pattern_crop = pattern_src[src_y1:src_y2, src_x1:src_x2]
+                        alpha_crop = pattern_alpha[src_y1:src_y2, src_x1:src_x2]
                         # Outline pixels sit outside the PNG alpha (alpha=0), so extend
                         # the blend alpha to include the outline zone at full weight.
                         _outline_blend = self._get_pattern_outline_mask(pattern_alpha, actual_w, actual_h)
                         if _outline_blend is not None:
-                            _outline_crop_b = _outline_blend[bsrc_y1:bsrc_y2, bsrc_x1:bsrc_x2].astype(np.float32) / 255.0
+                            _outline_crop_b = _outline_blend[src_y1:src_y2, src_x1:src_x2].astype(np.float32) / 255.0
                             blend_alpha = np.maximum(alpha_crop, _outline_crop_b)
                         else:
                             blend_alpha = alpha_crop
-                        # Vectorized 3-channel alpha blend — avoids 3× Python-loop overhead.
-                        # Use higher alpha for outline to make it more visible
-                        a3 = blend_alpha[:, :, np.newaxis] * 0.8 * float(self.pattern_visual_opacity)  # [H, W, 1] broadcast (apply visual opacity)
+                        # Vectorized 3-channel alpha blend
+                        a3 = blend_alpha[:, :, np.newaxis] * 0.8 * float(self.pattern_visual_opacity)
                         roi_blended = a3 * pattern_crop + (1.0 - a3) * roi
-                        cam_frame[blend_y1:blend_y2, blend_x1:blend_x2] = roi_blended.astype(np.uint8)
+                        cam_frame[dst_y1:dst_y2, dst_x1:dst_x2] = roi_blended.astype(np.uint8)
+                    # ── Draw movement path guide dots on whole overlay ──────────────
+                    if movement_path is not None and len(movement_path) > 0:
+                        _path_len = len(movement_path)
+                        _dot_step = max(1, _path_len // 100)
+                        for _pi in range(0, _path_len, _dot_step):
+                            _px = int(movement_path[_pi][0]) + x_offset
+                            _py = int(movement_path[_pi][1]) + y_offset
+                            if 0 <= _px < cam_frame.shape[1] and 0 <= _py < cam_frame.shape[0]:
+                                if _pi <= cur_idx:
+                                    cv2.circle(cam_frame, (_px, _py), 2, (0, 220, 220), -1)  # cyan = done
+                                else:
+                                    cv2.circle(cam_frame, (_px, _py), 2, (0, 200, 255), -1)  # yellow = to do
                     # ─────────────────────────────────────────────────────────────
 
                     # Use the updated index immediately for follow validation.
