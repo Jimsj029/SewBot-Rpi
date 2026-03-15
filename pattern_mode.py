@@ -1213,38 +1213,145 @@ class PatternMode:
         return result
 
     def _build_skeleton_path(self, pattern_alpha, actual_w, actual_h):
-        """Build a movement path by column-snake scanning all pattern pixels.
+        """Build an ordered 1-pixel skeleton path by thinning the binary mask.
 
-        Sweeps column by column left→right, alternating top→bottom and
-        bottom→top each column.  For stroke-based patterns (V, W, U, n …) this
-        naturally traces: down the left arm, up/across, down the next arm, etc.,
-        guaranteeing 100 % pattern coverage without any skeleton thinning.
+        Returns an np.array of shape (N, 2) where each row is (x, y) in pattern
+        space.  The path is traced from one endpoint to the other so the needle
+        can travel the full zigzag without leaving the skeleton.
         Cached per level — computed once on first call.
         """
         if self._cached_skeleton_path is not None:
             return self._cached_skeleton_path
 
         pat_crop = pattern_alpha[:actual_h, :actual_w]
-        ys_arr, xs_arr = np.where(pat_crop > self.pattern_alpha_threshold)
-        if ys_arr.size == 0:
+        pat_binary = (pat_crop > self.pattern_alpha_threshold).astype(np.uint8)
+
+        # ── Morphological thinning (skeleton) ────────────────────────────────
+        skel = None
+        try:
+            from skimage.morphology import skeletonize as _sk
+            skel = _sk(pat_binary.astype(bool)).astype(np.uint8)
+        except Exception:
+            pass
+        if skel is None:
+            try:
+                skel = cv2.ximgproc.thinning(pat_binary * 255) // 255
+            except Exception:
+                pass
+        if skel is None:
+            # Pure-NumPy Zhang-Suen–style iterative erosion fallback
+            img = pat_binary.copy()
+            prev = None
+            for _ in range(200):
+                eroded = cv2.erode(img, np.ones((3, 3), np.uint8))
+                opened = cv2.dilate(eroded, np.ones((3, 3), np.uint8))
+                skel_iter = cv2.subtract(img, opened)
+                if prev is not None and np.array_equal(skel_iter, prev):
+                    break
+                prev = skel_iter.copy()
+                img = eroded
+            skel = skel_iter if prev is not None else pat_binary
+
+        ys, xs = np.where(skel > 0)
+        if ys.size == 0:
             return None
 
-        # Group all pattern pixels by column
-        cols: dict = {}
-        for y, x in zip(ys_arr.tolist(), xs_arr.tolist()):
-            cols.setdefault(x, []).append(y)
+        # ── Build adjacency set for O(1) neighbor lookup ──────────────────────
+        skel_set = set(zip(ys.tolist(), xs.tolist()))
 
-        # Snake scan: each column alternates direction
+        def get_neighbors_8(y, x):
+            return [
+                (y + dy, x + dx)
+                for dy in (-1, 0, 1)
+                for dx in (-1, 0, 1)
+                if not (dy == 0 and dx == 0) and (y + dy, x + dx) in skel_set
+            ]
+
+        # ── Find an endpoint (degree-1 pixel) as the start of the path ────────
+        endpoints = [(y, x) for (y, x) in skel_set if len(get_neighbors_8(y, x)) == 1]
+        if not endpoints:
+            if self.current_level == 5:
+                # Closed loop — pick leftmost pixel, break ties by bottom-most
+                start = min(skel_set, key=lambda p: (p[1], -p[0]))
+            elif self.current_level in (2, 3):
+                # Levels 2/3: force start from left-top side of pattern.
+                # For closed/ambiguous skeletons choose leftmost, then topmost.
+                start = min(skel_set, key=lambda p: (p[1], p[0]))
+            else:
+                # Closed loop — pick topmost-leftmost pixel
+                start = min(skel_set, key=lambda p: (p[0], p[1]))
+        else:
+            if self.current_level == 5:
+                # Level 5: start at leftmost endpoint (smallest x), break ties by bottom-most y
+                start = min(endpoints, key=lambda p: (p[1], -p[0]))
+            elif self.current_level in (2, 3):
+                # Levels 2/3: always start from leftmost endpoint.
+                # Tie-break by topmost so we begin at the left upper branch.
+                start = min(endpoints, key=lambda p: (p[1], p[0]))
+            else:
+                start = min(endpoints, key=lambda p: (p[0], p[1]))
+
+        # ── Walk path — DFS visits EVERY skeleton pixel for accurate progress ──
+        # DFS with backtracking guarantees all branches are included so that
+        # path length equals the true pattern extent and 100% really means done.
+        # Neighbor ordering is tuned per level to follow the natural sewing direction.
+        def _sort_key_for_level(p):
+            y, x = p
+            if self.current_level in (2, 5):
+                return (-y, x)   # down-first, then left-to-right
+            elif self.current_level == 3:
+                return (y, x)    # top-to-bottom, left-to-right
+            elif self.current_level == 4:
+                return (x, y)    # left-to-right primary
+            else:
+                return (y, x)    # level 1 / default: top-to-bottom
+
         path_yx = []
-        going_down = True
-        for col_x in sorted(cols.keys()):
-            col_ys = sorted(cols[col_x])
-            if not going_down:
-                col_ys = col_ys[::-1]
-            for y in col_ys:
-                path_yx.append((y, col_x))
-            going_down = not going_down
+        visited = set()
+        visited.add(start)
+        path_yx.append(start)
 
+        def _get_sorted_unvisited(node):
+            return sorted(
+                [nb for nb in get_neighbors_8(*node) if nb not in visited],
+                key=_sort_key_for_level
+            )
+
+        def _run_dfs_from(seed):
+            stack = [(seed, _get_sorted_unvisited(seed))]
+            while stack:
+                node, children = stack[-1]
+                while children and children[0] in visited:
+                    children.pop(0)
+                if not children:
+                    stack.pop()
+                else:
+                    nxt = children.pop(0)
+                    visited.add(nxt)
+                    path_yx.append(nxt)
+                    stack.append((nxt, _get_sorted_unvisited(nxt)))
+
+        _run_dfs_from(start)
+
+        # ── Bridge disconnected skeleton fragments ────────────────────────────
+        # The skeleton may have tiny gaps (disconnected components) due to
+        # thresholding or inner-corner artefacts.  Jump from the last visited
+        # point to the nearest unvisited pixel and continue DFS until every
+        # skeleton pixel is part of the path.
+        remaining = skel_set - visited
+        while remaining:
+            last_y, last_x = path_yx[-1]
+            rem_list = list(remaining)
+            rem_arr = np.array(rem_list, dtype=np.float32)
+            dists = (rem_arr[:, 0] - last_y) ** 2 + (rem_arr[:, 1] - last_x) ** 2
+            bridge_pt = rem_list[int(np.argmin(dists))]
+            visited.add(bridge_pt)
+            remaining.discard(bridge_pt)
+            path_yx.append(bridge_pt)
+            _run_dfs_from(bridge_pt)
+            remaining -= visited
+
+        # ── Convert (y, x) list → (x, y) int32 array ─────────────────────────
         result = np.array([[x, y] for y, x in path_yx], dtype=np.int32)
         self._cached_skeleton_path = result
         self._cached_skeleton_f32  = result.astype(np.float32)
