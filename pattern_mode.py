@@ -1303,7 +1303,8 @@ class PatternMode:
                     return out
 
                 endpoints = [node for node in node_set if len(_neighbors(node)) == 1]
-                def _bfs_farthest(start_node):
+
+                def _bfs_path(start_node, goal_node=None):
                     queue = [start_node]
                     parent = {start_node: None}
                     dist = {start_node: 0}
@@ -1312,6 +1313,8 @@ class PatternMode:
                     while head < len(queue):
                         cur = queue[head]
                         head += 1
+                        if goal_node is not None and cur == goal_node:
+                            break
                         if dist[cur] > dist[farthest]:
                             farthest = cur
                         for nb in _neighbors(cur):
@@ -1322,16 +1325,19 @@ class PatternMode:
                     return farthest, parent, dist
 
                 if endpoints:
-                    seed = min(endpoints, key=lambda p: (p[0], p[1]))
+                    start_node = min(endpoints, key=lambda p: (p[0], p[1]))
+                    # End at the right-most endpoint, tie-break toward the top.
+                    end_node = max(endpoints, key=lambda p: (p[1], -p[0]))
                 else:
-                    seed = min(node_set, key=lambda p: (p[0], p[1]))
+                    start_node = min(node_set, key=lambda p: (p[0], p[1]))
+                    end_node, _, _ = _bfs_path(start_node)
 
-                # Build path from the true top-most endpoint to the farthest
-                # reachable endpoint so the guide starts at the first pixel.
-                b, parent, _ = _bfs_farthest(seed)
+                # Shortest path from explicit start -> end keeps ordering stable
+                # and avoids reversing/backtracking artifacts.
+                _, parent, _ = _bfs_path(start_node, goal_node=end_node)
 
                 rev = []
-                cur = b
+                cur = end_node
                 while cur is not None:
                     rev.append(cur)
                     cur = parent[cur]
@@ -1380,6 +1386,9 @@ class PatternMode:
                     path_len = len(path_points)
                     normal_radius = 8
                     for idx, (x, y) in enumerate(path_points):
+                        if idx == 0 or idx == path_len - 1:
+                            centered_points.append((int(x), int(y)))
+                            continue
                         prev_x, prev_y = path_points[max(0, idx - 1)]
                         next_x, next_y = path_points[min(path_len - 1, idx + 1)]
                         tx = float(next_x - prev_x)
