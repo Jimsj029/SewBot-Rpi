@@ -1315,7 +1315,7 @@ class PatternMode:
 
                 endpoints = [node for node in node_set if len(_neighbors(node)) == 1]
 
-                def _bfs_path(start_node, goal_node=None):
+                def _bfs_farthest(start_node):
                     queue = [start_node]
                     parent = {start_node: None}
                     dist = {start_node: 0}
@@ -1324,8 +1324,6 @@ class PatternMode:
                     while head < len(queue):
                         cur = queue[head]
                         head += 1
-                        if goal_node is not None and cur == goal_node:
-                            break
                         if dist[cur] > dist[farthest]:
                             farthest = cur
                         for nb in _neighbors(cur):
@@ -1336,19 +1334,16 @@ class PatternMode:
                     return farthest, parent, dist
 
                 if endpoints:
-                    start_node = min(endpoints, key=lambda p: (p[0], p[1]))
-                    # End at the right-most endpoint, tie-break toward the top.
-                    end_node = max(endpoints, key=lambda p: (p[1], -p[0]))
+                    seed = min(endpoints, key=lambda p: (p[0], p[1]))
                 else:
-                    start_node = min(node_set, key=lambda p: (p[0], p[1]))
-                    end_node, _, _ = _bfs_path(start_node)
+                    seed = min(node_set, key=lambda p: (p[0], p[1]))
 
-                # Shortest path from explicit start -> end keeps ordering stable
-                # and avoids reversing/backtracking artifacts.
-                _, parent, _ = _bfs_path(start_node, goal_node=end_node)
+                # Graph diameter path on the skeleton tree/graph.
+                a, _, _ = _bfs_farthest(seed)
+                b, parent, _ = _bfs_farthest(a)
 
                 rev = []
-                cur = end_node
+                cur = b
                 while cur is not None:
                     rev.append(cur)
                     cur = parent[cur]
@@ -1434,7 +1429,12 @@ class PatternMode:
 
                     path_points = centered_points
 
-                    # Path already starts from the top-most endpoint via `seed`.
+                    # Force the one-line path to start at the very top.
+                    if len(path_points) >= 2:
+                        first_x, first_y = path_points[0]
+                        last_x, last_y = path_points[-1]
+                        if (last_y < first_y) or (last_y == first_y and last_x < first_x):
+                            path_points = list(reversed(path_points))
 
                 # Fallback if endpoints are unavailable or path was not found
                 if not path_points:
