@@ -280,10 +280,15 @@ class PatternMode:
         self.centerline_progress_idx = 0
         self.centerline_progress_initialized = False
 
-        # ── Needle ROI – change these two values to reposition the detection window ──
+        # ── Needle ROI – change these values to reposition the detection window
+        # By default anchor the needle ROI to the camera area centre so that
+        # the pattern overlay starts at the visible centre on different
+        # resolutions. These values are in camera-frame pixels.
         self.NEEDLE_ROI_SIZE = 64   # Side-length of the square ROI (camera-frame pixels)
-        self.NEEDLE_ROI_X    = 280  # ROI centre X in camera-frame pixels  ← adjust freely
-        self.NEEDLE_ROI_Y    = 210  # ROI centre Y in camera-frame pixels  ← adjust freely
+        # Default to centre of the configured camera area; may be adjusted
+        # at runtime if you prefer a custom anchor.
+        self.NEEDLE_ROI_X    = int(self.camera_width // 2)
+        self.NEEDLE_ROI_Y    = int(self.camera_height // 2)
         # ─────────────────────────────────────────────────────────────────────────────
 
         # Fixed needle marker position used by the overlay pipeline
