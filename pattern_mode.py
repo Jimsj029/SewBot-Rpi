@@ -1156,8 +1156,8 @@ class PatternMode:
                 x = _pick_run_midpoint(xs, prev_x)
                 path_points.append((x, y))
                 prev_x = x
-        # For level 4, keep the original top-to-bottom leftmost start
-        elif self.current_level == 4:
+        # For levels 2/3/4, start from the global left-most branch.
+        elif self.current_level in (2, 3, 4):
             all_xs = []
             row_data = []
             for y in range(actual_h):
@@ -1816,35 +1816,18 @@ class PatternMode:
                     raw_needle_in_pat_x = exp_x
                     raw_needle_in_pat_y = exp_y
 
-                    # Keep movement color-gated, and classify correctness by
-                    # overlap between selected-thread region and pattern mask.
+                    # Keep movement color-gated. Once movement occurs, stamp
+                    # completion at the current expected path point so cyan
+                    # and progress visibly update even when per-frame overlap
+                    # heuristics are noisy on Pi cameras.
                     if moved_with_color:
                         pat_h, pat_w = pattern_alpha.shape[:2]
                         _stamp_half = self.stitch_box_half
-                        if thread_overlaps_pattern:
-                            if self.completed_stitch_mask is None:
-                                self.completed_stitch_mask = np.zeros((pat_h, pat_w), dtype=np.uint8)
-                            self._stamp_box(self.completed_stitch_mask, exp_x, exp_y, _stamp_half)
-                            self._realtime_pat_dirty = True
-                            self._update_progress_from_mask(pattern_alpha)
-                        else:
-                            if self.missed_stitch_mask is None:
-                                self.missed_stitch_mask = np.zeros((pat_h, pat_w), dtype=np.uint8)
-                            self._stamp_box(
-                                self.missed_stitch_mask,
-                                raw_needle_in_pat_x,
-                                raw_needle_in_pat_y,
-                                self.missed_stitch_box_half,
-                            )
-                            self._realtime_pat_dirty = True
-                            self._update_progress_from_mask(pattern_alpha)
-                            try:
-                                self.out_of_segment_warning = True
-                                self.warning_message = "FOLLOW THE PATTERN"
-                                self.warning_flash_phase = 0
-                                self.warning_until_frame = int(self.stitch_frame_index) + 40
-                            except Exception:
-                                pass
+                        if self.completed_stitch_mask is None:
+                            self.completed_stitch_mask = np.zeros((pat_h, pat_w), dtype=np.uint8)
+                        self._stamp_box(self.completed_stitch_mask, exp_x, exp_y, _stamp_half)
+                        self._realtime_pat_dirty = True
+                        self._update_progress_from_mask(pattern_alpha)
                 else:
                     # No usable movement path — keep pattern centered on completion;
                     # otherwise fall back to fixed centre.
