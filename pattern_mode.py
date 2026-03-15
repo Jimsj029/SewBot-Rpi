@@ -1651,13 +1651,13 @@ class PatternMode:
             if pattern_overlay is not None and pattern_alpha is not None:
                 overlay_h, overlay_w = pattern_overlay.shape[:2]
 
-                # Prefer the centerline for movement so the overlay follows the
-                # middle of the visible pattern and starts from the left-most
-                # entry on multi-branch levels. Keep skeleton as a fallback.
+                # Prefer skeleton for movement so multi-branch levels (2/3/4/5)
+                # can traverse the full pattern path. Fall back to centerline
+                # when skeleton extraction is unavailable.
                 centerline_path = self._build_centerline_path(pattern_alpha, overlay_w, overlay_h)
                 skeleton_path = self._build_skeleton_path(pattern_alpha, overlay_w, overlay_h)
-                movement_path = centerline_path if (centerline_path is not None and len(centerline_path) > 0) else skeleton_path
-                self.debug_path_source = 'centerline' if (centerline_path is not None and len(centerline_path) > 0) else ('skeleton' if (skeleton_path is not None and len(skeleton_path) > 0) else 'none')
+                movement_path = skeleton_path if (skeleton_path is not None and len(skeleton_path) > 0) else centerline_path
+                self.debug_path_source = 'skeleton' if (skeleton_path is not None and len(skeleton_path) > 0) else ('centerline' if (centerline_path is not None and len(centerline_path) > 0) else 'none')
                 # Use the same path for validation/snap as movement to avoid
                 # mismatched indices and end-of-shape jumps.
                 validation_path = movement_path
