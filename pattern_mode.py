@@ -280,10 +280,10 @@ class PatternMode:
         self.centerline_progress_idx = 0
         self.centerline_progress_initialized = False
 
-        # ── Needle ROI – change these two values to reposition the detection window ──
+        # ── Needle ROI – anchor to the visible camera centre by default ──
         self.NEEDLE_ROI_SIZE = 64   # Side-length of the square ROI (camera-frame pixels)
-        self.NEEDLE_ROI_X    = 280  # ROI centre X in camera-frame pixels  ← adjust freely
-        self.NEEDLE_ROI_Y    = 210  # ROI centre Y in camera-frame pixels  ← adjust freely
+        self.NEEDLE_ROI_X    = int(self.camera_width // 2)
+        self.NEEDLE_ROI_Y    = int(self.camera_height // 2)
         # ─────────────────────────────────────────────────────────────────────────────
 
         # Fixed needle marker position used by the overlay pipeline
@@ -1639,6 +1639,7 @@ class PatternMode:
                 centerline_path = self._build_centerline_path(pattern_alpha, overlay_w, overlay_h)
                 skeleton_path = self._build_skeleton_path(pattern_alpha, overlay_w, overlay_h)
                 movement_path = skeleton_path if (skeleton_path is not None and len(skeleton_path) > 0) else centerline_path
+                self.debug_path_source = 'skeleton' if (skeleton_path is not None and len(skeleton_path) > 0) else ('centerline' if (centerline_path is not None and len(centerline_path) > 0) else 'none')
                 # Use the same path for validation/snap as movement to avoid
                 # mismatched indices and end-of-shape jumps.
                 validation_path = movement_path
@@ -1655,7 +1656,9 @@ class PatternMode:
 
                     # ── Seed once: fix pattern position on screen, start at skeleton[0] ──
                     if not self.skeleton_seeded:
-                        if _is_completed:
+                        if not self.sewing_started:
+                            seed_idx = 0
+                        elif _is_completed:
                             # Already finished — re-seed at the lock point so the
                             # needle stays on the final stitch and doesn't jump.
                             seed_idx = (self.skeleton_completed_lock_idx
@@ -2815,14 +2818,16 @@ class PatternMode:
                 frame,
                 title,
                 tx,
-                ty,
-                title_scale,
-                self.COLORS['bright_blue'],
-                title_thick,
-                font=FONT_DISPLAY,
-                outline_color=self.COLORS['glow_cyan'],
-                outline_extra=2,
-            )
+                try:
+                    sseed = getattr(self, 'debug_last_seeded', None)
+                    cidx = getattr(self, 'debug_last_cur_idx', None)
+                    expv = getattr(self, 'debug_last_exp', None)
+                    xoff = getattr(self, 'debug_last_x_offset', None)
+                    psrc = getattr(self, 'debug_path_source', 'unknown')
+                    draw_text(cam_frame, f"seeded:{sseed} idx:{cidx} exp:{expv} xoff:{xoff}", dbg_x, ext_y, dbg_scale, (200,200,180), dbg_thick, font=FONT_MAIN, outline_color=(0,0,0), outline_extra=1)
+                    draw_text(cam_frame, f"path:{psrc}", dbg_x, ext_y + 18, dbg_scale, (180,220,200), dbg_thick, font=FONT_MAIN, outline_color=(0,0,0), outline_extra=1)
+                except Exception:
+                    pass
 
             # Center comparison image in the middle of the screen.
             cmp_img = self.eval_vis_comparison
