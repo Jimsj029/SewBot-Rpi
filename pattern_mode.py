@@ -1395,6 +1395,13 @@ class PatternMode:
                     else:
                         path_points = refined_points
 
+                    # Force the one-line path to start at the very top.
+                    if len(path_points) >= 2:
+                        first_x, first_y = path_points[0]
+                        last_x, last_y = path_points[-1]
+                        if (last_y < first_y) or (last_y == first_y and last_x < first_x):
+                            path_points = list(reversed(path_points))
+
                 # Fallback if endpoints are unavailable or path was not found
                 if not path_points:
                     prev_mid = None
@@ -2001,17 +2008,13 @@ class PatternMode:
 
                     # ── Draw one-line guide path in pattern space before blending ──
                     _pat_display = pattern_src.copy()
-                    if movement_path is not None and len(movement_path) > 0:
-                        _path_len = len(movement_path)
-                        _dot_step = max(1, _path_len // 180)
-                        for _pi in range(0, _path_len, _dot_step):
-                            _x = int(movement_path[_pi][0])
-                            _y = int(movement_path[_pi][1])
-                            if _pi <= cur_idx:
-                                _dot_color = (0, 220, 220)  # cyan = done
-                            else:
-                                _dot_color = (255, 255, 255)  # white = todo
-                            cv2.circle(_pat_display, (_x, _y), 2, _dot_color, -1)
+                    if movement_path is not None and len(movement_path) > 1:
+                        _pts = movement_path.astype(np.int32).reshape((-1, 1, 2))
+                        _done_end = int(np.clip(cur_idx + 1, 0, len(movement_path)))
+                        if _done_end > 1:
+                            cv2.polylines(_pat_display, [_pts[:_done_end]], False, (0, 220, 220), 2, cv2.LINE_AA)
+                        if _done_end < len(movement_path):
+                            cv2.polylines(_pat_display, [_pts[max(0, _done_end - 1):]], False, (255, 255, 255), 2, cv2.LINE_AA)
 
                     # ── Blend full visible overlay ─────────────────────────────────
                     b_w = dst_x2 - dst_x1
