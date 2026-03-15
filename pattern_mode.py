@@ -234,6 +234,7 @@ class PatternMode:
         # Skeleton-constrained needle movement
         self._cached_skeleton_path = None   # Ordered (x,y) points in pattern space
         self._cached_skeleton_f32  = None   # float32 copy for fast projection
+        self._cached_skeleton_key  = None
         self.skeleton_idx_f   = 0.0         # Current position on skeleton (float)
         self.skeleton_offset_x = 0.0        # Fixed pattern→screen offset X
         self.skeleton_offset_y = 0.0        # Fixed pattern→screen offset Y
@@ -261,6 +262,8 @@ class PatternMode:
         self._cached_centerline     = None  # int32 path array from _build_centerline_path
         self._cached_centerline_f32 = None  # float32 copy for fast argmin
         self._cached_centerline_mask = None  # uint8 full centerline mask (all branches)
+        self._cached_centerline_key = None
+        self._cached_centerline_mask_key = None
         self._cached_pat_px         = None  # int32 x-coords of all pattern pixels
         self._cached_pat_py         = None  # int32 y-coords of all pattern pixels
         self._cached_pat_px_f32     = None  # float32 versions for distance calc
@@ -731,6 +734,7 @@ class PatternMode:
         self.pattern_offset_seeded = False
         self._cached_skeleton_path = None
         self._cached_skeleton_f32  = None
+        self._cached_skeleton_key  = None
         # skeleton_idx_f = 0 means start at path[0], which is the bottom-left
         # for level 5 (skeleton starts from bottom) and top for other levels.
         self.skeleton_idx_f   = 0.0
@@ -744,6 +748,8 @@ class PatternMode:
         self._cached_centerline     = None
         self._cached_centerline_f32 = None
         self._cached_centerline_mask = None
+        self._cached_centerline_key = None
+        self._cached_centerline_mask_key = None
         self._cached_pat_px         = None
         self._cached_pat_py         = None
         self._cached_pat_px_f32     = None
@@ -1099,7 +1105,8 @@ class PatternMode:
 
     def _get_centerline_mask(self, pattern_alpha, actual_w, actual_h):
         """Return a single-line center path mask derived from _build_skeleton_path."""
-        if self._cached_centerline_mask is not None:
+        cache_key = (int(self.current_level), int(actual_w), int(actual_h))
+        if self._cached_centerline_mask is not None and self._cached_centerline_mask_key == cache_key:
             return self._cached_centerline_mask
 
         center = np.zeros((actual_h, actual_w), dtype=np.uint8)
@@ -1110,6 +1117,7 @@ class PatternMode:
                     center[int(y), int(x)] = 255
 
         self._cached_centerline_mask = center
+        self._cached_centerline_mask_key = cache_key
         return self._cached_centerline_mask
 
     def _build_centerline_path(self, pattern_alpha, actual_w, actual_h):
@@ -1123,7 +1131,8 @@ class PatternMode:
         continue along the midpoint of the nearest contiguous run.
         """
         # Reuse cached result — the blueprint never changes mid-level.
-        if self._cached_centerline is not None:
+        cache_key = (int(self.current_level), int(actual_w), int(actual_h))
+        if self._cached_centerline is not None and self._cached_centerline_key == cache_key:
             return self._cached_centerline
         pat_crop = pattern_alpha[:actual_h, :actual_w]
         pat_binary = (pat_crop > self.pattern_alpha_threshold).astype(np.uint8)
@@ -1227,6 +1236,7 @@ class PatternMode:
         result = np.array(path_points, dtype=np.int32)
         self._cached_centerline     = result
         self._cached_centerline_f32 = result.astype(np.float32)
+        self._cached_centerline_key = cache_key
         return result
 
     def _build_skeleton_path(self, pattern_alpha, actual_w, actual_h):
@@ -1236,7 +1246,8 @@ class PatternMode:
         - Levels 2/5: column-midpoint scan
         - Levels 3/4: true skeleton centerline path from endpoint to endpoint
         """
-        if self._cached_skeleton_path is not None:
+        cache_key = (int(self.current_level), int(actual_w), int(actual_h))
+        if self._cached_skeleton_path is not None and self._cached_skeleton_key == cache_key:
             return self._cached_skeleton_path
 
         pat_crop = pattern_alpha[:actual_h, :actual_w]
@@ -1477,6 +1488,7 @@ class PatternMode:
         result = np.array(path_points, dtype=np.int32)
         self._cached_skeleton_path = result
         self._cached_skeleton_f32  = result.astype(np.float32)
+        self._cached_skeleton_key  = cache_key
         return result
 
     def _circle_fully_on_mask(self, pattern_alpha, cx, cy, radius):
