@@ -1213,37 +1213,63 @@ class PatternMode:
         return result
 
     def _build_skeleton_path(self, pattern_alpha, actual_w, actual_h):
-        """Column-midpoint path: sweep left-to-right, one point per column.
-        For each occupied column pick the vertical centre of the run nearest
-        to the previous column's midpoint.  Traces the middle of every arm
-        (V, W, U, n …) with no external libraries required.
+        """Build a simple center path directly from the overlay mask.
+
+        - Levels 2/5: column-midpoint scan (works well for V/U-like shapes).
+        - Levels 1/3/4: row-midpoint scan (works better for vertical/zigzag arcs).
+
+        This keeps the guide line centered in the visible overlay per level
+        without relying on thinning/skeleton libraries.
         """
         if self._cached_skeleton_path is not None:
             return self._cached_skeleton_path
 
         pat_crop = pattern_alpha[:actual_h, :actual_w]
         path_points = []
-        prev_mid_y = None
-        for x in range(actual_w):
-            ys = np.where(pat_crop[:, x] > self.pattern_alpha_threshold)[0]
-            if ys.size == 0:
-                continue
-            # Build contiguous y-runs in this column
+
+        def _contiguous_runs(values):
             runs = []
-            s = int(ys[0]); p = s
-            for yv in ys[1:]:
-                yv = int(yv)
-                if yv > p + 1:
-                    runs.append((s, p)); s = yv
-                p = yv
+            s = int(values[0])
+            p = s
+            for vv in values[1:]:
+                vv = int(vv)
+                if vv > p + 1:
+                    runs.append((s, p))
+                    s = vv
+                p = vv
             runs.append((s, p))
-            mids = [(a + b) // 2 for a, b in runs]
-            if prev_mid_y is None:
-                mid_y = mids[0]
-            else:
-                mid_y = min(mids, key=lambda m: abs(m - prev_mid_y))
-            path_points.append((x, mid_y))
-            prev_mid_y = mid_y
+            return runs
+
+        # Levels 2/5: scan columns (x changes, y follows nearest run midpoint)
+        if self.current_level in (2, 5):
+            prev_mid = None
+            for x in range(actual_w):
+                ys = np.where(pat_crop[:, x] > self.pattern_alpha_threshold)[0]
+                if ys.size == 0:
+                    continue
+                runs = _contiguous_runs(ys)
+                mids = [(a + b) // 2 for a, b in runs]
+                if prev_mid is None:
+                    mid = mids[0]
+                else:
+                    mid = min(mids, key=lambda m: abs(m - prev_mid))
+                path_points.append((x, mid))
+                prev_mid = mid
+        else:
+            # Levels 1/3/4: scan rows (y changes, x follows nearest run midpoint)
+            prev_mid = None
+            for y in range(actual_h):
+                xs = np.where(pat_crop[y, :] > self.pattern_alpha_threshold)[0]
+                if xs.size == 0:
+                    continue
+                runs = _contiguous_runs(xs)
+                mids = [(a + b) // 2 for a, b in runs]
+                if prev_mid is None:
+                    mid = mids[0]
+                else:
+                    mid = min(mids, key=lambda m: abs(m - prev_mid))
+                path_points.append((mid, y))
+                prev_mid = mid
 
         if not path_points:
             return None
