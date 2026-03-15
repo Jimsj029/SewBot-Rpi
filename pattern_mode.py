@@ -1338,13 +1338,14 @@ class PatternMode:
                 else:
                     start_node = min(node_set, key=lambda p: (p[0], p[1]))
 
-                # End at the visual end of the mask: right-most reachable endpoint
-                # from the top-left start. This prevents early stop on shorter arms.
+                # End at the farthest reachable endpoint from the top-left
+                # start (stable behavior). If distances tie, prefer the
+                # right-most endpoint so it still reaches the visual end.
                 far_node, parent_map, dist_map = _bfs(start_node)
                 if endpoints:
                     reachable_eps = [ep for ep in endpoints if dist_map.get(ep, -1) >= 0]
                     if reachable_eps:
-                        end_node = max(reachable_eps, key=lambda p: (p[1], p[0]))
+                        end_node = max(reachable_eps, key=lambda p: (dist_map.get(p, -1), p[1], p[0]))
                     else:
                         end_node = far_node
                 else:
