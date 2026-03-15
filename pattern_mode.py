@@ -2818,16 +2818,14 @@ class PatternMode:
                 frame,
                 title,
                 tx,
-                try:
-                    sseed = getattr(self, 'debug_last_seeded', None)
-                    cidx = getattr(self, 'debug_last_cur_idx', None)
-                    expv = getattr(self, 'debug_last_exp', None)
-                    xoff = getattr(self, 'debug_last_x_offset', None)
-                    psrc = getattr(self, 'debug_path_source', 'unknown')
-                    draw_text(cam_frame, f"seeded:{sseed} idx:{cidx} exp:{expv} xoff:{xoff}", dbg_x, ext_y, dbg_scale, (200,200,180), dbg_thick, font=FONT_MAIN, outline_color=(0,0,0), outline_extra=1)
-                    draw_text(cam_frame, f"path:{psrc}", dbg_x, ext_y + 18, dbg_scale, (180,220,200), dbg_thick, font=FONT_MAIN, outline_color=(0,0,0), outline_extra=1)
-                except Exception:
-                    pass
+                ty,
+                title_scale,
+                self.COLORS['bright_blue'],
+                title_thick,
+                font=FONT_DISPLAY,
+                outline_color=self.COLORS['glow_cyan'],
+                outline_extra=2,
+            )
 
             # Center comparison image in the middle of the screen.
             cmp_img = self.eval_vis_comparison
