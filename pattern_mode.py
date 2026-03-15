@@ -151,7 +151,7 @@ class PatternMode:
         self.total_score = 0
         self.pattern_progress = 0.0  # 0-100%
         self.raw_progress = 0.0  # Raw actual progress for evaluation
-        self.progress_from_path = True  # Progress reaches 100% when path index reaches the end
+        self.progress_from_path = False  # Progress should reflect stitched coverage, not only path traversal
         # Evaluation metrics
         self.evaluation_wrong_pct = 0.0  # % of wrong/off-pattern stitches among detections
         self.final_score = 0.0  # Adjusted score after accounting for wrong stitches
@@ -1093,11 +1093,12 @@ class PatternMode:
     def _build_centerline_path(self, pattern_alpha, actual_w, actual_h):
         """Build an ordered centerline path from the binary blueprint mask.
 
-        This is a lightweight skeleton-style center extraction: for each row that
-        contains pattern pixels, choose the x-position nearest the previous row's
-        center so the path remains continuous.
-        
-        For levels 4 & 5, starts from the absolute leftmost x across the entire pattern.
+        For each occupied row, collapse contiguous pixel runs and choose the
+        midpoint of the run nearest the previous row's midpoint. This keeps the
+        path on the visual center of the overlay instead of hugging an edge.
+
+        Levels 4 and 5 still start from the left-most branch, but subsequent rows
+        continue along the midpoint of the nearest contiguous run.
         """
         # Reuse cached result — the blueprint never changes mid-level.
         if self._cached_centerline is not None:
@@ -1106,6 +1107,26 @@ class PatternMode:
         pat_binary = (pat_crop > self.pattern_alpha_threshold).astype(np.uint8)
         path_points = []
         prev_x = None
+
+        def _row_runs(xs):
+            runs = []
+            start = int(xs[0])
+            prev = int(xs[0])
+            for value in xs[1:]:
+                value = int(value)
+                if value != prev + 1:
+                    runs.append((start, prev))
+                    start = value
+                prev = value
+            runs.append((start, prev))
+            return runs
+
+        def _pick_run_midpoint(xs, prev_mid=None, force_leftmost=False):
+            runs = _row_runs(xs)
+            mids = [int(round((run[0] + run[1]) / 2.0)) for run in runs]
+            if force_leftmost or prev_mid is None:
+                return mids[0]
+            return mids[int(np.argmin(np.abs(np.array(mids, dtype=np.int32) - int(prev_mid))))]
 
         # For level 5, start at the bottom-most row with the leftmost pixel and trace upward
         if self.current_level == 5:
@@ -1124,15 +1145,15 @@ class PatternMode:
             for y, xs in reversed(row_data):
                 if global_min_x in xs:
                     start_y = y
-                    prev_x = global_min_x
-                    path_points.append((global_min_x, y))
+                    prev_x = _pick_run_midpoint(xs, force_leftmost=True)
+                    path_points.append((prev_x, y))
                     break
             # Continue upward from that row
             for y in range(start_y - 1 if start_y is not None else actual_h - 1, -1, -1):
                 xs = np.where(pat_binary[y] > 0)[0]
                 if xs.size == 0:
                     continue
-                x = int(xs[np.argmin(np.abs(xs - prev_x))])
+                x = _pick_run_midpoint(xs, prev_x)
                 path_points.append((x, y))
                 prev_x = x
         # For level 4, keep the original top-to-bottom leftmost start
@@ -1152,15 +1173,15 @@ class PatternMode:
             for y, xs in row_data:
                 if global_min_x in xs:
                     start_y = y
-                    prev_x = global_min_x
-                    path_points.append((global_min_x, y))
+                    prev_x = _pick_run_midpoint(xs, force_leftmost=True)
+                    path_points.append((prev_x, y))
                     break
             # Continue from that row
             for y in range(start_y + 1 if start_y is not None else 0, actual_h):
                 xs = np.where(pat_binary[y] > 0)[0]
                 if xs.size == 0:
                     continue
-                x = int(xs[np.argmin(np.abs(xs - prev_x))])
+                x = _pick_run_midpoint(xs, prev_x)
                 path_points.append((x, y))
                 prev_x = x
         else:
@@ -1171,9 +1192,9 @@ class PatternMode:
                     continue
 
                 if prev_x is None:
-                    x = int(np.min(xs))  # Start from leftmost pixel in first row
+                    x = _pick_run_midpoint(xs, force_leftmost=True)
                 else:
-                    x = int(xs[np.argmin(np.abs(xs - prev_x))])
+                    x = _pick_run_midpoint(xs, prev_x)
 
                 path_points.append((x, y))
                 prev_x = x
@@ -1430,22 +1451,18 @@ class PatternMode:
     def _update_segment_progress_from_raw(self):
         """Update segment state from current raw_progress using existing thresholds."""
         rp = self.raw_progress
-        if   rp >= 70: new_seg, new_prog = 5, 100.0
-        elif rp >= 45: new_seg, new_prog = 4,  75.0
-        elif rp >= 25: new_seg, new_prog = 3,  50.0
-        elif rp >= 12: new_seg, new_prog = 2,  25.0
-        else:          new_seg, new_prog = 1,   0.0
+        if   rp >= 75: new_seg = 5
+        elif rp >= 50: new_seg = 4
+        elif rp >= 25: new_seg = 3
+        elif rp >= 10: new_seg = 2
+        else:          new_seg = 1
 
         if new_seg > self.highest_segment_reached:
             self.highest_segment_reached = new_seg
-            self.current_segment = min(new_seg, 4)
-            self.pattern_progress = new_prog
-        elif self.highest_segment_reached >= 5:
-            self.current_segment = 4
-            self.pattern_progress = 100.0
-        else:
-            self.current_segment = self.highest_segment_reached
-            self.pattern_progress = (self.highest_segment_reached - 1) * 25.0
+        self.current_segment = min(self.highest_segment_reached, 4)
+        # Show the real stitched coverage as the visible progress value.
+        if rp > self.pattern_progress:
+            self.pattern_progress = rp
 
     def _update_progress_from_path(self, current_idx, max_idx):
         """Drive raw progress directly from ordered path traversal."""
@@ -1634,12 +1651,13 @@ class PatternMode:
             if pattern_overlay is not None and pattern_alpha is not None:
                 overlay_h, overlay_w = pattern_overlay.shape[:2]
 
-                # Keep centerline for downstream validation and as a robust
-                # fallback movement path on systems where skeletonization fails.
+                # Prefer the centerline for movement so the overlay follows the
+                # middle of the visible pattern and starts from the left-most
+                # entry on multi-branch levels. Keep skeleton as a fallback.
                 centerline_path = self._build_centerline_path(pattern_alpha, overlay_w, overlay_h)
                 skeleton_path = self._build_skeleton_path(pattern_alpha, overlay_w, overlay_h)
-                movement_path = skeleton_path if (skeleton_path is not None and len(skeleton_path) > 0) else centerline_path
-                self.debug_path_source = 'skeleton' if (skeleton_path is not None and len(skeleton_path) > 0) else ('centerline' if (centerline_path is not None and len(centerline_path) > 0) else 'none')
+                movement_path = centerline_path if (centerline_path is not None and len(centerline_path) > 0) else skeleton_path
+                self.debug_path_source = 'centerline' if (centerline_path is not None and len(centerline_path) > 0) else ('skeleton' if (skeleton_path is not None and len(skeleton_path) > 0) else 'none')
                 # Use the same path for validation/snap as movement to avoid
                 # mismatched indices and end-of-shape jumps.
                 validation_path = movement_path
