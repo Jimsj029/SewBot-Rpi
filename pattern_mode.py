@@ -1812,6 +1812,15 @@ class PatternMode:
                     self.pattern_offset_x = float(x_offset)
                     self.pattern_offset_y = float(y_offset)
 
+                    # Save debug info for on-screen display
+                    try:
+                        self.debug_last_cur_idx = cur_idx
+                        self.debug_last_exp = (int(exp_x), int(exp_y))
+                        self.debug_last_x_offset = int(x_offset)
+                        self.debug_last_seeded = bool(self.skeleton_seeded)
+                    except Exception:
+                        pass
+
                     # Sync centerline index for compatibility with downstream code.
                     self.centerline_progress_idx = cur_idx
                     expected_path_idx = cur_idx
@@ -2054,6 +2063,16 @@ class PatternMode:
                 # Draw each line top-left of camera feed
                 for i, ln in enumerate(dbg_lines):
                     draw_text(cam_frame, ln, dbg_x, dbg_y + i * 18, dbg_scale, (220, 220, 220), dbg_thick, font=FONT_MAIN, outline_color=(0,0,0), outline_extra=1)
+                # Extended debug values from runtime
+                ext_y = dbg_y + len(dbg_lines) * 18 + 6
+                try:
+                    sseed = getattr(self, 'debug_last_seeded', None)
+                    cidx = getattr(self, 'debug_last_cur_idx', None)
+                    expv = getattr(self, 'debug_last_exp', None)
+                    xoff = getattr(self, 'debug_last_x_offset', None)
+                    draw_text(cam_frame, f"seeded:{sseed} idx:{cidx} exp:{expv} xoff:{xoff}", dbg_x, ext_y, dbg_scale, (200,200,180), dbg_thick, font=FONT_MAIN, outline_color=(0,0,0), outline_extra=1)
+                except Exception:
+                    pass
 
             # If progress reached 100%, show a prominent overlay on the camera
             if getattr(self, 'raw_progress', 0.0) >= 100.0:
