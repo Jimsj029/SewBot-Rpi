@@ -151,7 +151,7 @@ class PatternMode:
         self.total_score = 0
         self.pattern_progress = 0.0  # 0-100%
         self.raw_progress = 0.0  # Raw actual progress for evaluation
-        self.progress_from_path = False  # Progress should reflect stitched coverage, not only path traversal
+        self.progress_from_path = True  # Progress = percentage of path index taken vs full path
         # Evaluation metrics
         self.evaluation_wrong_pct = 0.0  # % of wrong/off-pattern stitches among detections
         self.final_score = 0.0  # Adjusted score after accounting for wrong stitches
@@ -244,6 +244,10 @@ class PatternMode:
         # Auto-move speed: steps per frame along the skeleton when thread color is detected.
         # Increase to move faster, decrease to move slower.
         self.auto_move_speed = 0.5
+        # Short grace window so movement can pass tight turns even when
+        # color detection flickers for a few frames on Pi camera noise.
+        self.turn_move_grace_frames = 4
+        self.turn_move_grace_left = 0
         # Speed control buttons (positions set dynamically in draw_score_panel)
 
         self.needle_on_pattern = True  # Whether the needle is currently on a pattern pixel
@@ -751,6 +755,7 @@ class PatternMode:
         self.needle_on_pattern = True
         self.follow_off_count = 0
         self.follow_on_count = 0
+        self.turn_move_grace_left = 0
         self.sewing_started = False  # Require Start button press again on reset
         self.last_evaluation_screenshot_path = None
         self.last_pattern_projection = None
@@ -1779,6 +1784,26 @@ class PatternMode:
                             else:
                                 self.last_color_match_ratio = 0.0
                                 self.last_color_match = False
+
+                        # Local fallback at the fixed needle point helps on
+                        # tight turns where region-based color checks can dip.
+                        if not color_match_for_overlay_move:
+                            if self._matches_selected_color(
+                                detection_frame,
+                                self.NEEDLE_ROI_X,
+                                self.NEEDLE_ROI_Y,
+                                hsv_frame=hsv_detection_frame,
+                            ):
+                                color_match_for_overlay_move = True
+
+                        # Grace through brief color flicker so pathing doesn't
+                        # stall at corners.
+                        if color_match_for_overlay_move:
+                            self.turn_move_grace_left = int(self.turn_move_grace_frames)
+                        elif self.turn_move_grace_left > 0:
+                            self.turn_move_grace_left -= 1
+                            color_match_for_overlay_move = True
+
                         # Movement is color-gated: no color-on-pattern match, no overlay shift.
                         if color_match_for_overlay_move:
                             self.skeleton_idx_f = float(np.clip(
