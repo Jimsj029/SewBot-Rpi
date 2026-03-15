@@ -1324,6 +1324,41 @@ class PatternMode:
                 rev.reverse()
                 path_points = [(x, y) for (y, x) in rev]
 
+                # Re-center each skeleton point onto the local stroke midpoint.
+                # Raw thinning can bias slightly to one side; this snaps points
+                # back to the visual center of the overlay thickness while
+                # keeping the one-line order from the skeleton path.
+                if path_points:
+                    refined_points = []
+
+                    def _pick_mid_from_runs(values, target):
+                        runs = _contiguous_runs(values)
+                        mids = [(a + b) // 2 for a, b in runs]
+                        return min(mids, key=lambda m: abs(m - target))
+
+                    path_len = len(path_points)
+                    for idx, (x, y) in enumerate(path_points):
+                        prev_x, prev_y = path_points[max(0, idx - 1)]
+                        next_x, next_y = path_points[min(path_len - 1, idx + 1)]
+                        dx = next_x - prev_x
+                        dy = next_y - prev_y
+
+                        # If tangent is more horizontal, recenter vertically in
+                        # the current column. Otherwise recenter horizontally in
+                        # the current row.
+                        if abs(dx) >= abs(dy):
+                            y_candidates = np.where(bin_mask[:, int(np.clip(x, 0, actual_w - 1))] > 0)[0]
+                            if y_candidates.size > 0:
+                                y = _pick_mid_from_runs(y_candidates, y)
+                        else:
+                            x_candidates = np.where(bin_mask[int(np.clip(y, 0, actual_h - 1)), :] > 0)[0]
+                            if x_candidates.size > 0:
+                                x = _pick_mid_from_runs(x_candidates, x)
+
+                        refined_points.append((int(x), int(y)))
+
+                    path_points = refined_points
+
                 # Fallback if endpoints are unavailable or path was not found
                 if not path_points:
                     prev_mid = None
