@@ -9,7 +9,11 @@ import os
 class MusicManager:
     def __init__(self, music_folder='music'):
         """Initialize the music manager"""
-        self.music_folder = music_folder
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        if os.path.isabs(music_folder):
+            self.music_folder = music_folder
+        else:
+            self.music_folder = os.path.join(base_dir, music_folder)
         self.initialized = False
         self.current_track = None
         self.volume = 0.3  # Default volume (0.0 to 1.0)
@@ -64,11 +68,19 @@ class MusicManager:
                 if not self.load_music(track_name):
                     return False
             
-            # Start playback
+            # Start playback. Some pygame builds on the Pi do not accept
+            # fade_ms as a keyword argument, so fall back to positional args
+            # and then to plain play if needed.
             if fade_ms > 0:
-                pygame.mixer.music.play(loops=loops, fade_ms=fade_ms)
+                try:
+                    pygame.mixer.music.play(loops=loops, fade_ms=fade_ms)
+                except TypeError:
+                    try:
+                        pygame.mixer.music.play(loops, 0.0, fade_ms)
+                    except TypeError:
+                        pygame.mixer.music.play(loops)
             else:
-                pygame.mixer.music.play(loops=loops)
+                pygame.mixer.music.play(loops)
             
             print(f"♪ Playing: {self.current_track}")
             return True
