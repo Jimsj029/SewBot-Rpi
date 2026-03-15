@@ -1271,7 +1271,20 @@ class PatternMode:
                 except Exception:
                     pass
             if skel is None:
-                skel = bin_mask.copy()
+                # Pure OpenCV morphological skeleton fallback for systems
+                # without skimage / ximgproc (e.g. Raspberry Pi builds).
+                img = (bin_mask.copy() * 255).astype(np.uint8)
+                skel_img = np.zeros_like(img)
+                element = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
+                while True:
+                    eroded = cv2.erode(img, element)
+                    opened = cv2.dilate(eroded, element)
+                    temp = cv2.subtract(img, opened)
+                    skel_img = cv2.bitwise_or(skel_img, temp)
+                    img = eroded
+                    if cv2.countNonZero(img) == 0:
+                        break
+                skel = (skel_img > 0).astype(np.uint8)
 
             ys, xs = np.where(skel > 0)
             if ys.size > 0:
