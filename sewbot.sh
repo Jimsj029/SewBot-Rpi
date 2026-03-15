@@ -256,61 +256,64 @@ do_convert() {
         do_setup
     fi
     
-    # Ensure there are ONNX models to convert
-    shopt -s nullglob
-    onnx_files=(models/*.onnx)
-    if [ ${#onnx_files[@]} -eq 0 ]; then
-        print_error "No ONNX model files found in models/"
+    if [ ! -f "models/best.onnx" ]; then
+        print_error "Model file not found: models/best.onnx"
         print_warning "Skipping conversion"
         return 1
     fi
-
+    
     source .venv/bin/activate
-
-    print_info "Converting ONNX models to opset 21..."
-
-    for model_path in "${onnx_files[@]}"; do
-        base=$(basename "$model_path" .onnx)
-        backup_path="models/${base}_opset22_backup.onnx"
-
-        python3 << PYEOF
-import onnx, os, shutil
+    
+    print_info "Converting ONNX model from opset 22 to opset 21..."
+    
+    python3 << 'PYEOF'
+import onnx
 from onnx import version_converter
+import os
+import shutil
 
-model_path = r"$model_path"
-backup_path = r"$backup_path"
+model_path = "models/best.onnx"
+backup_path = "models/best_opset22_backup.onnx"
 
 print(f"📂 Loading model: {model_path}")
 try:
     model = onnx.load(model_path)
     current_opset = model.opset_import[0].version
     print(f"📊 Current opset version: {current_opset}")
-
+    
     if current_opset <= 21:
         print(f"✅ Model already uses opset {current_opset} (compatible with RPi)")
-    else:
-        if not os.path.exists(backup_path):
-            shutil.copy2(model_path, backup_path)
-            print(f"💾 Backup saved: {backup_path}")
-        converted_model = version_converter.convert_version(model, 21)
-        onnx.save(converted_model, model_path)
-        verified = onnx.load(model_path)
-        new_opset = verified.opset_import[0].version
-        print(f"✅ Model converted to opset {new_opset}")
-
+        exit(0)
+    
+    print(f"🔄 Converting from opset {current_opset} to opset 21...")
+    
+    # Backup
+    if not os.path.exists(backup_path):
+        shutil.copy2(model_path, backup_path)
+        print(f"💾 Backup saved: {backup_path}")
+    
+    # Convert
+    converted_model = version_converter.convert_version(model, 21)
+    onnx.save(converted_model, model_path)
+    
+    # Verify
+    verified = onnx.load(model_path)
+    new_opset = verified.opset_import[0].version
+    print(f"✅ Model converted to opset {new_opset}")
+    
 except Exception as e:
-    print(f"❌ Conversion failed for {model_path}: {e}")
-    raise SystemExit(1)
+    print(f"❌ Conversion failed: {e}")
+    exit(1)
 PYEOF
-
-        if [ $? -ne 0 ]; then
-            print_error "Conversion failed for $model_path"
-            deactivate
-            return 1
-        fi
-    done
-
-    print_success "Model conversion completed"
+    
+    if [ $? -eq 0 ]; then
+        print_success "Model conversion completed"
+    else
+        print_error "Model conversion failed"
+        deactivate
+        return 1
+    fi
+    
     deactivate
     echo ""
 }

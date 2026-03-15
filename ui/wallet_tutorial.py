@@ -215,11 +215,6 @@ class WalletTutorialPlayer:
                         sess_options=_sess_opts,
                         providers=['CPUExecutionProvider'])
                     self.needle_input_name = self.needle_model.get_inputs()[0].name
-                    # Inspect model input shape and adjust image size if model requires different dims
-                    in_shape = self.needle_model.get_inputs()[0].shape
-                    if len(in_shape) >= 4 and isinstance(in_shape[2], int) and in_shape[2] > 0:
-                        self._needle_imgsz = int(in_shape[2])
-
                     # Warm-up run so first real frame isn't slow
                     _w = np.zeros((1, 3, self._needle_imgsz, self._needle_imgsz), dtype=np.float32)
                     self.needle_model.run(None, {self.needle_input_name: _w})
@@ -1058,19 +1053,11 @@ class WalletTutorialPlayer:
             msg_y = camera_y + (camera_h + msg_h) // 2
             _put_text(img, msg, msg_x, msg_y, font_scale_msg, COLORS['text_primary'], thickness_msg)
         
-        # ── ROI guide overlay (drawn over the camera area onto img)
-        # Scale ROI coordinates relative to the camera area baseline (544x400)
-        BASE_CAMERA_W = 544
-        BASE_CAMERA_H = 400
-        rel_cx = int(self.ROI_CENTER_X * float(camera_w) / BASE_CAMERA_W)
-        rel_half_w = int(self.ROI_COL_WIDTH * float(camera_w) / BASE_CAMERA_W) // 2
-        rel_top = int(self.ROI_TOP_Y * float(camera_h) / BASE_CAMERA_H)
-        rel_bot_margin = int(self.ROI_BOT_MARGIN * float(camera_h) / BASE_CAMERA_H)
-
-        abs_cx = camera_x + rel_cx
-        roi_top = camera_y + rel_top
-        roi_bot = camera_y + camera_h - rel_bot_margin
-        half_w = rel_half_w
+        # ── ROI guide overlay (drawn over the camera area onto img) ──────────────
+        abs_cx  = camera_x + self.ROI_CENTER_X
+        roi_top = camera_y + self.ROI_TOP_Y
+        roi_bot = camera_y + camera_h - self.ROI_BOT_MARGIN
+        half_w  = self.ROI_COL_WIDTH // 2
         col_x1  = abs_cx - half_w
         col_x2  = abs_cx + half_w
 
@@ -1090,7 +1077,7 @@ class WalletTutorialPlayer:
             # Step 7 only: two extra dashed lines ~1 cm to left and right of centre
             if step_number == 7:
                 for x_off in (-self.ROI_STEP7_LINE_OFFSET, self.ROI_STEP7_LINE_OFFSET):
-                    side_x = abs_cx + int(x_off * float(camera_w) / BASE_CAMERA_W)
+                    side_x = abs_cx + x_off
                     y = roi_top
                     while y < roi_bot:
                         y_end = min(y + self.ROI_DASH_LEN, roi_bot)
@@ -1133,19 +1120,10 @@ class WalletTutorialPlayer:
         if self.needle_model is None:
             return False
         h, w = cam_resized.shape[:2]
-        # Scale ROI parameters to the current resized camera frame using
-        # the same baseline used in draw() (544x400).
-        BASE_CAMERA_W = 544
-        BASE_CAMERA_H = 400
-        center_x = int(self.ROI_CENTER_X * float(w) / BASE_CAMERA_W)
-        half_w = int(self.ROI_COL_WIDTH * float(w) / BASE_CAMERA_W) // 2
-        top_y = int(self.ROI_TOP_Y * float(h) / BASE_CAMERA_H)
-        bot_margin = int(self.ROI_BOT_MARGIN * float(h) / BASE_CAMERA_H)
-
-        x1 = max(0, center_x - half_w)
-        x2 = min(w, center_x + half_w)
-        y1 = top_y
-        y2 = max(y1 + 1, h - bot_margin)
+        x1 = max(0, self.ROI_CENTER_X - self.ROI_COL_WIDTH // 2)
+        x2 = min(w, self.ROI_CENTER_X + self.ROI_COL_WIDTH // 2)
+        y1 = int(self.ROI_TOP_Y)
+        y2 = max(y1 + 1, h - int(self.ROI_BOT_MARGIN))
         roi_crop = cam_resized[y1:y2, x1:x2]
         if roi_crop.size == 0:
             return False
@@ -1164,11 +1142,9 @@ class WalletTutorialPlayer:
                 return False
             filtered = preds[mask]
             best = int(np.argmax(filtered[:, 4]))
-            cx_val = float(filtered[best, 0])
-            cx_roi = cx_val / imgsz * roi_w_c
-            # Scale tolerance to the current ROI width
-            tol = int(self.NEEDLE_CENTER_TOLERANCE * float(roi_w_c) / (self.ROI_COL_WIDTH if self.ROI_COL_WIDTH>0 else roi_w_c))
-            return abs(cx_roi - roi_w_c / 2.0) <= tol
+            cx_320 = float(filtered[best, 0])
+            cx_roi = cx_320 / imgsz * roi_w_c
+            return abs(cx_roi - roi_w_c / 2.0) <= self.NEEDLE_CENTER_TOLERANCE
         except Exception as e:
             print(f"Needle check error: {e}")
         return False

@@ -280,15 +280,10 @@ class PatternMode:
         self.centerline_progress_idx = 0
         self.centerline_progress_initialized = False
 
-        # ── Needle ROI – change these values to reposition the detection window
-        # By default anchor the needle ROI to the camera area centre so that
-        # the pattern overlay starts at the visible centre on different
-        # resolutions. These values are in camera-frame pixels.
+        # ── Needle ROI – change these two values to reposition the detection window ──
         self.NEEDLE_ROI_SIZE = 64   # Side-length of the square ROI (camera-frame pixels)
-        # Default to centre of the configured camera area; may be adjusted
-        # at runtime if you prefer a custom anchor.
-        self.NEEDLE_ROI_X    = int(self.camera_width // 2)
-        self.NEEDLE_ROI_Y    = int(self.camera_height // 2)
+        self.NEEDLE_ROI_X    = 280  # ROI centre X in camera-frame pixels  ← adjust freely
+        self.NEEDLE_ROI_Y    = 210  # ROI centre Y in camera-frame pixels  ← adjust freely
         # ─────────────────────────────────────────────────────────────────────────────
 
         # Fixed needle marker position used by the overlay pipeline
@@ -390,8 +385,6 @@ class PatternMode:
 
         # Music flag to track if music is playing
         self.music_playing = False
-        # Debug overlay: show runtime needle/pattern variables on-screen for tuning
-        self.debug_overlay = True
     
     def start_music(self):
         """Start pattern mode music"""
@@ -1639,38 +1632,20 @@ class PatternMode:
 
             # Pattern overlay — pattern stays fixed; needle (red dot) slides along skeleton.
             if pattern_overlay is not None and pattern_alpha is not None:
-                # Initialize debug fields so the overlay shows something
-                # even if later logic doesn't populate them.
-                self.debug_last_seeded = getattr(self, 'debug_last_seeded', False)
-                self.debug_last_cur_idx = getattr(self, 'debug_last_cur_idx', None)
-                self.debug_last_exp = getattr(self, 'debug_last_exp', None)
-                self.debug_last_x_offset = getattr(self, 'debug_last_x_offset', None)
-                self.debug_pattern_present = True
-
                 overlay_h, overlay_w = pattern_overlay.shape[:2]
 
-                # Keep centerline for downstream validation pipeline (unchanged).
+                # Keep centerline for downstream validation and as a robust
+                # fallback movement path on systems where skeletonization fails.
                 centerline_path = self._build_centerline_path(pattern_alpha, overlay_w, overlay_h)
-                # Build skeleton path for needle movement constraint.
                 skeleton_path = self._build_skeleton_path(pattern_alpha, overlay_w, overlay_h)
+                movement_path = skeleton_path if (skeleton_path is not None and len(skeleton_path) > 0) else centerline_path
                 # Use the same path for validation/snap as movement to avoid
                 # mismatched indices and end-of-shape jumps.
-                validation_path = skeleton_path if (skeleton_path is not None and len(skeleton_path) > 0) else centerline_path
+                validation_path = movement_path
                 expected_path_idx = None
 
-                # If sewing hasn't started yet, ensure the seed logic will
-                # position the pattern start under the ROI centre by forcing
-                # `skeleton_seeded` to False and updating the ROI anchor to
-                # the current camera area centre. This helps when returning
-                # from other screens or after a restart.
-                if not self.sewing_started:
-                    self.skeleton_seeded = False
-                    # Update ROI anchor from camera area in case of runtime differences
-                    self.NEEDLE_ROI_X = int(self.camera_width // 2)
-                    self.NEEDLE_ROI_Y = int(self.camera_height // 2)
-
-                if skeleton_path is not None and len(skeleton_path) > 0:
-                    skel_max_idx = len(skeleton_path) - 1
+                if movement_path is not None and len(movement_path) > 0:
+                    skel_max_idx = len(movement_path) - 1
 
                     # Evaluate completion state FIRST — before seeding — so a
                     # momentary skeleton-unavailable frame that resets skeleton_seeded
@@ -1680,33 +1655,25 @@ class PatternMode:
 
                     # ── Seed once: fix pattern position on screen, start at skeleton[0] ──
                     if not self.skeleton_seeded:
-                        # If sewing hasn't started yet, always position the
-                        # pattern so the start of the skeleton (index 0)
-                        # sits beneath the ROI centre. This ensures the
-                        # overlay start is aligned with the middle ROI on
-                        # both PC and RPi displays.
-                        if not self.sewing_started:
+                        if _is_completed:
+                            # Already finished — re-seed at the lock point so the
+                            # needle stays on the final stitch and doesn't jump.
+                            seed_idx = (self.skeleton_completed_lock_idx
+                                        if self.skeleton_completed_lock_idx is not None
+                                        else skel_max_idx)
+                        elif self.current_level in (2, 3):
+                            # Force a clean left-top start for Levels 2/3 every run.
+                            seed_idx = 0
+                        elif self.raw_progress <= 0.0:
                             seed_idx = 0
                         else:
-                            if _is_completed:
-                                # Already finished — re-seed at the lock point so the
-                                # needle stays on the final stitch and doesn't jump.
-                                seed_idx = (self.skeleton_completed_lock_idx
-                                            if self.skeleton_completed_lock_idx is not None
-                                            else skel_max_idx)
-                            elif self.current_level in (2, 3):
-                                # Force a clean left-top start for Levels 2/3 every run.
-                                seed_idx = 0
-                            elif self.raw_progress <= 0.0:
-                                seed_idx = 0
-                            else:
-                                seed_idx = int(np.clip(
-                                    round(self.raw_progress / 100.0 * skel_max_idx),
-                                    0, skel_max_idx))
+                            seed_idx = int(np.clip(
+                                round(self.raw_progress / 100.0 * skel_max_idx),
+                                0, skel_max_idx))
                         self.skeleton_idx_f   = float(seed_idx)
                         # Position pattern so skeleton[seed_idx] sits at the default needle pos.
-                        self.skeleton_offset_x = float(self.NEEDLE_ROI_X) - float(skeleton_path[seed_idx][0])
-                        self.skeleton_offset_y = float(self.NEEDLE_ROI_Y) - float(skeleton_path[seed_idx][1])
+                        self.skeleton_offset_x = float(self.NEEDLE_ROI_X) - float(movement_path[seed_idx][0])
+                        self.skeleton_offset_y = float(self.NEEDLE_ROI_Y) - float(movement_path[seed_idx][1])
                         self.skeleton_seeded = True
                         self.centerline_progress_initialized = True
 
@@ -1719,8 +1686,8 @@ class PatternMode:
                         self.skeleton_idx_f = float(np.clip(self.skeleton_idx_f, 0.0, float(skel_max_idx)))
                     elif self.sewing_started:
                         _cur = int(np.clip(round(self.skeleton_idx_f), 0, skel_max_idx))
-                        _ex  = int(skeleton_path[_cur][0])
-                        _ey  = int(skeleton_path[_cur][1])
+                        _ex  = int(movement_path[_cur][0])
+                        _ey  = int(movement_path[_cur][1])
                         x_off = int(round(self.NEEDLE_ROI_X)) - _ex
                         y_off = int(round(self.NEEDLE_ROI_Y)) - _ey
                         _pat_h, _pat_w = pattern_alpha.shape[:2]
@@ -1800,8 +1767,8 @@ class PatternMode:
 
                     # ── Pattern scrolls under a fixed needle position ─────────────────
                     cur_idx = int(np.clip(round(self.skeleton_idx_f), 0, skel_max_idx))
-                    exp_x   = int(skeleton_path[cur_idx][0])
-                    exp_y   = int(skeleton_path[cur_idx][1])
+                    exp_x   = int(movement_path[cur_idx][0])
+                    exp_y   = int(movement_path[cur_idx][1])
                     if _is_completed:
                         exp_x = overlay_w // 2
                         exp_y = overlay_h // 2
@@ -1819,15 +1786,6 @@ class PatternMode:
                     y_offset = int(round(self.NEEDLE_ROI_Y)) - exp_y
                     self.pattern_offset_x = float(x_offset)
                     self.pattern_offset_y = float(y_offset)
-
-                    # Save debug info for on-screen display
-                    try:
-                        self.debug_last_cur_idx = cur_idx
-                        self.debug_last_exp = (int(exp_x), int(exp_y))
-                        self.debug_last_x_offset = int(x_offset)
-                        self.debug_last_seeded = bool(self.skeleton_seeded)
-                    except Exception:
-                        pass
 
                     # Sync centerline index for compatibility with downstream code.
                     self.centerline_progress_idx = cur_idx
@@ -1867,7 +1825,7 @@ class PatternMode:
                             except Exception:
                                 pass
                 else:
-                    # Skeleton unavailable — keep pattern centered on completion;
+                    # No usable movement path — keep pattern centered on completion;
                     # otherwise fall back to fixed centre.
                     self.skeleton_seeded = False
                     self.centerline_progress_initialized = False
@@ -1876,14 +1834,9 @@ class PatternMode:
                     exp_y = overlay_h // 2
                     x_offset = int(round(self.NEEDLE_ROI_X)) - exp_x
                     y_offset = int(round(self.NEEDLE_ROI_Y)) - exp_y
-                    # Store debug info for the no-skeleton path
-                    self.debug_last_cur_idx = None
-                    self.debug_last_exp = (int(exp_x), int(exp_y))
-                    self.debug_last_x_offset = int(x_offset)
-                    self.debug_last_seeded = False
 
                 # Fallback anchoring when skeleton is unavailable.
-                if skeleton_path is None or len(skeleton_path) == 0:
+                if movement_path is None or len(movement_path) == 0:
                     x_offset = int(round(self.NEEDLE_ROI_X)) - exp_x
                     y_offset = int(round(self.NEEDLE_ROI_Y)) - exp_y
                 trace_y = exp_y
@@ -2056,36 +2009,6 @@ class PatternMode:
                 outline_color=(0, 0, 0),
                 outline_extra=1,
             )
-
-            # Debug overlay: show internal needle/pattern coordinates for live tuning
-            if getattr(self, 'debug_overlay', False):
-                dbg_scale = text_scale(0.45, self.width, self.height, floor=0.38, ceiling=0.6)
-                dbg_thick = text_thickness(1, self.width, self.height, min_thickness=1, max_thickness=2)
-                dbg_x = 8
-                dbg_y = 12
-                dbg_lines = []
-                dbg_lines.append(f"NEEDLE_ROI: {int(self.NEEDLE_ROI_X)},{int(self.NEEDLE_ROI_Y)}")
-                dbg_lines.append(f"needle_pos: {int(self.needle_pos_x)},{int(self.needle_pos_y)}")
-                dbg_lines.append(f"pattern_offset: {int(self.pattern_offset_x)},{int(self.pattern_offset_y)}")
-                # exp_x/exp_y may exist in scope when pattern present; otherwise skip
-                try:
-                    dbg_lines.append(f"exp: {int(exp_x)},{int(exp_y)}")
-                except Exception:
-                    pass
-                dbg_lines.append(f"camera_area: {self.camera_width}x{self.camera_height}")
-                # Draw each line top-left of camera feed
-                for i, ln in enumerate(dbg_lines):
-                    draw_text(cam_frame, ln, dbg_x, dbg_y + i * 18, dbg_scale, (220, 220, 220), dbg_thick, font=FONT_MAIN, outline_color=(0,0,0), outline_extra=1)
-                # Extended debug values from runtime
-                ext_y = dbg_y + len(dbg_lines) * 18 + 6
-                try:
-                    sseed = getattr(self, 'debug_last_seeded', None)
-                    cidx = getattr(self, 'debug_last_cur_idx', None)
-                    expv = getattr(self, 'debug_last_exp', None)
-                    xoff = getattr(self, 'debug_last_x_offset', None)
-                    draw_text(cam_frame, f"seeded:{sseed} idx:{cidx} exp:{expv} xoff:{xoff}", dbg_x, ext_y, dbg_scale, (200,200,180), dbg_thick, font=FONT_MAIN, outline_color=(0,0,0), outline_extra=1)
-                except Exception:
-                    pass
 
             # If progress reached 100%, show a prominent overlay on the camera
             if getattr(self, 'raw_progress', 0.0) >= 100.0:
