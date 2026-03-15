@@ -1345,7 +1345,12 @@ class PatternMode:
                 if endpoints:
                     reachable_eps = [ep for ep in endpoints if dist_map.get(ep, -1) >= 0]
                     if reachable_eps:
-                        end_node = max(reachable_eps, key=lambda p: (dist_map.get(p, -1), p[1], p[0]))
+                        # Level 3: prefer continuing to the left-most endpoint
+                        # so U-like shapes complete their left arm.
+                        if self.current_level == 3:
+                            end_node = min(reachable_eps, key=lambda p: (p[1], p[0]))
+                        else:
+                            end_node = max(reachable_eps, key=lambda p: (dist_map.get(p, -1), p[1], p[0]))
                     else:
                         end_node = far_node
                 else:
