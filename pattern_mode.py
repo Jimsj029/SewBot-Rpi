@@ -235,6 +235,8 @@ class PatternMode:
         self._cached_skeleton_path = None   # Ordered (x,y) points in pattern space
         self._cached_skeleton_f32  = None   # float32 copy for fast projection
         self._cached_skeleton_key  = None
+        self._cached_middle_points = None   # Ordered row midpoints for levels 3/4
+        self._cached_middle_points_key = None
         self.skeleton_idx_f   = 0.0         # Current position on skeleton (float)
         self.skeleton_offset_x = 0.0        # Fixed pattern→screen offset X
         self.skeleton_offset_y = 0.0        # Fixed pattern→screen offset Y
@@ -735,6 +737,8 @@ class PatternMode:
         self._cached_skeleton_path = None
         self._cached_skeleton_f32  = None
         self._cached_skeleton_key  = None
+        self._cached_middle_points = None
+        self._cached_middle_points_key = None
         # skeleton_idx_f = 0 means start at path[0], which is the bottom-left
         # for level 5 (skeleton starts from bottom) and top for other levels.
         self.skeleton_idx_f   = 0.0
@@ -1239,6 +1243,55 @@ class PatternMode:
         self._cached_centerline_key = cache_key
         return result
 
+    def _extract_level34_middle_points(self, bin_mask, actual_w, actual_h):
+        """Extract ordered per-row middle points from level 3/4 binary mask.
+
+        These points represent the geometric midline of each occupied row and are
+        used as anchors/fallback for skeleton start-end selection.
+        """
+        cache_key = (int(self.current_level), int(actual_w), int(actual_h))
+        if self._cached_middle_points is not None and self._cached_middle_points_key == cache_key:
+            return self._cached_middle_points
+
+        if bin_mask is None:
+            return None
+
+        points = []
+        prev_mid = None
+
+        for y in range(actual_h):
+            xs = np.where(bin_mask[y, :] > 0)[0]
+            if xs.size == 0:
+                continue
+
+            runs = []
+            start = int(xs[0])
+            prev = int(xs[0])
+            for value in xs[1:]:
+                value = int(value)
+                if value > prev + 1:
+                    runs.append((start, prev))
+                    start = value
+                prev = value
+            runs.append((start, prev))
+
+            mids = [int(round((a + b) / 2.0)) for a, b in runs]
+            if prev_mid is None:
+                mid = mids[0]
+            else:
+                mid = mids[int(np.argmin(np.abs(np.array(mids, dtype=np.int32) - int(prev_mid))))]
+
+            points.append((int(mid), int(y)))
+            prev_mid = mid
+
+        if not points:
+            return None
+
+        result = np.array(points, dtype=np.int32)
+        self._cached_middle_points = result
+        self._cached_middle_points_key = cache_key
+        return result
+
     def _build_skeleton_path(self, pattern_alpha, actual_w, actual_h):
         """Build a center path directly from the overlay mask.
 
@@ -1270,6 +1323,7 @@ class PatternMode:
         # Levels 3/4: follow a one-line center skeleton from top-left endpoint.
         if self.current_level in (3, 4):
             dist_center = cv2.distanceTransform(bin_mask, cv2.DIST_L2, 3)
+            middle_points = self._extract_level34_middle_points(bin_mask, actual_w, actual_h)
 
             # Build a one-pixel skeleton/ridge (prefer true thinning when available).
             skel = None
@@ -1334,27 +1388,48 @@ class PatternMode:
 
                 endpoints = [node for node in node_set if len(_neighbors(node)) == 1]
                 if endpoints:
-                    start_node = min(endpoints, key=lambda p: (p[0], p[1]))
-                else:
-                    start_node = min(node_set, key=lambda p: (p[0], p[1]))
+                    if len(endpoints) >= 2:
+                        # Pick endpoint pair with longest geodesic distance.
+                        best_pair = None
+                        best_dist = -1
+                        for ep in endpoints:
+                            far_ep, _parent, _dist = _bfs(ep)
+                            if far_ep in endpoints:
+                                d = int(_dist.get(far_ep, -1))
+                                if d > best_dist:
+                                    best_dist = d
+                                    best_pair = (ep, far_ep)
+                        if best_pair is None:
+                            best_pair = (endpoints[0], endpoints[-1])
 
-                # End at the farthest reachable endpoint from the top-left
-                # start (stable behavior). If distances tie, prefer the
-                # right-most endpoint so it still reaches the visual end.
-                far_node, parent_map, dist_map = _bfs(start_node)
-                if endpoints:
-                    reachable_eps = [ep for ep in endpoints if dist_map.get(ep, -1) >= 0]
-                    if reachable_eps:
-                        # Level 3: prefer continuing to the left-most endpoint
-                        # so U-like shapes complete their left arm.
-                        if self.current_level == 3:
-                            end_node = min(reachable_eps, key=lambda p: (p[1], p[0]))
+                        if middle_points is not None and len(middle_points) > 0:
+                            first_mid = middle_points[0]
+                            last_mid = middle_points[-1]
+
+                            def _dist2_node_to_mid(node, mid):
+                                ny, nx = node
+                                mx, my = int(mid[0]), int(mid[1])
+                                return (nx - mx) ** 2 + (ny - my) ** 2
+
+                            a, b = best_pair
+                            ab_score = _dist2_node_to_mid(a, first_mid) + _dist2_node_to_mid(b, last_mid)
+                            ba_score = _dist2_node_to_mid(b, first_mid) + _dist2_node_to_mid(a, last_mid)
+                            start_node, end_node = (a, b) if ab_score <= ba_score else (b, a)
                         else:
-                            end_node = max(reachable_eps, key=lambda p: (dist_map.get(p, -1), p[1], p[0]))
+                            # Prefer top-left as start for stable progression.
+                            start_node, end_node = sorted(best_pair, key=lambda p: (p[0], p[1]))
                     else:
+                        start_node = endpoints[0]
+                        far_node, _parent, _dist = _bfs(start_node)
                         end_node = far_node
                 else:
+                    start_node = min(node_set, key=lambda p: (p[0], p[1]))
+                    far_node, _parent, _dist = _bfs(start_node)
                     end_node = far_node
+
+                _far_for_parent, parent_map, _dist_for_parent = _bfs(start_node)
+                if end_node not in parent_map:
+                    end_node = _far_for_parent
 
                 rev = []
                 cur = end_node
@@ -1403,19 +1478,22 @@ class PatternMode:
 
             # Fallback if skeleton path extraction fails.
             if not path_points:
-                prev_mid = None
-                for y in range(actual_h):
-                    xs = np.where(bin_mask[y, :] > 0)[0]
-                    if xs.size == 0:
-                        continue
-                    runs = _contiguous_runs(xs)
-                    mids = [(a + b) // 2 for a, b in runs]
-                    if prev_mid is None:
-                        mid = mids[0]
-                    else:
-                        mid = min(mids, key=lambda m: abs(m - prev_mid))
-                    path_points.append((mid, y))
-                    prev_mid = mid
+                if middle_points is not None and len(middle_points) > 0:
+                    path_points = [(int(p[0]), int(p[1])) for p in middle_points]
+                else:
+                    prev_mid = None
+                    for y in range(actual_h):
+                        xs = np.where(bin_mask[y, :] > 0)[0]
+                        if xs.size == 0:
+                            continue
+                        runs = _contiguous_runs(xs)
+                        mids = [(a + b) // 2 for a, b in runs]
+                        if prev_mid is None:
+                            mid = mids[0]
+                        else:
+                            mid = min(mids, key=lambda m: abs(m - prev_mid))
+                        path_points.append((mid, y))
+                        prev_mid = mid
 
         # Levels 2/5: scan columns (x changes, y follows nearest run midpoint)
         elif self.current_level in (2, 5):
