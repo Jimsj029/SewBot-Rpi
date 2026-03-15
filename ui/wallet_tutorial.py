@@ -1,8 +1,9 @@
+
+
 import cv2
 import numpy as np
 import math
 import os
-import re
 import sys
 import time
 
@@ -27,17 +28,17 @@ except ImportError:
         draw_text,
     )
 
-
+# Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from music_manager import get_music_manager
 
-#ONNX Runtime for needle centring detection
+# Try to import YOLO for needle centring detection
 try:
-    import onnxruntime as ort
-    ORT_AVAILABLE = True
+    from ultralytics import YOLO as _YOLO
+    YOLO_AVAILABLE = True
 except ImportError:
-    ORT_AVAILABLE = False
-    print("onnxruntime not available – needle centring detection disabled")
+    YOLO_AVAILABLE = False
+    print("YOLO not available – needle centring detection disabled")
 
 # Try to import pygame for audio playback
 try:
@@ -72,33 +73,11 @@ FONTS = {
 
 # Use a lighter face for wallet tutorial text for better readability.
 UI_FONT = FONT_COMPACT
-SUPPORTED_VIDEO_EXTENSIONS = {'.mp4', '.mov', '.avi', '.mkv'}
 
 
 def _put_text(img, text, x, y, scale, color, thickness):
     """Draw text with a 1-px black outline so it reads against any background."""
     draw_text(img, text, x, y, scale, color, thickness, font=UI_FONT, outline_extra=1)
-
-
-def _natural_sort_key(value):
-    parts = re.split(r'(\d+)', value)
-    return [int(part) if part.isdigit() else part.lower() for part in parts]
-
-
-def _discover_video_files(folder_path):
-    if not os.path.isdir(folder_path):
-        return []
-
-    video_paths = []
-    for file_name in os.listdir(folder_path):
-        full_path = os.path.join(folder_path, file_name)
-        if not os.path.isfile(full_path):
-            continue
-        if os.path.splitext(file_name)[1].lower() not in SUPPORTED_VIDEO_EXTENSIONS:
-            continue
-        video_paths.append(full_path)
-
-    return sorted(video_paths, key=lambda path: _natural_sort_key(os.path.basename(path)))
 
 # Per-step instructions shown in "Your Turn" practice screen
 STEP_INSTRUCTIONS = {
@@ -129,7 +108,7 @@ STEP_INSTRUCTIONS = {
 
 
 class WalletTutorialPlayer:
-    def __init__(self, width=800, height=600, video_path=None, audio_path=None, videos_subfolder='Wallet'):
+    def __init__(self, width=800, height=600, video_path=None, audio_path=None):
         self.width = width
         self.height = height
         self.glow_phase = 0
@@ -142,11 +121,10 @@ class WalletTutorialPlayer:
         self.progress_bar = {'x': 0, 'y': 0, 'w': 0, 'h': 0}
         
         # Multi-video support for wallet tutorial steps
-        self.current_step = 0
-        self.total_steps = 1
-        self.videos_base_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'videos', videos_subfolder)
-        self.video_files = []
-        self.step_entries = []
+        self.current_step = 0  # Current video index (0-10 for 11 videos)
+        self.total_steps = 15  # Wallet: Materials + 13 steps + Showcase
+        self.videos_base_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'videos')
+        self.video_files = []  # Will store paths to wallet videos
         self.load_video_list()
         
         # Video capture
@@ -200,28 +178,17 @@ class WalletTutorialPlayer:
         self.NEEDLE_CHECK_INTERVAL   = 6      # Run model every N draw-frames (~5 Hz @ 30 fps)
         self._needle_check_counter   = 0      # Frame counter for throttling
         self.needle_model = None
-        self.needle_input_name = None
-        self._needle_imgsz = 320
-        if ORT_AVAILABLE:
+        if YOLO_AVAILABLE:
             try:
                 _needle_path = os.path.join(
                     os.path.dirname(os.path.dirname(__file__)), 'models', 'needle.onnx')
                 if os.path.exists(_needle_path):
-                    _sess_opts = ort.SessionOptions()
-                    _sess_opts.inter_op_num_threads = 2
-                    _sess_opts.intra_op_num_threads = 2
-                    self.needle_model = ort.InferenceSession(
-                        _needle_path,
-                        sess_options=_sess_opts,
-                        providers=['CPUExecutionProvider'])
-                    self.needle_input_name = self.needle_model.get_inputs()[0].name
-                    in_shape = self.needle_model.get_inputs()[0].shape
-                    if len(in_shape) >= 4 and isinstance(in_shape[2], int) and in_shape[2] > 0:
-                        self._needle_imgsz = int(in_shape[2])
+                    self.needle_model = _YOLO(_needle_path, task='detect')
                     # Warm-up run so first real frame isn't slow
-                    _w = np.zeros((1, 3, self._needle_imgsz, self._needle_imgsz), dtype=np.float32)
-                    self.needle_model.run(None, {self.needle_input_name: _w})
-                    print(f"\u2713 Needle centring model loaded (ONNX Runtime direct): {_needle_path}")
+                    self.needle_model(
+                        np.zeros((64, 64, 3), dtype=np.uint8),
+                        conf=self.NEEDLE_CONF_THRESHOLD, verbose=False)
+                    print(f"\u2713 Needle centring model loaded: {_needle_path}")
                 else:
                     print(f"\u26a0 needle.onnx not found at {_needle_path}")
             except Exception as _e:
@@ -306,83 +273,102 @@ class WalletTutorialPlayer:
         }
     
     def load_video_list(self):
-        """Load wallet tutorial videos from the Wallet folder into the fixed 15-step flow."""
-        discovered_files = _discover_video_files(self.videos_base_path)
+        """Load the list of wallet tutorial video files (Materials + Step 1-13 + Showcase)"""
         self.video_files = []
-        self.step_entries = []
 
-        materials_path = None
-        showcase_path = None
-        numbered_steps = {}
-        unnumbered_steps = []
+        # Step 0: Wallet Materials video
+        materials_patterns = [
+            'Wallet Materials.mp4',
+            'Wallet Materials.MP4',
+            'Wallet Materials.mov',
+            'Wallet Materials.MOV',
+            'wallet materials.mp4',
+            'wallet materials.MP4',
+        ]
+        materials_found = False
+        for pattern in materials_patterns:
+            video_path = os.path.join(self.videos_base_path, pattern)
+            if os.path.exists(video_path):
+                self.video_files.append(video_path)
+                materials_found = True
+                print(f"Found wallet materials video: {pattern}")
+                break
+        if not materials_found:
+            self.video_files.append(None)
+            print(f"Warning: Wallet Materials video not found in {self.videos_base_path}")
 
-        for video_path in discovered_files:
-            base_name = os.path.splitext(os.path.basename(video_path))[0]
-            lower_name = base_name.lower()
-            numbers = [int(value) for value in re.findall(r'\d+', lower_name)]
+        # Steps 1-13: Wallet construction steps
+        for i in range(1, 14):  # Steps 1 through 13
+            video_found = False
 
-            if 'material' in lower_name and materials_path is None:
-                materials_path = video_path
-                continue
-
-            if ('showcase' in lower_name or 'final' in lower_name) and showcase_path is None:
-                showcase_path = video_path
-                continue
-
-            step_number = numbers[0] if numbers else None
-            if step_number is not None and 1 <= step_number <= 13 and step_number not in numbered_steps:
-                numbered_steps[step_number] = video_path
+            # First step has special naming (also try plain "Step 1.mp4")
+            if i == 1:
+                patterns = [
+                    'Step 1.mp4',
+                    'Step 1.MP4',
+                    'step 1.mp4',
+                    'step 1.MP4',
+                    'step1.mp4',
+                    'step1.MP4',
+                    'Step 1 Wallet.mp4',
+                    'Step 1 Wallet.MP4',
+                    'Step 1 Wallet.mov',
+                    'Step 1 Wallet.MOV',
+                    'Step 1.mov',
+                    'Step 1.MOV',
+                ]
             else:
-                unnumbered_steps.append(video_path)
+                patterns = [
+                    f'Step {i}.mp4',
+                    f'Step {i}.MP4',
+                    f'Step {i}.mov',
+                    f'Step {i}.MOV',
+                    f'step{i}.mp4',
+                    f'step{i}.MP4',
+                    f'step{i}.mov',
+                    f'step{i}.MOV',
+                    f'step {i}.mp4',
+                    f'step {i}.MP4',
+                    f'step {i}.mov',
+                    f'step {i}.MOV',
+                ]
 
-        # Preserve the original wallet tutorial layout:
-        # Materials, Step 1-13, Showcase.
-        self.step_entries.append({
-            'path': materials_path,
-            'kind': 'materials',
-            'step_number': None,
-            'needs_practice': False,
-            'display_label': 'Wallet Materials',
-        })
+            for pattern in patterns:
+                video_path = os.path.join(self.videos_base_path, pattern)
+                if os.path.exists(video_path):
+                    self.video_files.append(video_path)
+                    video_found = True
+                    print(f"Found wallet tutorial video: {pattern}")
+                    break
 
-        remaining_step_paths = list(unnumbered_steps)
-        for step_number in range(1, 14):
-            video_path = numbered_steps.get(step_number)
-            if video_path is None and remaining_step_paths:
-                video_path = remaining_step_paths.pop(0)
-
-            self.step_entries.append({
-                'path': video_path,
-                'kind': 'step',
-                'step_number': step_number,
-                'needs_practice': step_number not in (2, 12),
-                'display_label': f'Wallet Step {step_number}',
-            })
-
-        self.step_entries.append({
-            'path': showcase_path,
-            'kind': 'showcase',
-            'step_number': None,
-            'needs_practice': False,
-            'display_label': 'Wallet Showcase',
-        })
-
-        if not discovered_files:
-            print(f"Warning: no wallet tutorial videos found in {self.videos_base_path}")
-
-        for entry in self.step_entries:
-            if entry['path'] is not None:
-                print(f"Found wallet tutorial video: {os.path.basename(entry['path'])} -> {entry['display_label']}")
-            else:
-                print(f"Warning: missing video for {entry['display_label']} in {self.videos_base_path}")
-
-        self.video_files = [entry['path'] for entry in self.step_entries]
-        self.total_steps = len(self.video_files)
-
-    def _get_current_step_entry(self):
-        if 0 <= self.current_step < len(self.step_entries):
-            return self.step_entries[self.current_step]
-        return None
+            if not video_found:
+                self.video_files.append(None)
+                print(f"Warning: wallet step{i} video not found in {self.videos_base_path}")
+        
+        # Step 10: Showcase video
+        showcase_patterns = [
+            'Showcase .mp4',  # Note the space in the filename
+            'Showcase.mp4',
+            'Showcase .MP4',
+            'Showcase.MP4',
+            'Showcase .mov',
+            'Showcase.mov',
+            'Showcase .MOV',
+            'Showcase.MOV',
+            'showcase.mp4',
+            'showcase.MP4',
+        ]
+        showcase_found = False
+        for pattern in showcase_patterns:
+            video_path = os.path.join(self.videos_base_path, pattern)
+            if os.path.exists(video_path):
+                self.video_files.append(video_path)
+                showcase_found = True
+                print(f"Found wallet showcase video: {pattern}")
+                break
+        if not showcase_found:
+            self.video_files.append(None)
+            print(f"Warning: Showcase video not found in {self.videos_base_path}")
     
     def load_current_video(self):
         """Load the video for the current step"""
@@ -558,16 +544,16 @@ class WalletTutorialPlayer:
                 # If on last step, this is the Done button
                 if self.current_step >= self.total_steps - 1:
                     return 'continue'  # Done with all tutorials
-
-                current_entry = self._get_current_step_entry()
-                if current_entry is not None and current_entry.get('needs_practice', False):
+                # Check if current step needs "your turn" practice (steps 1-13, not materials or showcase)
+                # Steps 2 and 12 skip "your turn" and go directly to next video
+                elif self.current_step >= 1 and self.current_step <= 13 and self.current_step not in (2, 12):
                     # Transition to your_turn mode
                     self.needle_confirmed = False
                     self._needle_check_counter = 0
                     self.your_turn_mode = True
                     return 'enter_your_turn'
                 else:
-                    # Move to next step directly for materials, showcase, and non-practice steps.
+                    # Move to next step directly (for materials and showcase)
                     if self.next_step():
                         return 'next'
                     else:
@@ -656,69 +642,8 @@ class WalletTutorialPlayer:
 
         _put_text(img, text, text_x, text_y, font_scale, COLORS['text_primary'], thickness)
     
-    def draw_materials_screen(self, img):
-        """Draw the wallet materials list as text inside a single box."""
-        materials = [
-            "1x - 11x24cm (Base Body)",
-            "1x - 11x24cm (Inner Cover)",
-            "1x - 12x24cm (Base Cover)",
-            "3x - 12x24cm  (Pockets & Back Lining)",
-            "Scissors",
-            "Pin Needles",
-        ]
-
-        # Title
-        title = "Materials Needed"
-        title_scale = text_scale(1.1, self.width, self.height, floor=0.95, ceiling=1.28)
-        title_thick = text_thickness(2, self.width, self.height, min_thickness=2, max_thickness=3)
-        title_scale = fit_text_scale(title, UI_FONT, self.width - 120, title_scale, title_thick, min_scale=0.82)
-        (title_w, title_h), _ = get_text_size(title, UI_FONT, title_scale, title_thick)
-        title_x = (self.width - title_w) // 2
-        title_y = 130
-        _put_text(img, title, title_x, title_y, title_scale, COLORS['text_accent'], title_thick)
-
-        # Measure all items to determine the box size
-        item_scale = text_scale(0.85, self.width, self.height, floor=0.74, ceiling=0.98)
-        item_thick = text_thickness(2, self.width, self.height, min_thickness=1, max_thickness=2)
-        line_spacing = 46
-        padding = 24
-
-        fitted_scales = []
-        line_sizes = []
-        for line in materials:
-            fitted = fit_text_scale(line, UI_FONT, self.width - 160, item_scale, item_thick, min_scale=0.64)
-            (lw, lh), _ = get_text_size(line, UI_FONT, fitted, item_thick)
-            fitted_scales.append(fitted)
-            line_sizes.append((lw, lh))
-
-        box_w = max(lw for lw, _ in line_sizes) + padding * 2
-        box_h = len(materials) * line_spacing - (line_spacing - line_sizes[0][1]) + padding * 2
-        box_x = (self.width - box_w) // 2
-        box_y = title_y + title_h + 30
-
-        # Draw single containing box
-        cv2.rectangle(img, (box_x, box_y), (box_x + box_w, box_y + box_h), (30, 30, 30), -1)
-        cv2.rectangle(img, (box_x, box_y), (box_x + box_w, box_y + box_h), COLORS['cyan'], 2)
-
-        # Draw each material item inside the box
-        for i, line in enumerate(materials):
-            (lw, lh) = line_sizes[i]
-            lx = (self.width - lw) // 2
-            ly = box_y + padding + lh + i * line_spacing
-            _put_text(img, line, lx, ly, fitted_scales[i], COLORS['text_primary'], item_thick)
-
-        # Hide progress bar off-screen (no bar shown for materials)
-        self.progress_bar = {'x': 0, 'y': -100, 'w': 0, 'h': 0}
-
     def draw_video_frame(self, img):
         """Draw actual video frame or placeholder"""
-        current_entry = self._get_current_step_entry()
-
-        # If there is no materials video, keep the static materials screen as fallback.
-        if current_entry is not None and current_entry['kind'] == 'materials' and current_entry['path'] is None:
-            self.draw_materials_screen(img)
-            return
-
         # Video area - lowered to leave room for step instructions above
         video_margin = 50
         video_y = 145  # Extra space above video for step instruction text
@@ -880,13 +805,14 @@ class WalletTutorialPlayer:
             self.draw_button(img, self.continue_button, COLORS['button_hover'])
     
     def draw_step_indicator(self, img):
-        """Draw the current wallet tutorial label, showing step X/13 for steps 1-13."""
-        current_entry = self._get_current_step_entry()
-        step_number = current_entry['step_number'] if current_entry is not None else None
-        if step_number is not None and 1 <= step_number <= 13:
-            text = f"Step {step_number} Of 13 - {current_entry['display_label']}"
+        """Draw step indicator showing current progress (Materials, Step 1-13, Showcase)"""
+        # Determine the text based on current step
+        if self.current_step == 0:
+            text = "Wallet Materials"
+        elif self.current_step == self.total_steps - 1:
+            text = "Wallet Showcase"
         else:
-            text = current_entry['display_label'] if current_entry is not None else f"Wallet Step {self.current_step + 1}"
+            text = f"Wallet Step {self.current_step} of {self.total_steps - 2}"
 
         font_scale = text_scale(0.9, self.width, self.height, floor=0.78, ceiling=1.04)
         thickness = text_thickness(2, self.width, self.height, min_thickness=2, max_thickness=3)
@@ -908,16 +834,11 @@ class WalletTutorialPlayer:
         _put_text(img, text, text_x, text_y, font_scale, COLORS['text_accent'], thickness)
     
     def _draw_step_overlay(self, img, video_x, video_y, video_w, video_h):
-        """Draw step instructions for the currently discovered wallet step."""
-        current_entry = self._get_current_step_entry()
-        if current_entry is None:
+        """Draw step instruction lines centered above the video frame for steps 1-13."""
+        if self.current_step < 1 or self.current_step > 13:
             return
 
-        step_number = current_entry.get('step_number')
-        if step_number is None:
-            return
-
-        lines = STEP_INSTRUCTIONS.get(step_number, [])
+        lines = STEP_INSTRUCTIONS.get(self.current_step, [])
         if not lines:
             return
 
@@ -959,11 +880,8 @@ class WalletTutorialPlayer:
 
     def draw_your_turn(self, img, camera_frame):
         """Draw the 'Your Turn' practice screen with webcam feed"""
-        current_entry = self._get_current_step_entry()
-        step_number = current_entry.get('step_number') if current_entry is not None else None
-
         # ── Title ────────────────────────────────────────────────────────────
-        title = f"Your Turn - Practice Step {step_number}" if step_number is not None else "Your Turn - Practice"
+        title = f"Your Turn - Practice Step {self.current_step}"
         title_scale = text_scale(1.0, self.width, self.height, floor=0.86, ceiling=1.12)
         title_thick = text_thickness(2, self.width, self.height, min_thickness=2, max_thickness=3)
         title_scale = fit_text_scale(title, UI_FONT, self.width - 120, title_scale, title_thick, min_scale=0.78)
@@ -988,7 +906,7 @@ class WalletTutorialPlayer:
         # ── Step instructions ─────────────────────────────────────────────
         inst_scale = text_scale(0.7, self.width, self.height, floor=0.62, ceiling=0.82)
         inst_thick = text_thickness(1, self.width, self.height, min_thickness=1, max_thickness=2)
-        lines = STEP_INSTRUCTIONS.get(step_number, ["Practice what you learned in the video."])
+        lines = STEP_INSTRUCTIONS.get(self.current_step, ["Practice what you learned in the video."])
         instruction_w = max(360, min(self.width - 220, int(self.width * 0.58)))
         line_spacing = 22
         cur_y = text_y + text_h + 26
@@ -1078,7 +996,7 @@ class WalletTutorialPlayer:
                 y += self.ROI_DASH_LEN + self.ROI_DASH_GAP
 
             # Step 7 only: two extra dashed lines ~1 cm to left and right of centre
-            if step_number == 7:
+            if self.current_step == 7:
                 for x_off in (-self.ROI_STEP7_LINE_OFFSET, self.ROI_STEP7_LINE_OFFSET):
                     side_x = abs_cx + x_off
                     y = roi_top
@@ -1131,23 +1049,16 @@ class WalletTutorialPlayer:
         if roi_crop.size == 0:
             return False
         try:
-            imgsz = self._needle_imgsz
-            roi_h_c, roi_w_c = roi_crop.shape[:2]
-            inp = cv2.resize(roi_crop, (imgsz, imgsz))
-            inp = cv2.cvtColor(inp, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
-            inp = np.transpose(inp, (2, 0, 1))[np.newaxis]  # [1, 3, H, W]
-            preds = self.needle_model.run(None, {self.needle_input_name: inp})[0]
-            # YOLOv8 ONNX output: [1, 4+nc, anchors] → transpose to [anchors, 4+nc]
-            preds = preds[0].T  # [anchors, 5] for a 1-class model
-            scores = preds[:, 4]
-            mask = scores >= self.NEEDLE_CONF_THRESHOLD
-            if not np.any(mask):
-                return False
-            filtered = preds[mask]
-            best = int(np.argmax(filtered[:, 4]))
-            cx_320 = float(filtered[best, 0])
-            cx_roi = cx_320 / imgsz * roi_w_c
-            return abs(cx_roi - roi_w_c / 2.0) <= self.NEEDLE_CENTER_TOLERANCE
+            results = self.needle_model(
+                roi_crop, conf=self.NEEDLE_CONF_THRESHOLD, verbose=False)
+            if results and results[0].boxes is not None and len(results[0].boxes) > 0:
+                roi_w = x2 - x1
+                boxes = results[0].boxes
+                confs = boxes.conf.cpu().numpy()
+                best  = int(np.argmax(confs))
+                xyxy  = boxes[best].xyxy[0].cpu().numpy()
+                cx    = (xyxy[0] + xyxy[2]) / 2.0
+                return abs(cx - roi_w / 2.0) <= self.NEEDLE_CENTER_TOLERANCE
         except Exception as e:
             print(f"Needle check error: {e}")
         return False

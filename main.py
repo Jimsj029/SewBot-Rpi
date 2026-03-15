@@ -1,4 +1,7 @@
-﻿
+﻿"""
+SewBot - Pattern Recognition System
+Optimized for Raspberry Pi
+"""
 
 import cv2
 import numpy as np
@@ -6,7 +9,6 @@ import math
 import os
 import sys
 import threading
-import time
 
 # Add ui directory to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'ui'))
@@ -72,19 +74,11 @@ class SewBotApp:
             'glow_blue': (255, 150, 0),
         }
         
-        # Tutorial players read every supported video file inside their folder.
-        self.tutorial_player = TutorialPlayer(self.width, self.height,
-                                              videos_subfolder='Sewing',
-                                              tutorial_label='SEWING MACHINE TUTORIAL')
-
-        # Embroidery tutorial player - same functionality, different video folder
-        self.embroidery_tutorial_player = TutorialPlayer(self.width, self.height,
-                                                         videos_subfolder='Embroidery',
-                                                         tutorial_label='EMBROIDERY MACHINE TUTORIAL')
+        # Tutorial player - initialize with tutorial videos from videos/sewing-set-up
+        self.tutorial_player = TutorialPlayer(self.width, self.height)
         
         # Wallet tutorial player - initialize with wallet videos
-        self.wallet_tutorial_player = WalletTutorialPlayer(self.width, self.height,
-                                                           videos_subfolder='Wallet')
+        self.wallet_tutorial_player = WalletTutorialPlayer(self.width, self.height)
         
         # Level selection screen
         self.level_selection = LevelSelection(self.width, self.height, self.COLORS)
@@ -94,14 +88,6 @@ class SewBotApp:
         self.camera_initializing = False
         self.camera_detected = False
         self.camera_status_message = "Checking camera..."
-        self.camera_lock = threading.Lock()
-        self.latest_camera_frame = None
-        # Camera zoom multiplier (1.0 = no zoom). Values >1.0 zoom in.
-        self.camera_zoom = 1.0
-        self.camera_thread = None
-        self.camera_thread_running = False
-        self.last_frame_time = time.perf_counter()
-        self.smoothed_fps = 60.0
         
         # Button positions
         self.start_button = {'x': (self.width - 300) // 2, 'y': self.height // 2 + 50, 'w': 300, 'h': 80}
@@ -137,34 +123,7 @@ class SewBotApp:
             'title': 'TUTORIAL',
             'description': 'Review sewing machine setup and basic controls anytime.'
         }
-
-        # Tutorial selection buttons (Select Tutorial page)
-        tut_btn_w = 340
-        tut_btn_h = 180
-        tut_spacing = 60
-        tut_total_w = tut_btn_w * 2 + tut_spacing
-        tut_start_x = (self.width - tut_total_w) // 2
-        tut_btn_y = self.height // 2 - tut_btn_h // 2
-
-        self.tut_sewing_button = {
-            'x': tut_start_x,
-            'y': tut_btn_y,
-            'w': tut_btn_w,
-            'h': tut_btn_h,
-            'title': 'SEWING',
-            'subtitle': 'MACHINE',
-        }
-        self.tut_embroidery_button = {
-            'x': tut_start_x + tut_btn_w + tut_spacing,
-            'y': tut_btn_y,
-            'w': tut_btn_w,
-            'h': tut_btn_h,
-            'title': 'EMBROIDERY',
-            'subtitle': 'MACHINE',
-        }
-        # Skip button for tutorial selection (bottom right)
-        self.tut_skip_button = {'x': self.width - 140, 'y': self.height - 60, 'w': 120, 'h': 40}
-
+        
         self.back_button = {'x': 20, 'y': self.height - 60, 'w': 120, 'h': 40}
         self.quit_button = {'x': self.width - 140, 'y': self.height - 60, 'w': 120, 'h': 40}
         
@@ -250,7 +209,7 @@ class SewBotApp:
             # Check mute button (available on all screens)
             # Adjust position for tutorial state where it's moved left of skip all button
             mb = self.mute_button.copy()
-            if self.state in ('tutorial', 'embroidery_tutorial'):
+            if self.state == 'tutorial':
                 mb['x'] = self.width - 160 - 50 - 20  # Same adjustment as in draw_tutorial
             
             if mb['x'] <= x <= mb['x'] + mb['w'] and mb['y'] <= y <= mb['y'] + mb['h']:
@@ -270,26 +229,18 @@ class SewBotApp:
                 btn = self.start_button
                 if btn['x'] <= x <= btn['x'] + btn['w'] and btn['y'] <= y <= btn['y'] + btn['h']:
                     self.play_button_click_sound()
-                    self.state = 'tutorial_selection'
+                    self.state = 'tutorial'
+                    self.tutorial_player.reset()
                     
             elif self.state == 'tutorial':
                 # Handle tutorial clicks (tutorial now manages back button internally)
                 action = self.tutorial_player.handle_click(x, y)
                 if action == 'back':
-                    self.state = 'tutorial_selection'
+                    self.state = 'main_menu'
                 elif action == 'continue':
                     self.state = 'mode_selection'
                 elif action == 'replay':
                     self.tutorial_player.reset()
-
-            elif self.state == 'embroidery_tutorial':
-                action = self.embroidery_tutorial_player.handle_click(x, y)
-                if action == 'back':
-                    self.state = 'tutorial_selection'
-                elif action == 'continue':
-                    self.state = 'mode_selection'
-                elif action == 'replay':
-                    self.embroidery_tutorial_player.reset()
             
             elif self.state == 'wallet_tutorial':
                 # Handle wallet tutorial clicks
@@ -346,38 +297,15 @@ class SewBotApp:
                 tb = self.tutorial_button
                 if tb['x'] <= x <= tb['x'] + tb['w'] and tb['y'] <= y <= tb['y'] + tb['h']:
                     self.play_button_click_sound()
-                    # Go to tutorial selection page
-                    self.state = 'tutorial_selection'
-
+                    # Go back to tutorial state to replay it
+                    self.state = 'tutorial'
+                    self.tutorial_player.reset()
+                
                 bb = self.back_button
                 if bb['x'] <= x <= bb['x'] + bb['w'] and bb['y'] <= y <= bb['y'] + bb['h']:
                     self.play_button_click_sound()
                     self.state = 'main_menu'
             
-            elif self.state == 'tutorial_selection':
-                # Skip button (bottom left)
-                sb = self.tut_skip_button
-                if sb['x'] <= x <= sb['x'] + sb['w'] and sb['y'] <= y <= sb['y'] + sb['h']:
-                    self.play_button_click_sound()
-                    self.state = 'mode_selection'
-                    return
-
-                # Sewing Machine button
-                btn = self.tut_sewing_button
-                if btn['x'] <= x <= btn['x'] + btn['w'] and btn['y'] <= y <= btn['y'] + btn['h']:
-                    self.play_button_click_sound()
-                    self.state = 'tutorial'
-                    self.tutorial_player.reset()
-                    return
-
-                # Embroidery Machine button
-                btn = self.tut_embroidery_button
-                if btn['x'] <= x <= btn['x'] + btn['w'] and btn['y'] <= y <= btn['y'] + btn['h']:
-                    self.play_button_click_sound()
-                    self.state = 'embroidery_tutorial'
-                    self.embroidery_tutorial_player.reset()
-                    return
-
             elif self.state == 'level_selection':
                 # Check if guide is showing first
                 if self.pattern_mode.show_guide:
@@ -423,10 +351,6 @@ class SewBotApp:
                     else:
                         # All levels completed, go back to level selection
                         self.state = 'level_selection'
-                elif result == 'zoom_in':
-                    self.zoom_in()
-                elif result == 'zoom_out':
-                    self.zoom_out()
     
     def detect_camera_at_startup(self):
         """Detect camera availability at app startup"""
@@ -508,20 +432,14 @@ class SewBotApp:
                     # Optimize camera settings for performance
                     # Set buffer size to 1 to reduce latency
                     self.camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                    self.camera.set(cv2.CAP_PROP_FPS, 60)
-                    self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-                    self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
                     
                     # Test if we can actually read a frame
                     ret, frame = self.camera.read()
                     if ret:
-                        with self.camera_lock:
-                            self.latest_camera_frame = frame.copy()
                         actual_w = int(self.camera.get(cv2.CAP_PROP_FRAME_WIDTH))
                         actual_h = int(self.camera.get(cv2.CAP_PROP_FRAME_HEIGHT))
                         print(f"  Camera opened successfully with {backend_name}!")
                         print(f"  Resolution: {actual_w}x{actual_h}")
-                        self.start_camera_thread()
                         self.camera_initializing = False
                         return
                     else:
@@ -531,78 +449,11 @@ class SewBotApp:
             print("  Error: Could not open camera with any backend")
             self.camera = None
             self.camera_initializing = False
-
-    def _camera_capture_loop(self):
-        while self.camera_thread_running and self.camera is not None and self.camera.isOpened():
-            ret, frame = self.camera.read()
-            if not ret:
-                continue
-            with self.camera_lock:
-                self.latest_camera_frame = frame
-
-    def start_camera_thread(self):
-        if self.camera is None or self.camera_thread_running:
-            return
-        self.camera_thread_running = True
-        self.camera_thread = threading.Thread(target=self._camera_capture_loop, daemon=True)
-        self.camera_thread.start()
-
-    def get_latest_camera_frame(self):
-        with self.camera_lock:
-            if self.latest_camera_frame is None:
-                return None
-            frame = self.latest_camera_frame.copy()
-
-        # Apply software zoom (center-crop + resize) if needed
-        z = float(getattr(self, 'camera_zoom', 1.0))
-        if z is None or z <= 1.0:
-            return frame
-
-        h, w = frame.shape[:2]
-        # Compute crop size (smaller when zooming in)
-        crop_w = max(1, int(round(w / z)))
-        crop_h = max(1, int(round(h / z)))
-
-        x1 = max(0, (w - crop_w) // 2)
-        y1 = max(0, (h - crop_h) // 2)
-        x2 = x1 + crop_w
-        y2 = y1 + crop_h
-
-        crop = frame[y1:y2, x1:x2]
-        if crop.size == 0:
-            return frame
-        # Resize back to original camera feed size so downstream code remains unchanged
-        zoomed = cv2.resize(crop, (w, h), interpolation=cv2.INTER_LINEAR)
-        return zoomed
-
-    def set_camera_zoom(self, zoom: float):
-        """Set camera zoom multiplier. 1.0 = no zoom. Values >1 zoom in."""
-        try:
-            z = float(zoom)
-        except Exception:
-            return
-        # Clamp reasonable bounds
-        z = max(1.0, min(6.0, z))
-        self.camera_zoom = z
-
-    def zoom_in(self, step: float = 0.1):
-        """Increase zoom by `step`."""
-        self.set_camera_zoom(self.camera_zoom + abs(step))
-
-    def zoom_out(self, step: float = 0.1):
-        """Decrease zoom by `step`."""
-        self.set_camera_zoom(max(1.0, self.camera_zoom - abs(step)))
     
     def release_camera(self):
-        self.camera_thread_running = False
-        if self.camera_thread is not None:
-            self.camera_thread.join(timeout=1.0)
-            self.camera_thread = None
         if self.camera is not None:
             self.camera.release()
             self.camera = None
-        with self.camera_lock:
-            self.latest_camera_frame = None
             print("Camera released")
     
     def draw_glow_rect(self, img, x, y, w, h, color, glow_intensity):
@@ -755,8 +606,8 @@ class SewBotApp:
         else:
             text_start_y = self.height // 3  # Default position if no logo
         
-        # Draw SEW GUIDER title
-        text = "SEW GUIDER"
+        # Draw SEWBOT title
+        text = "SEWBOT"
         title_font = FONT_DISPLAY
         font_scale = text_scale(2.45, self.width, self.height, floor=2.05, ceiling=2.65)
         thickness = text_thickness(4, self.width, self.height, min_thickness=3, max_thickness=5)
@@ -816,14 +667,6 @@ class SewBotApp:
         self.mute_button['x'] = self.width - 160 - 50 - 20  # 20px spacing from skip all
         self.draw_mute_button(frame)
         self.mute_button['x'] = original_mute_x  # Restore original position
-
-    def draw_embroidery_tutorial(self, frame):
-        frame[:] = self.grid_background
-        self.embroidery_tutorial_player.draw(frame)
-        original_mute_x = self.mute_button['x']
-        self.mute_button['x'] = self.width - 160 - 50 - 20
-        self.draw_mute_button(frame)
-        self.mute_button['x'] = original_mute_x
     
     def draw_wallet_tutorial(self, frame):
         # Use pre-rendered grid background
@@ -835,7 +678,10 @@ class SewBotApp:
         # Get camera frame if in your_turn mode
         camera_frame = None
         if self.wallet_tutorial_player.your_turn_mode:
-            camera_frame = self.get_latest_camera_frame()
+            if self.camera is not None and self.camera.isOpened():
+                ret, camera_frame = self.camera.read()
+                if not ret:
+                    camera_frame = None
         
         # Draw wallet tutorial player (pass camera frame)
         self.wallet_tutorial_player.draw(frame, camera_frame)
@@ -879,67 +725,7 @@ class SewBotApp:
         self.draw_mode_button(frame, self.tutorial_button)
         self.draw_back_button(frame)
         self.draw_quit_button(frame)
-
-    def draw_tutorial_selection(self, frame):
-        frame[:] = self.grid_background
-
-        # Mute button (top right)
-        self.draw_mute_button(frame)
-
-        # Corner accent (top left)
-        bracket_size, thickness, offset = 50, 2, 15
-        cv2.line(frame, (offset, offset + bracket_size), (offset, offset), self.COLORS['neon_blue'], thickness)
-        cv2.line(frame, (offset, offset), (offset + bracket_size, offset), self.COLORS['neon_blue'], thickness)
-        cv2.circle(frame, (offset, offset), 3, self.COLORS['cyan'], -1)
-
-        # Title
-        title = "SELECT TUTORIAL"
-        font_scale = text_scale(1.52, self.width, self.height, floor=1.28, ceiling=1.7)
-        thickness = text_thickness(3, self.width, self.height, min_thickness=2, max_thickness=4)
-        font_scale = fit_text_scale(title, FONT_DISPLAY, self.width - 140, font_scale, thickness, min_scale=1.05)
-        (tw, th), _ = get_text_size(title, FONT_DISPLAY, font_scale, thickness)
-        draw_text(frame, title, (self.width - tw) // 2, 80, font_scale, self.COLORS['bright_blue'], thickness, font=FONT_DISPLAY)
-
-        # Draw the two tutorial type buttons
-        self._draw_tut_type_button(frame, self.tut_sewing_button)
-        self._draw_tut_type_button(frame, self.tut_embroidery_button)
-
-        # Skip button (bottom left)
-        sb = self.tut_skip_button
-        pulse = 0.4 + 0.3 * abs(math.sin(self.glow_phase))
-        self.draw_glow_rect(frame, sb['x'], sb['y'], sb['w'], sb['h'], self.COLORS['medium_blue'], pulse)
-        overlay = frame.copy()
-        cv2.rectangle(overlay, (sb['x'] + 2, sb['y'] + 2), (sb['x'] + sb['w'] - 2, sb['y'] + sb['h'] - 2), self.COLORS['button_normal'], -1)
-        cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
-        skip_text = "SKIP"
-        fs = text_scale(0.72, self.width, self.height, floor=0.66, ceiling=0.88)
-        ft = text_thickness(2, self.width, self.height, min_thickness=2, max_thickness=3)
-        fs = fit_text_scale(skip_text, _UI_FONT, sb['w'] - 14, fs, ft, min_scale=0.58)
-        (stw, sth), _ = get_text_size(skip_text, _UI_FONT, fs, ft)
-        _put_text(frame, skip_text, sb['x'] + (sb['w'] - stw) // 2, sb['y'] + (sb['h'] + sth) // 2, fs, self.COLORS['text_primary'], ft)
-
-    def _draw_tut_type_button(self, img, btn):
-        """Draw a tutorial-type selection button (title + subtitle lines)."""
-        x, y, w, h = btn['x'], btn['y'], btn['w'], btn['h']
-        pulse = 0.4 + 0.6 * abs(math.sin(self.glow_phase * 1.2))
-        self.draw_glow_rect(img, x, y, w, h, self.COLORS['button_hover'], pulse)
-        overlay = img.copy()
-        cv2.rectangle(overlay, (x + 3, y + 3), (x + w - 3, y + h - 3), self.COLORS['button_normal'], -1)
-        cv2.addWeighted(overlay, 0.7, img, 0.3, 0, img)
-
-        title_fs = text_scale(1.05, self.width, self.height, floor=0.92, ceiling=1.2)
-        title_ft = text_thickness(2, self.width, self.height, min_thickness=2, max_thickness=3)
-        title_fs = fit_text_scale(btn['title'], FONT_DISPLAY, w - 30, title_fs, title_ft, min_scale=0.78)
-        (tw, th), _ = get_text_size(btn['title'], FONT_DISPLAY, title_fs, title_ft)
-        draw_text(img, btn['title'], x + (w - tw) // 2, y + h // 2 - 10, title_fs, self.COLORS['text_primary'], title_ft,
-                  font=FONT_DISPLAY, outline_color=self.COLORS['glow_cyan'], outline_extra=1)
-
-        sub_fs = text_scale(0.76, self.width, self.height, floor=0.66, ceiling=0.88)
-        sub_ft = text_thickness(1, self.width, self.height, min_thickness=1, max_thickness=2)
-        sub_fs = fit_text_scale(btn['subtitle'], _UI_FONT, w - 30, sub_fs, sub_ft, min_scale=0.6)
-        (sw, sh), _ = get_text_size(btn['subtitle'], _UI_FONT, sub_fs, sub_ft)
-        _put_text(img, btn['subtitle'], x + (w - sw) // 2, y + h // 2 + th + 12, sub_fs, self.COLORS['text_accent'], sub_ft)
-
+    
     def draw_mode_button(self, img, button_data):
         x, y, w, h = button_data['x'], button_data['y'], button_data['w'], button_data['h']
         pulse = 0.4 + 0.6 * abs(math.sin(self.glow_phase * 1.2))
@@ -1007,10 +793,6 @@ class SewBotApp:
                         self.music_manager.play('main_menu.mp3', loops=-1, fade_ms=1000)
                     elif self.state == 'tutorial':
                         self.music_manager.play('tutorial.mp3', loops=-1, fade_ms=1000)
-                    elif self.state == 'embroidery_tutorial':
-                        self.music_manager.play('tutorial.mp3', loops=-1, fade_ms=1000)
-                    elif self.state == 'tutorial_selection':
-                        self.music_manager.play('tutorial.mp3', loops=-1, fade_ms=1000)
                     elif self.state == 'mode_selection':
                         self.music_manager.play('mode_selection.mp3', loops=-1, fade_ms=1000)
                     elif self.state == 'wallet_tutorial':
@@ -1027,10 +809,6 @@ class SewBotApp:
                     self.draw_main_menu(frame)
                 elif self.state == 'tutorial':
                     self.draw_tutorial(frame)
-                elif self.state == 'embroidery_tutorial':
-                    self.draw_embroidery_tutorial(frame)
-                elif self.state == 'tutorial_selection':
-                    self.draw_tutorial_selection(frame)
                 elif self.state == 'wallet_tutorial':
                     self.draw_wallet_tutorial(frame)
                 elif self.state == 'mode_selection':
@@ -1039,7 +817,11 @@ class SewBotApp:
                     self.draw_level_selection(frame)
                 elif self.state == 'pattern':
                     # Get camera frame
-                    camera_frame = self.get_latest_camera_frame()
+                    camera_frame = None
+                    if self.camera is not None and self.camera.isOpened():
+                        ret, camera_frame = self.camera.read()
+                        if not ret:
+                            camera_frame = None
                     
                     # Draw pattern mode
                     self.pattern_mode.draw(frame, camera_frame, self.grid_background)
@@ -1052,7 +834,7 @@ class SewBotApp:
                 
                 # Check if window was closed (X button clicked)
                 # This needs to be checked after imshow
-                key = cv2.waitKey(1) & 0xFF
+                key = cv2.waitKey(30) & 0xFF
                 
                 # Handle keyboard shortcuts
                 if key == ord('f') or key == ord('F'):  # F key to toggle fullscreen
@@ -1073,21 +855,7 @@ class SewBotApp:
                     elif key == ord('-') or key == ord('_'):  # Decrease confidence threshold
                         self.pattern_mode.confidence_threshold = max(0.1, self.pattern_mode.confidence_threshold - 0.05)
                         print(f"Confidence threshold: {self.pattern_mode.confidence_threshold:.2f}")
-                    elif key == ord(']'):
-                        # Increase auto-move speed
-                        self.pattern_mode.auto_move_speed = min(5.0, round(self.pattern_mode.auto_move_speed + 0.1, 2))
-                        print(f"Auto-move speed: {self.pattern_mode.auto_move_speed:.2f}")
-                    elif key == ord('['):
-                        # Decrease auto-move speed
-                        self.pattern_mode.auto_move_speed = max(0.1, round(self.pattern_mode.auto_move_speed - 0.1, 2))
-                        print(f"Auto-move speed: {self.pattern_mode.auto_move_speed:.2f}")
-
-                now = time.perf_counter()
-                dt = max(1e-6, now - self.last_frame_time)
-                self.last_frame_time = now
-                instant_fps = 1.0 / dt
-                self.smoothed_fps = self.smoothed_fps * 0.9 + instant_fps * 0.1
-
+                
                 # Check window property to detect X button click
                 try:
                     if cv2.getWindowProperty(self.window_name, cv2.WND_PROP_VISIBLE) < 1:
@@ -1106,7 +874,6 @@ class SewBotApp:
         
         self.release_camera()
         self.tutorial_player.cleanup()
-        self.embroidery_tutorial_player.cleanup()
         self.wallet_tutorial_player.cleanup()
         
         # Cleanup music system

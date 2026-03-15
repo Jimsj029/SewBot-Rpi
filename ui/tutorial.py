@@ -4,7 +4,6 @@ import cv2
 import numpy as np
 import math
 import os
-import re
 import sys
 import time
 
@@ -63,7 +62,6 @@ FONTS = {
 }
 
 UI_FONT = FONT_MAIN
-SUPPORTED_VIDEO_EXTENSIONS = {'.mp4', '.mov', '.avi', '.mkv'}
 
 
 def _put_text(img, text, x, y, scale, color, thickness):
@@ -71,33 +69,10 @@ def _put_text(img, text, x, y, scale, color, thickness):
     draw_text(img, text, x, y, scale, color, thickness, font=UI_FONT)
 
 
-def _natural_sort_key(value):
-    parts = re.split(r'(\d+)', value)
-    return [int(part) if part.isdigit() else part.lower() for part in parts]
-
-
-def _discover_video_files(folder_path):
-    if not os.path.isdir(folder_path):
-        return []
-
-    video_paths = []
-    for file_name in os.listdir(folder_path):
-        full_path = os.path.join(folder_path, file_name)
-        if not os.path.isfile(full_path):
-            continue
-        if os.path.splitext(file_name)[1].lower() not in SUPPORTED_VIDEO_EXTENSIONS:
-            continue
-        video_paths.append(full_path)
-
-    return sorted(video_paths, key=lambda path: _natural_sort_key(os.path.basename(path)))
-
-
 class TutorialPlayer:
-    def __init__(self, width=800, height=600, video_path=None, audio_path=None,
-                 videos_subfolder='Sewing', tutorial_label='TUTORIAL'):
+    def __init__(self, width=800, height=600, video_path=None, audio_path=None):
         self.width = width
         self.height = height
-        self.tutorial_label = tutorial_label
         self.glow_phase = 0
         self.skipped = False
         self.completed = False
@@ -107,10 +82,10 @@ class TutorialPlayer:
         self.progress_bar = {'x': 0, 'y': 0, 'w': 0, 'h': 0}
         
         # Multi-video support for tutorial steps
-        self.current_step = 0
-        self.total_steps = 1
-        self.videos_base_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'videos', videos_subfolder)
-        self.video_files = []
+        self.current_step = 0  # Current video index (0-4 for 5 videos)
+        self.total_steps = 8
+        self.videos_base_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'videos', 'sewing-set-up')
+        self.video_files = []  # Will store paths to step1.mov through step5.mov
         self.load_video_list()
         
         # Video capture
@@ -204,18 +179,41 @@ class TutorialPlayer:
         }
     
     def load_video_list(self):
-        """Load tutorial videos by scanning the selected videos subfolder."""
-        self.video_files = _discover_video_files(self.videos_base_path)
-
-        if not self.video_files:
-            self.video_files = [None]
-            self.total_steps = 1
-            print(f"Warning: no tutorial videos found in {self.videos_base_path}")
-            return
-
-        self.total_steps = len(self.video_files)
-        for video_path in self.video_files:
-            print(f"Found tutorial video: {os.path.basename(video_path)}")
+        """Load the list of tutorial video files (step1 through step5)"""
+        self.video_files = []
+        
+        # Check for step1.mov/mp4 through step5.mov/mp4
+        for i in range(1, self.total_steps + 1):
+            # Try both .mov and .mp4 extensions
+            video_found = False
+            # Try different naming patterns: "Step 1.MOV", "step1.mov", "step 1.mov", etc.
+            patterns = [
+                f'Step {i}.MOV',
+                f'Step {i}.mov',
+                f'Step {i}.MP4',
+                f'Step {i}.mp4',
+                f'step{i}.MOV',
+                f'step{i}.mov',
+                f'step{i}.MP4',
+                f'step{i}.mp4',
+                f'step {i}.MOV',
+                f'step {i}.mov',
+                f'step {i}.MP4',
+                f'step {i}.mp4',
+            ]
+            
+            for pattern in patterns:
+                video_path = os.path.join(self.videos_base_path, pattern)
+                if os.path.exists(video_path):
+                    self.video_files.append(video_path)
+                    video_found = True
+                    print(f"Found tutorial video: {pattern}")
+                    break
+            
+            if not video_found:
+                # Add None as placeholder if video not found
+                self.video_files.append(None)
+                print(f"Warning: step{i} video not found in {self.videos_base_path}")
     
     def load_current_video(self):
         """Load the video for the current step"""
@@ -614,7 +612,7 @@ class TutorialPlayer:
             
         else:
             # Completed or skipped
-            title = f"{self.tutorial_label} COMPLETED" if self.completed else self.tutorial_label
+            title = "TUTORIAL COMPLETED" if self.completed else "TUTORIAL"
             font_scale = text_scale(1.5, self.width, self.height, floor=1.25, ceiling=1.7)
             thickness = text_thickness(3, self.width, self.height, min_thickness=2, max_thickness=4)
             font_scale = fit_text_scale(title, UI_FONT, self.width - 80, font_scale, thickness, min_scale=1.0)
@@ -635,20 +633,26 @@ class TutorialPlayer:
         font_scale = text_scale(0.88, self.width, self.height, floor=0.76, ceiling=0.98)
         thickness = text_thickness(2, self.width, self.height, min_thickness=2, max_thickness=3)
         font_scale = fit_text_scale(text, UI_FONT, self.width - 220, font_scale, thickness, min_scale=0.68)
-
+        
         (text_w, text_h), baseline = get_text_size(text, UI_FONT, font_scale, thickness)
+        # Keep centered horizontally, align vertically with skip all button
         text_x = (self.width - text_w) // 2
-        text_y = 20 + (50 + text_h) // 2
-
+        text_y = 20 + (50 + text_h) // 2  # Same Y position as skip all button
+        
+        # Background for better visibility
         padding = 10
-        cv2.rectangle(img,
+        cv2.rectangle(img, 
                      (text_x - padding, text_y - text_h - padding),
                      (text_x + text_w + padding, text_y + padding),
                      (40, 40, 40), -1)
-        cv2.rectangle(img,
+        
+        # Border
+        cv2.rectangle(img, 
                      (text_x - padding, text_y - text_h - padding),
                      (text_x + text_w + padding, text_y + padding),
                      COLORS['cyan'], 2)
+        
+        # Text
         _put_text(img, text, text_x, text_y, font_scale, COLORS['text_accent'], thickness)
     
     def cleanup(self):
