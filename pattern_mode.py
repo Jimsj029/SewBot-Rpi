@@ -1317,18 +1317,39 @@ class PatternMode:
                 key=_sort_key_for_level
             )
 
-        dfs_stack = [(start, _get_sorted_unvisited(start))]
-        while dfs_stack:
-            node, children = dfs_stack[-1]
-            while children and children[0] in visited:
-                children.pop(0)
-            if not children:
-                dfs_stack.pop()
-            else:
-                nxt = children.pop(0)
-                visited.add(nxt)
-                path_yx.append(nxt)
-                dfs_stack.append((nxt, _get_sorted_unvisited(nxt)))
+        def _run_dfs_from(seed):
+            stack = [(seed, _get_sorted_unvisited(seed))]
+            while stack:
+                node, children = stack[-1]
+                while children and children[0] in visited:
+                    children.pop(0)
+                if not children:
+                    stack.pop()
+                else:
+                    nxt = children.pop(0)
+                    visited.add(nxt)
+                    path_yx.append(nxt)
+                    stack.append((nxt, _get_sorted_unvisited(nxt)))
+
+        _run_dfs_from(start)
+
+        # ── Bridge disconnected skeleton fragments ────────────────────────────
+        # The skeleton may have tiny gaps (disconnected components) due to
+        # thresholding or inner-corner artefacts.  Jump from the last visited
+        # point to the nearest unvisited pixel and continue DFS until every
+        # skeleton pixel is part of the path.
+        remaining = skel_set - visited
+        while remaining:
+            last_y, last_x = path_yx[-1]
+            rem_list = list(remaining)
+            rem_arr = np.array(rem_list, dtype=np.float32)
+            dists = (rem_arr[:, 0] - last_y) ** 2 + (rem_arr[:, 1] - last_x) ** 2
+            bridge_pt = rem_list[int(np.argmin(dists))]
+            visited.add(bridge_pt)
+            remaining.discard(bridge_pt)
+            path_yx.append(bridge_pt)
+            _run_dfs_from(bridge_pt)
+            remaining -= visited
 
         # ── Convert (y, x) list → (x, y) int32 array ─────────────────────────
         result = np.array([[x, y] for y, x in path_yx], dtype=np.int32)
@@ -1916,7 +1937,7 @@ class PatternMode:
                                 if _pi <= cur_idx:
                                     cv2.circle(cam_frame, (_px, _py), 2, (0, 220, 220), -1)  # cyan = done
                                 else:
-                                    cv2.circle(cam_frame, (_px, _py), 2, (0, 200, 255), -1)  # yellow = to do
+                                    cv2.circle(cam_frame, (_px, _py), 2, (255, 255, 255), -1)  # white = to do
                     # ─────────────────────────────────────────────────────────────
 
                     # Use the updated index immediately for follow validation.
