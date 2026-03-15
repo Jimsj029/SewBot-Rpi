@@ -1213,16 +1213,17 @@ class PatternMode:
         return result
 
     def _build_skeleton_path(self, pattern_alpha, actual_w, actual_h):
-        """Build a simple center path directly from the overlay mask.
+        """Build a center path directly from the overlay mask.
 
-        Uses the same V-shape style pathing (column-midpoint scan) for levels
-        2/3/4/5 so movement and centerline behavior is consistent across those
-        levels. Level 1 keeps row-midpoint scan.
+        - Level 1: row-midpoint scan
+        - Levels 2/5: column-midpoint scan
+        - Levels 3/4: true skeleton centerline path from endpoint to endpoint
         """
         if self._cached_skeleton_path is not None:
             return self._cached_skeleton_path
 
         pat_crop = pattern_alpha[:actual_h, :actual_w]
+        bin_mask = (pat_crop > self.pattern_alpha_threshold).astype(np.uint8)
         path_points = []
 
         def _contiguous_runs(values):
@@ -1238,8 +1239,95 @@ class PatternMode:
             runs.append((s, p))
             return runs
 
-        # Levels 2/3/4/5: scan columns (x changes, y follows nearest run midpoint)
-        if self.current_level in (2, 3, 4, 5):
+        # Levels 3/4: build a true centerline using skeleton endpoints.
+        if self.current_level in (3, 4):
+            skel = None
+            try:
+                from skimage.morphology import skeletonize as _sk
+                skel = _sk(bin_mask.astype(bool)).astype(np.uint8)
+            except Exception:
+                pass
+            if skel is None:
+                try:
+                    skel = cv2.ximgproc.thinning(bin_mask * 255) // 255
+                except Exception:
+                    pass
+            if skel is None:
+                skel = bin_mask.copy()
+
+            ys, xs = np.where(skel > 0)
+            if ys.size > 0:
+                node_set = set(zip(ys.tolist(), xs.tolist()))  # (y, x)
+
+                def _neighbors(node):
+                    y, x = node
+                    out = []
+                    for dy in (-1, 0, 1):
+                        for dx in (-1, 0, 1):
+                            if dy == 0 and dx == 0:
+                                continue
+                            nb = (y + dy, x + dx)
+                            if nb in node_set:
+                                out.append(nb)
+                    return out
+
+                endpoints = [node for node in node_set if len(_neighbors(node)) == 1]
+
+                if len(endpoints) >= 2:
+                    # Pick farthest endpoints as path terminals
+                    a = endpoints[0]
+                    b = endpoints[1]
+                    best_d2 = -1
+                    for i in range(len(endpoints)):
+                        yi, xi = endpoints[i]
+                        for j in range(i + 1, len(endpoints)):
+                            yj, xj = endpoints[j]
+                            d2 = (yi - yj) * (yi - yj) + (xi - xj) * (xi - xj)
+                            if d2 > best_d2:
+                                best_d2 = d2
+                                a, b = endpoints[i], endpoints[j]
+
+                    # BFS shortest path on skeleton graph from a -> b
+                    queue = [a]
+                    parent = {a: None}
+                    head = 0
+                    while head < len(queue):
+                        cur = queue[head]
+                        head += 1
+                        if cur == b:
+                            break
+                        for nb in _neighbors(cur):
+                            if nb not in parent:
+                                parent[nb] = cur
+                                queue.append(nb)
+
+                    if b in parent:
+                        rev = []
+                        cur = b
+                        while cur is not None:
+                            rev.append(cur)
+                            cur = parent[cur]
+                        rev.reverse()
+                        path_points = [(x, y) for (y, x) in rev]
+
+                # Fallback if endpoints are unavailable or path was not found
+                if not path_points:
+                    prev_mid = None
+                    for y in range(actual_h):
+                        xs = np.where(bin_mask[y, :] > 0)[0]
+                        if xs.size == 0:
+                            continue
+                        runs = _contiguous_runs(xs)
+                        mids = [(a + b) // 2 for a, b in runs]
+                        if prev_mid is None:
+                            mid = mids[0]
+                        else:
+                            mid = min(mids, key=lambda m: abs(m - prev_mid))
+                        path_points.append((mid, y))
+                        prev_mid = mid
+
+        # Levels 2/5: scan columns (x changes, y follows nearest run midpoint)
+        elif self.current_level in (2, 5):
             prev_mid = None
             for x in range(actual_w):
                 ys = np.where(pat_crop[:, x] > self.pattern_alpha_threshold)[0]
