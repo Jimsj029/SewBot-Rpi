@@ -1357,7 +1357,43 @@ class PatternMode:
 
                         refined_points.append((int(x), int(y)))
 
-                    path_points = refined_points
+                    # Smooth local kinks, then snap back to the local midpoint.
+                    pts = np.array(refined_points, dtype=np.float32)
+                    if len(pts) >= 5:
+                        kernel = np.array([1.0, 2.0, 3.0, 2.0, 1.0], dtype=np.float32)
+                        kernel /= float(np.sum(kernel))
+                        pad = 2
+                        px = np.pad(pts[:, 0], (pad, pad), mode='edge')
+                        py = np.pad(pts[:, 1], (pad, pad), mode='edge')
+                        sx = np.convolve(px, kernel, mode='valid')
+                        sy = np.convolve(py, kernel, mode='valid')
+
+                        smoothed_points = []
+                        for idx in range(len(pts)):
+                            x = int(np.clip(round(sx[idx]), 0, actual_w - 1))
+                            y = int(np.clip(round(sy[idx]), 0, actual_h - 1))
+
+                            prev_x = int(np.clip(round(sx[max(0, idx - 1)]), 0, actual_w - 1))
+                            prev_y = int(np.clip(round(sy[max(0, idx - 1)]), 0, actual_h - 1))
+                            next_x = int(np.clip(round(sx[min(len(pts) - 1, idx + 1)]), 0, actual_w - 1))
+                            next_y = int(np.clip(round(sy[min(len(pts) - 1, idx + 1)]), 0, actual_h - 1))
+                            dx = next_x - prev_x
+                            dy = next_y - prev_y
+
+                            if abs(dx) >= abs(dy):
+                                y_candidates = np.where(bin_mask[:, x] > 0)[0]
+                                if y_candidates.size > 0:
+                                    y = _pick_mid_from_runs(y_candidates, y)
+                            else:
+                                x_candidates = np.where(bin_mask[y, :] > 0)[0]
+                                if x_candidates.size > 0:
+                                    x = _pick_mid_from_runs(x_candidates, x)
+
+                            smoothed_points.append((int(x), int(y)))
+
+                        path_points = smoothed_points
+                    else:
+                        path_points = refined_points
 
                 # Fallback if endpoints are unavailable or path was not found
                 if not path_points:
