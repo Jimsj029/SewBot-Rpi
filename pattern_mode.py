@@ -1388,39 +1388,16 @@ class PatternMode:
 
                 endpoints = [node for node in node_set if len(_neighbors(node)) == 1]
                 if endpoints:
-                    if len(endpoints) >= 2:
-                        # Pick endpoint pair with longest geodesic distance.
-                        best_pair = None
-                        best_dist = -1
-                        for ep in endpoints:
-                            far_ep, _parent, _dist = _bfs(ep)
-                            if far_ep in endpoints:
-                                d = int(_dist.get(far_ep, -1))
-                                if d > best_dist:
-                                    best_dist = d
-                                    best_pair = (ep, far_ep)
-                        if best_pair is None:
-                            best_pair = (endpoints[0], endpoints[-1])
+                    # Start from the true visual start: top-most endpoint (then left-most tie-break).
+                    start_node = min(endpoints, key=lambda p: (p[0], p[1]))
 
-                        if middle_points is not None and len(middle_points) > 0:
-                            first_mid = middle_points[0]
-                            last_mid = middle_points[-1]
-
-                            def _dist2_node_to_mid(node, mid):
-                                ny, nx = node
-                                mx, my = int(mid[0]), int(mid[1])
-                                return (nx - mx) ** 2 + (ny - my) ** 2
-
-                            a, b = best_pair
-                            ab_score = _dist2_node_to_mid(a, first_mid) + _dist2_node_to_mid(b, last_mid)
-                            ba_score = _dist2_node_to_mid(b, first_mid) + _dist2_node_to_mid(a, last_mid)
-                            start_node, end_node = (a, b) if ab_score <= ba_score else (b, a)
-                        else:
-                            # Prefer top-left as start for stable progression.
-                            start_node, end_node = sorted(best_pair, key=lambda p: (p[0], p[1]))
+                    # End at the farthest reachable endpoint from start, so traversal
+                    # follows the full skeleton from start point through the middle.
+                    far_node, _parent, _dist = _bfs(start_node)
+                    reachable_eps = [ep for ep in endpoints if _dist.get(ep, -1) >= 0]
+                    if reachable_eps:
+                        end_node = max(reachable_eps, key=lambda p: (_dist.get(p, -1), p[0], p[1]))
                     else:
-                        start_node = endpoints[0]
-                        far_node, _parent, _dist = _bfs(start_node)
                         end_node = far_node
                 else:
                     start_node = min(node_set, key=lambda p: (p[0], p[1]))
@@ -1862,8 +1839,8 @@ class PatternMode:
                             seed_idx = (self.skeleton_completed_lock_idx
                                         if self.skeleton_completed_lock_idx is not None
                                         else skel_max_idx)
-                        elif self.current_level in (2, 3):
-                            # Force a clean left-top start for Levels 2/3 every run.
+                        elif self.current_level in (2, 3, 4):
+                            # Force a clean start-point seed for Levels 2/3/4 every run.
                             seed_idx = 0
                         elif self.raw_progress <= 0.0:
                             seed_idx = 0
