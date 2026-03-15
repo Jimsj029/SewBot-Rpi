@@ -1639,6 +1639,14 @@ class PatternMode:
 
             # Pattern overlay — pattern stays fixed; needle (red dot) slides along skeleton.
             if pattern_overlay is not None and pattern_alpha is not None:
+                # Initialize debug fields so the overlay shows something
+                # even if later logic doesn't populate them.
+                self.debug_last_seeded = getattr(self, 'debug_last_seeded', False)
+                self.debug_last_cur_idx = getattr(self, 'debug_last_cur_idx', None)
+                self.debug_last_exp = getattr(self, 'debug_last_exp', None)
+                self.debug_last_x_offset = getattr(self, 'debug_last_x_offset', None)
+                self.debug_pattern_present = True
+
                 overlay_h, overlay_w = pattern_overlay.shape[:2]
 
                 # Keep centerline for downstream validation pipeline (unchanged).
@@ -1868,6 +1876,11 @@ class PatternMode:
                     exp_y = overlay_h // 2
                     x_offset = int(round(self.NEEDLE_ROI_X)) - exp_x
                     y_offset = int(round(self.NEEDLE_ROI_Y)) - exp_y
+                    # Store debug info for the no-skeleton path
+                    self.debug_last_cur_idx = None
+                    self.debug_last_exp = (int(exp_x), int(exp_y))
+                    self.debug_last_x_offset = int(x_offset)
+                    self.debug_last_seeded = False
 
                 # Fallback anchoring when skeleton is unavailable.
                 if skeleton_path is None or len(skeleton_path) == 0:
