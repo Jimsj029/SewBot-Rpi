@@ -1239,7 +1239,7 @@ class PatternMode:
             runs.append((s, p))
             return runs
 
-        # Levels 3/4: build a true centerline using skeleton endpoints.
+        # Levels 3/4: traverse the full skeleton centerline graph (all branches).
         if self.current_level in (3, 4):
             skel = None
             try:
@@ -1271,44 +1271,77 @@ class PatternMode:
                                 out.append(nb)
                     return out
 
+                # Pick deterministic start: top-most then left-most endpoint,
+                # fallback to top-left skeleton node.
                 endpoints = [node for node in node_set if len(_neighbors(node)) == 1]
+                if endpoints:
+                    start = min(endpoints, key=lambda p: (p[0], p[1]))
+                else:
+                    start = min(node_set, key=lambda p: (p[0], p[1]))
 
-                if len(endpoints) >= 2:
-                    # Pick farthest endpoints as path terminals
-                    a = endpoints[0]
-                    b = endpoints[1]
-                    best_d2 = -1
-                    for i in range(len(endpoints)):
-                        yi, xi = endpoints[i]
-                        for j in range(i + 1, len(endpoints)):
-                            yj, xj = endpoints[j]
-                            d2 = (yi - yj) * (yi - yj) + (xi - xj) * (xi - xj)
-                            if d2 > best_d2:
-                                best_d2 = d2
-                                a, b = endpoints[i], endpoints[j]
+                def _ordered_neighbors(node):
+                    return sorted(_neighbors(node), key=lambda p: (p[0], p[1]))
 
-                    # BFS shortest path on skeleton graph from a -> b
-                    queue = [a]
-                    parent = {a: None}
-                    head = 0
-                    while head < len(queue):
-                        cur = queue[head]
-                        head += 1
-                        if cur == b:
+                # Edge-based DFS walk with explicit backtracking entries so the
+                # path is continuous and covers all branches.
+                walked = [start]
+                visited_edges = set()
+
+                def _edge_key(a, b):
+                    return (a, b) if a <= b else (b, a)
+
+                stack = [(start, _ordered_neighbors(start))]
+                while stack:
+                    node, children = stack[-1]
+                    moved = False
+                    while children:
+                        nb = children.pop(0)
+                        ek = _edge_key(node, nb)
+                        if ek in visited_edges:
+                            continue
+                        visited_edges.add(ek)
+                        walked.append(nb)
+                        stack.append((nb, _ordered_neighbors(nb)))
+                        moved = True
+                        break
+                    if not moved:
+                        stack.pop()
+                        if stack:
+                            walked.append(stack[-1][0])
+
+                # If thinning produced disconnected components, bridge to each
+                # remaining component and continue walking its edges.
+                visited_nodes = set(walked)
+                remaining = node_set - visited_nodes
+                while remaining:
+                    last = walked[-1]
+                    rem_list = list(remaining)
+                    rem_arr = np.array(rem_list, dtype=np.float32)
+                    d2 = (rem_arr[:, 0] - last[0]) ** 2 + (rem_arr[:, 1] - last[1]) ** 2
+                    comp_start = rem_list[int(np.argmin(d2))]
+                    walked.append(comp_start)
+                    stack = [(comp_start, _ordered_neighbors(comp_start))]
+                    while stack:
+                        node, children = stack[-1]
+                        moved = False
+                        while children:
+                            nb = children.pop(0)
+                            ek = _edge_key(node, nb)
+                            if ek in visited_edges:
+                                continue
+                            visited_edges.add(ek)
+                            walked.append(nb)
+                            stack.append((nb, _ordered_neighbors(nb)))
+                            moved = True
                             break
-                        for nb in _neighbors(cur):
-                            if nb not in parent:
-                                parent[nb] = cur
-                                queue.append(nb)
+                        if not moved:
+                            stack.pop()
+                            if stack:
+                                walked.append(stack[-1][0])
+                    visited_nodes = set(walked)
+                    remaining = node_set - visited_nodes
 
-                    if b in parent:
-                        rev = []
-                        cur = b
-                        while cur is not None:
-                            rev.append(cur)
-                            cur = parent[cur]
-                        rev.reverse()
-                        path_points = [(x, y) for (y, x) in rev]
+                path_points = [(x, y) for (y, x) in walked]
 
                 # Fallback if endpoints are unavailable or path was not found
                 if not path_points:
