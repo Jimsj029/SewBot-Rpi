@@ -1098,31 +1098,16 @@ class PatternMode:
         return self._cached_outline_mask
 
     def _get_centerline_mask(self, pattern_alpha, actual_w, actual_h):
-        """Return a full-branch centerline mask (uint8 0/255) for the pattern.
-
-        This finds the medial ridge from a distance transform, so the resulting
-        line sits near the geometric middle of the overlay thickness and includes
-        all branches, not just a single traversed path.
-        """
+        """Return a single-line center path mask derived from _build_skeleton_path."""
         if self._cached_centerline_mask is not None:
             return self._cached_centerline_mask
 
-        pat_crop = pattern_alpha[:actual_h, :actual_w]
-        pat_binary = (pat_crop > self.pattern_alpha_threshold).astype(np.uint8)
-        if int(np.count_nonzero(pat_binary)) == 0:
-            self._cached_centerline_mask = np.zeros_like(pat_binary, dtype=np.uint8)
-            return self._cached_centerline_mask
-
-        dist = cv2.distanceTransform(pat_binary, cv2.DIST_L2, 3)
-        # Local maxima of distance map (3x3) approximates medial axis ridge.
-        dist_dil = cv2.dilate(dist, np.ones((3, 3), np.uint8))
-        ridge = (dist >= (dist_dil - 1e-6)) & (pat_binary > 0) & (dist > 0.5)
-        center = (ridge.astype(np.uint8) * 255)
-
-        # Light cleanup to drop isolated single-pixel noise while preserving branches.
-        if int(np.count_nonzero(center)) > 0:
-            k = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
-            center = cv2.morphologyEx(center, cv2.MORPH_OPEN, k)
+        center = np.zeros((actual_h, actual_w), dtype=np.uint8)
+        path = self._build_skeleton_path(pattern_alpha, actual_w, actual_h)
+        if path is not None and len(path) > 0:
+            for x, y in path:
+                if 0 <= int(x) < actual_w and 0 <= int(y) < actual_h:
+                    center[int(y), int(x)] = 255
 
         self._cached_centerline_mask = center
         return self._cached_centerline_mask
@@ -1271,7 +1256,7 @@ class PatternMode:
             runs.append((s, p))
             return runs
 
-        # Levels 3/4: traverse the full skeleton centerline graph (all branches).
+        # Levels 3/4: use a single continuous skeleton centerline path.
         if self.current_level in (3, 4):
             skel = None
             try:
@@ -1303,77 +1288,41 @@ class PatternMode:
                                 out.append(nb)
                     return out
 
-                # Pick deterministic start: top-most then left-most endpoint,
-                # fallback to top-left skeleton node.
                 endpoints = [node for node in node_set if len(_neighbors(node)) == 1]
+                def _bfs_farthest(start_node):
+                    queue = [start_node]
+                    parent = {start_node: None}
+                    dist = {start_node: 0}
+                    head = 0
+                    farthest = start_node
+                    while head < len(queue):
+                        cur = queue[head]
+                        head += 1
+                        if dist[cur] > dist[farthest]:
+                            farthest = cur
+                        for nb in _neighbors(cur):
+                            if nb not in parent:
+                                parent[nb] = cur
+                                dist[nb] = dist[cur] + 1
+                                queue.append(nb)
+                    return farthest, parent, dist
+
                 if endpoints:
-                    start = min(endpoints, key=lambda p: (p[0], p[1]))
+                    seed = min(endpoints, key=lambda p: (p[0], p[1]))
                 else:
-                    start = min(node_set, key=lambda p: (p[0], p[1]))
+                    seed = min(node_set, key=lambda p: (p[0], p[1]))
 
-                def _ordered_neighbors(node):
-                    return sorted(_neighbors(node), key=lambda p: (p[0], p[1]))
+                # Graph diameter path on the skeleton tree/graph.
+                a, _, _ = _bfs_farthest(seed)
+                b, parent, _ = _bfs_farthest(a)
 
-                # Edge-based DFS walk with explicit backtracking entries so the
-                # path is continuous and covers all branches.
-                walked = [start]
-                visited_edges = set()
-
-                def _edge_key(a, b):
-                    return (a, b) if a <= b else (b, a)
-
-                stack = [(start, _ordered_neighbors(start))]
-                while stack:
-                    node, children = stack[-1]
-                    moved = False
-                    while children:
-                        nb = children.pop(0)
-                        ek = _edge_key(node, nb)
-                        if ek in visited_edges:
-                            continue
-                        visited_edges.add(ek)
-                        walked.append(nb)
-                        stack.append((nb, _ordered_neighbors(nb)))
-                        moved = True
-                        break
-                    if not moved:
-                        stack.pop()
-                        if stack:
-                            walked.append(stack[-1][0])
-
-                # If thinning produced disconnected components, bridge to each
-                # remaining component and continue walking its edges.
-                visited_nodes = set(walked)
-                remaining = node_set - visited_nodes
-                while remaining:
-                    last = walked[-1]
-                    rem_list = list(remaining)
-                    rem_arr = np.array(rem_list, dtype=np.float32)
-                    d2 = (rem_arr[:, 0] - last[0]) ** 2 + (rem_arr[:, 1] - last[1]) ** 2
-                    comp_start = rem_list[int(np.argmin(d2))]
-                    walked.append(comp_start)
-                    stack = [(comp_start, _ordered_neighbors(comp_start))]
-                    while stack:
-                        node, children = stack[-1]
-                        moved = False
-                        while children:
-                            nb = children.pop(0)
-                            ek = _edge_key(node, nb)
-                            if ek in visited_edges:
-                                continue
-                            visited_edges.add(ek)
-                            walked.append(nb)
-                            stack.append((nb, _ordered_neighbors(nb)))
-                            moved = True
-                            break
-                        if not moved:
-                            stack.pop()
-                            if stack:
-                                walked.append(stack[-1][0])
-                    visited_nodes = set(walked)
-                    remaining = node_set - visited_nodes
-
-                path_points = [(x, y) for (y, x) in walked]
+                rev = []
+                cur = b
+                while cur is not None:
+                    rev.append(cur)
+                    cur = parent[cur]
+                rev.reverse()
+                path_points = [(x, y) for (y, x) in rev]
 
                 # Fallback if endpoints are unavailable or path was not found
                 if not path_points:
@@ -1979,33 +1928,19 @@ class PatternMode:
 
                     pattern_src = realtime_pattern if realtime_pattern is not None else pattern_overlay
 
-                    # ── Draw full centerline guide in pattern space before blending ──
-                    # Use a medial centerline mask (all branches), not a single
-                    # traversed chain, so the guide reflects the middle of the
-                    # entire overlay shape.
+                    # ── Draw one-line guide path in pattern space before blending ──
                     _pat_display = pattern_src.copy()
-                    _center_mask = self._get_centerline_mask(pattern_alpha, actual_w, actual_h)
-                    if _center_mask is not None and int(np.count_nonzero(_center_mask)) > 0:
-                        cy_all, cx_all = np.where(_center_mask > 0)
-
-                        # Mark completed portions by overlap with completed stitch mask.
-                        _completed = self.completed_stitch_mask
-                        if _completed is None:
-                            _completed = np.zeros((_center_mask.shape[0], _center_mask.shape[1]), dtype=np.uint8)
-                        elif _completed.shape != _center_mask.shape:
-                            _completed = cv2.resize(_completed, (_center_mask.shape[1], _center_mask.shape[0]), interpolation=cv2.INTER_NEAREST)
-
-                        # Draw sampled points for speed on Pi while preserving full shape.
-                        _n = len(cx_all)
-                        _step = max(1, _n // 1800)
-                        for _i in range(0, _n, _step):
-                            _x = int(cx_all[_i])
-                            _y = int(cy_all[_i])
-                            if _completed[_y, _x] > 0:
+                    if movement_path is not None and len(movement_path) > 0:
+                        _path_len = len(movement_path)
+                        _dot_step = max(1, _path_len // 180)
+                        for _pi in range(0, _path_len, _dot_step):
+                            _x = int(movement_path[_pi][0])
+                            _y = int(movement_path[_pi][1])
+                            if _pi <= cur_idx:
                                 _dot_color = (0, 220, 220)  # cyan = done
                             else:
                                 _dot_color = (255, 255, 255)  # white = todo
-                            cv2.circle(_pat_display, (_x, _y), 1, _dot_color, -1)
+                            cv2.circle(_pat_display, (_x, _y), 2, _dot_color, -1)
 
                     # ── Blend full visible overlay ─────────────────────────────────
                     b_w = dst_x2 - dst_x1
