@@ -1259,6 +1259,7 @@ class PatternMode:
         # Levels 3/4: use a single continuous skeleton centerline path.
         if self.current_level in (3, 4):
             skel = None
+            dist_center = cv2.distanceTransform(bin_mask, cv2.DIST_L2, 3)
             try:
                 from skimage.morphology import skeletonize as _sk
                 skel = _sk(bin_mask.astype(bool)).astype(np.uint8)
@@ -1394,6 +1395,47 @@ class PatternMode:
                         path_points = smoothed_points
                     else:
                         path_points = refined_points
+
+                    # Final pass: project each point to the true local mask
+                    # center by maximizing the distance-transform value along
+                    # the local normal direction.
+                    centered_points = []
+                    path_len = len(path_points)
+                    normal_radius = 8
+                    for idx, (x, y) in enumerate(path_points):
+                        prev_x, prev_y = path_points[max(0, idx - 1)]
+                        next_x, next_y = path_points[min(path_len - 1, idx + 1)]
+                        tx = float(next_x - prev_x)
+                        ty = float(next_y - prev_y)
+                        norm = math.hypot(tx, ty)
+                        if norm < 1e-5:
+                            centered_points.append((int(x), int(y)))
+                            continue
+
+                        # Unit normal to the local tangent
+                        nx = -ty / norm
+                        ny = tx / norm
+
+                        best_x = int(x)
+                        best_y = int(y)
+                        best_score = -1.0
+                        best_offset = 0.0
+
+                        for step in range(-normal_radius, normal_radius + 1):
+                            sx = int(np.clip(round(x + nx * step), 0, actual_w - 1))
+                            sy = int(np.clip(round(y + ny * step), 0, actual_h - 1))
+                            if bin_mask[sy, sx] == 0:
+                                continue
+                            score = float(dist_center[sy, sx])
+                            if score > best_score or (abs(score - best_score) < 1e-6 and abs(step) < abs(best_offset)):
+                                best_score = score
+                                best_x = sx
+                                best_y = sy
+                                best_offset = float(step)
+
+                        centered_points.append((best_x, best_y))
+
+                    path_points = centered_points
 
                     # Force the one-line path to start at the very top.
                     if len(path_points) >= 2:
