@@ -1650,6 +1650,17 @@ class PatternMode:
                 validation_path = skeleton_path if (skeleton_path is not None and len(skeleton_path) > 0) else centerline_path
                 expected_path_idx = None
 
+                # If sewing hasn't started yet, ensure the seed logic will
+                # position the pattern start under the ROI centre by forcing
+                # `skeleton_seeded` to False and updating the ROI anchor to
+                # the current camera area centre. This helps when returning
+                # from other screens or after a restart.
+                if not self.sewing_started:
+                    self.skeleton_seeded = False
+                    # Update ROI anchor from camera area in case of runtime differences
+                    self.NEEDLE_ROI_X = int(self.camera_width // 2)
+                    self.NEEDLE_ROI_Y = int(self.camera_height // 2)
+
                 if skeleton_path is not None and len(skeleton_path) > 0:
                     skel_max_idx = len(skeleton_path) - 1
 
@@ -1661,21 +1672,29 @@ class PatternMode:
 
                     # ── Seed once: fix pattern position on screen, start at skeleton[0] ──
                     if not self.skeleton_seeded:
-                        if _is_completed:
-                            # Already finished — re-seed at the lock point so the
-                            # needle stays on the final stitch and doesn't jump.
-                            seed_idx = (self.skeleton_completed_lock_idx
-                                        if self.skeleton_completed_lock_idx is not None
-                                        else skel_max_idx)
-                        elif self.current_level in (2, 3):
-                            # Force a clean left-top start for Levels 2/3 every run.
-                            seed_idx = 0
-                        elif self.raw_progress <= 0.0:
+                        # If sewing hasn't started yet, always position the
+                        # pattern so the start of the skeleton (index 0)
+                        # sits beneath the ROI centre. This ensures the
+                        # overlay start is aligned with the middle ROI on
+                        # both PC and RPi displays.
+                        if not self.sewing_started:
                             seed_idx = 0
                         else:
-                            seed_idx = int(np.clip(
-                                round(self.raw_progress / 100.0 * skel_max_idx),
-                                0, skel_max_idx))
+                            if _is_completed:
+                                # Already finished — re-seed at the lock point so the
+                                # needle stays on the final stitch and doesn't jump.
+                                seed_idx = (self.skeleton_completed_lock_idx
+                                            if self.skeleton_completed_lock_idx is not None
+                                            else skel_max_idx)
+                            elif self.current_level in (2, 3):
+                                # Force a clean left-top start for Levels 2/3 every run.
+                                seed_idx = 0
+                            elif self.raw_progress <= 0.0:
+                                seed_idx = 0
+                            else:
+                                seed_idx = int(np.clip(
+                                    round(self.raw_progress / 100.0 * skel_max_idx),
+                                    0, skel_max_idx))
                         self.skeleton_idx_f   = float(seed_idx)
                         # Position pattern so skeleton[seed_idx] sits at the default needle pos.
                         self.skeleton_offset_x = float(self.NEEDLE_ROI_X) - float(skeleton_path[seed_idx][0])
