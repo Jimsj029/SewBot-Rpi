@@ -1215,11 +1215,9 @@ class PatternMode:
     def _build_skeleton_path(self, pattern_alpha, actual_w, actual_h):
         """Build a simple center path directly from the overlay mask.
 
-        - Levels 2/5: column-midpoint scan (works well for V/U-like shapes).
-        - Levels 1/3/4: row-midpoint scan (works better for vertical/zigzag arcs).
-
-        This keeps the guide line centered in the visible overlay per level
-        without relying on thinning/skeleton libraries.
+        Uses the same V-shape style pathing (column-midpoint scan) for levels
+        2/3/4/5 so movement and centerline behavior is consistent across those
+        levels. Level 1 keeps row-midpoint scan.
         """
         if self._cached_skeleton_path is not None:
             return self._cached_skeleton_path
@@ -1240,8 +1238,8 @@ class PatternMode:
             runs.append((s, p))
             return runs
 
-        # Levels 2/5: scan columns (x changes, y follows nearest run midpoint)
-        if self.current_level in (2, 5):
+        # Levels 2/3/4/5: scan columns (x changes, y follows nearest run midpoint)
+        if self.current_level in (2, 3, 4, 5):
             prev_mid = None
             for x in range(actual_w):
                 ys = np.where(pat_crop[:, x] > self.pattern_alpha_threshold)[0]
@@ -1254,41 +1252,6 @@ class PatternMode:
                 else:
                     mid = min(mids, key=lambda m: abs(m - prev_mid))
                 path_points.append((x, mid))
-                prev_mid = mid
-        elif self.current_level in (3, 4):
-            # Levels 3/4: detect the real stroke midpoint using distance-transform
-            # ridge values, then link smoothly row-by-row.
-            bin_mask = (pat_crop > self.pattern_alpha_threshold).astype(np.uint8)
-            dist = cv2.distanceTransform(bin_mask, cv2.DIST_L2, 3)
-            prev_mid = None
-            for y in range(actual_h):
-                xs = np.where(bin_mask[y, :] > 0)[0]
-                if xs.size == 0:
-                    continue
-                # Split into contiguous runs for this row
-                runs = _contiguous_runs(xs)
-
-                # Candidate point per run: x with highest DT value (true center)
-                run_candidates = []
-                for a, b in runs:
-                    run_xs = np.arange(a, b + 1)
-                    run_d = dist[y, run_xs]
-                    best_local_idx = int(np.argmax(run_d))
-                    cx = int(run_xs[best_local_idx])
-                    run_candidates.append((cx, float(run_d[best_local_idx])))
-
-                if prev_mid is None:
-                    # First row: choose strongest center candidate.
-                    mid = max(run_candidates, key=lambda item: item[1])[0]
-                else:
-                    # Keep path smooth: prioritize nearest candidate to previous x,
-                    # with a small tie-break toward stronger center points.
-                    mid = min(
-                        run_candidates,
-                        key=lambda item: (abs(item[0] - prev_mid), -item[1])
-                    )[0]
-
-                path_points.append((mid, y))
                 prev_mid = mid
         else:
             # Level 1: scan rows (y changes, x follows nearest run midpoint)
