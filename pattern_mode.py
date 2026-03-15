@@ -390,6 +390,8 @@ class PatternMode:
 
         # Music flag to track if music is playing
         self.music_playing = False
+        # Debug overlay: show runtime needle/pattern variables on-screen for tuning
+        self.debug_overlay = True
     
     def start_music(self):
         """Start pattern mode music"""
@@ -2013,6 +2015,26 @@ class PatternMode:
                 outline_color=(0, 0, 0),
                 outline_extra=1,
             )
+
+            # Debug overlay: show internal needle/pattern coordinates for live tuning
+            if getattr(self, 'debug_overlay', False):
+                dbg_scale = text_scale(0.45, self.width, self.height, floor=0.38, ceiling=0.6)
+                dbg_thick = text_thickness(1, self.width, self.height, min_thickness=1, max_thickness=2)
+                dbg_x = 8
+                dbg_y = 12
+                dbg_lines = []
+                dbg_lines.append(f"NEEDLE_ROI: {int(self.NEEDLE_ROI_X)},{int(self.NEEDLE_ROI_Y)}")
+                dbg_lines.append(f"needle_pos: {int(self.needle_pos_x)},{int(self.needle_pos_y)}")
+                dbg_lines.append(f"pattern_offset: {int(self.pattern_offset_x)},{int(self.pattern_offset_y)}")
+                # exp_x/exp_y may exist in scope when pattern present; otherwise skip
+                try:
+                    dbg_lines.append(f"exp: {int(exp_x)},{int(exp_y)}")
+                except Exception:
+                    pass
+                dbg_lines.append(f"camera_area: {self.camera_width}x{self.camera_height}")
+                # Draw each line top-left of camera feed
+                for i, ln in enumerate(dbg_lines):
+                    draw_text(cam_frame, ln, dbg_x, dbg_y + i * 18, dbg_scale, (220, 220, 220), dbg_thick, font=FONT_MAIN, outline_color=(0,0,0), outline_extra=1)
 
             # If progress reached 100%, show a prominent overlay on the camera
             if getattr(self, 'raw_progress', 0.0) >= 100.0:
