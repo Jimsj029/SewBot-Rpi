@@ -215,6 +215,11 @@ class WalletTutorialPlayer:
                         sess_options=_sess_opts,
                         providers=['CPUExecutionProvider'])
                     self.needle_input_name = self.needle_model.get_inputs()[0].name
+                    # Inspect model input shape and adjust image size if model requires different dims
+                    in_shape = self.needle_model.get_inputs()[0].shape
+                    if len(in_shape) >= 4 and isinstance(in_shape[2], int) and in_shape[2] > 0:
+                        self._needle_imgsz = int(in_shape[2])
+
                     # Warm-up run so first real frame isn't slow
                     _w = np.zeros((1, 3, self._needle_imgsz, self._needle_imgsz), dtype=np.float32)
                     self.needle_model.run(None, {self.needle_input_name: _w})
