@@ -1297,7 +1297,7 @@ class PatternMode:
 
         - Level 1: row-midpoint scan
         - Levels 2/5: column-midpoint scan
-        - Levels 3/4: full skeleton walk that covers the whole pattern
+        - Levels 3/4: true skeleton centerline path from endpoint to endpoint
         """
         cache_key = (int(self.current_level), int(actual_w), int(actual_h))
         if self._cached_skeleton_path is not None and self._cached_skeleton_key == cache_key:
@@ -1320,8 +1320,7 @@ class PatternMode:
             runs.append((s, p))
             return runs
 
-        # Levels 3/4: build a full walk on the skeleton graph so every branch
-        # can be accumulated over time (not just one endpoint-to-endpoint arm).
+        # Levels 3/4: follow a one-line center skeleton from top-left endpoint.
         if self.current_level in (3, 4):
             dist_center = cv2.distanceTransform(bin_mask, cv2.DIST_L2, 3)
             middle_points = self._extract_level34_middle_points(bin_mask, actual_w, actual_h)
@@ -1355,9 +1354,9 @@ class PatternMode:
 
             ys, xs = np.where(skel > 0)
             if ys.size > 0:
-                node_set_all = set(zip(ys.tolist(), xs.tolist()))  # (y, x)
+                node_set = set(zip(ys.tolist(), xs.tolist()))  # (y, x)
 
-                def _neighbors_from_set(node, nodes):
+                def _neighbors(node):
                     y, x = node
                     out = []
                     for dy in (-1, 0, 1):
@@ -1365,35 +1364,9 @@ class PatternMode:
                             if dy == 0 and dx == 0:
                                 continue
                             nb = (y + dy, x + dx)
-                            if nb in nodes:
+                            if nb in node_set:
                                 out.append(nb)
                     return out
-
-                # Keep only the largest connected skeleton component.
-                unvisited = set(node_set_all)
-                components = []
-                while unvisited:
-                    seed = next(iter(unvisited))
-                    queue = [seed]
-                    comp = {seed}
-                    unvisited.remove(seed)
-                    head = 0
-                    while head < len(queue):
-                        cur = queue[head]
-                        head += 1
-                        for nb in _neighbors_from_set(cur, node_set_all):
-                            if nb in unvisited:
-                                unvisited.remove(nb)
-                                comp.add(nb)
-                                queue.append(nb)
-                    components.append(comp)
-
-                node_set = max(components, key=len) if components else set()
-                if not node_set:
-                    node_set = node_set_all
-
-                def _neighbors(node):
-                    return _neighbors_from_set(node, node_set)
 
                 def _bfs(start_node):
                     queue = [start_node]
@@ -1415,69 +1388,68 @@ class PatternMode:
 
                 endpoints = [node for node in node_set if len(_neighbors(node)) == 1]
                 if endpoints:
-                    # Start from visual start endpoint (top-most, then left-most).
+                    # Start from the true visual start: top-most endpoint (then left-most tie-break).
                     start_node = min(endpoints, key=lambda p: (p[0], p[1]))
+
+                    # End at the farthest reachable endpoint from start, so traversal
+                    # follows the full skeleton from start point through the middle.
+                    far_node, _parent, _dist = _bfs(start_node)
+                    reachable_eps = [ep for ep in endpoints if _dist.get(ep, -1) >= 0]
+                    if reachable_eps:
+                        end_node = max(reachable_eps, key=lambda p: (_dist.get(p, -1), p[0], p[1]))
+                    else:
+                        end_node = far_node
                 else:
                     start_node = min(node_set, key=lambda p: (p[0], p[1]))
+                    far_node, _parent, _dist = _bfs(start_node)
+                    end_node = far_node
 
-                # DFS edge-walk with backtracking to cover the whole skeleton graph.
-                def _edge_key(a, b):
-                    return (a, b) if a <= b else (b, a)
+                _far_for_parent, parent_map, _dist_for_parent = _bfs(start_node)
+                if end_node not in parent_map:
+                    end_node = _far_for_parent
 
-                visited_edges = set()
-                walk_nodes = [start_node]
-                stack = [
-                    (
-                        start_node,
-                        iter(sorted(_neighbors(start_node), key=lambda p: (p[0], p[1]))),
-                    )
-                ]
+                rev = []
+                cur = end_node
+                while cur is not None:
+                    rev.append(cur)
+                    cur = parent_map[cur]
+                rev.reverse()
+                path_points = [(x, y) for (y, x) in rev]
 
-                while stack:
-                    cur, nbr_iter = stack[-1]
-                    nxt = None
-                    for cand in nbr_iter:
-                        ekey = _edge_key(cur, cand)
-                        if ekey in visited_edges:
-                            continue
-                        visited_edges.add(ekey)
-                        nxt = cand
-                        break
-
-                    if nxt is not None:
-                        walk_nodes.append(nxt)
-                        stack.append((nxt, iter(sorted(_neighbors(nxt), key=lambda p: (p[0], p[1])))))
-                    else:
-                        stack.pop()
-                        if stack:
-                            # Explicitly include backtracking motion in the path.
-                            walk_nodes.append(stack[-1][0])
-
-                # Convert (y,x)->(x,y), remove immediate duplicates.
-                prev_xy = None
-                for y, x in walk_nodes:
-                    xy = (int(x), int(y))
-                    if prev_xy is None or xy != prev_xy:
-                        path_points.append(xy)
-                        prev_xy = xy
-
-                # Snap each point to the local center maximum (3x3) to keep the
-                # walk close to the stroke middle after thinning artifacts.
+                # Re-center interior points to local stroke center along normal.
                 if path_points:
                     centered_points = []
-                    for x, y in path_points:
-                        bx = int(np.clip(x, 0, actual_w - 1))
-                        by = int(np.clip(y, 0, actual_h - 1))
-                        best_x, best_y = bx, by
-                        best_score = float(dist_center[by, bx])
-                        for sy in range(max(0, by - 1), min(actual_h, by + 2)):
-                            for sx in range(max(0, bx - 1), min(actual_w, bx + 2)):
-                                if bin_mask[sy, sx] == 0:
-                                    continue
-                                score = float(dist_center[sy, sx])
-                                if score > best_score:
-                                    best_score = score
-                                    best_x, best_y = sx, sy
+                    path_len = len(path_points)
+                    normal_radius = 8
+                    for idx, (x, y) in enumerate(path_points):
+                        if idx == 0 or idx == path_len - 1:
+                            centered_points.append((int(x), int(y)))
+                            continue
+                        prev_x, prev_y = path_points[idx - 1]
+                        next_x, next_y = path_points[idx + 1]
+                        tx = float(next_x - prev_x)
+                        ty = float(next_y - prev_y)
+                        norm = math.hypot(tx, ty)
+                        if norm < 1e-5:
+                            centered_points.append((int(x), int(y)))
+                            continue
+                        nx = -ty / norm
+                        ny = tx / norm
+                        best_x = int(x)
+                        best_y = int(y)
+                        best_score = float(dist_center[int(np.clip(y, 0, actual_h - 1)), int(np.clip(x, 0, actual_w - 1))])
+                        best_offset = 0
+                        for step in range(-normal_radius, normal_radius + 1):
+                            sx = int(np.clip(round(x + nx * step), 0, actual_w - 1))
+                            sy = int(np.clip(round(y + ny * step), 0, actual_h - 1))
+                            if bin_mask[sy, sx] == 0:
+                                continue
+                            score = float(dist_center[sy, sx])
+                            if score > best_score or (abs(score - best_score) < 1e-6 and abs(step) < abs(best_offset)):
+                                best_score = score
+                                best_x = sx
+                                best_y = sy
+                                best_offset = step
                         centered_points.append((best_x, best_y))
                     path_points = centered_points
 
