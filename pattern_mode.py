@@ -1255,8 +1255,43 @@ class PatternMode:
                     mid = min(mids, key=lambda m: abs(m - prev_mid))
                 path_points.append((x, mid))
                 prev_mid = mid
+        elif self.current_level in (3, 4):
+            # Levels 3/4: detect the real stroke midpoint using distance-transform
+            # ridge values, then link smoothly row-by-row.
+            bin_mask = (pat_crop > self.pattern_alpha_threshold).astype(np.uint8)
+            dist = cv2.distanceTransform(bin_mask, cv2.DIST_L2, 3)
+            prev_mid = None
+            for y in range(actual_h):
+                xs = np.where(bin_mask[y, :] > 0)[0]
+                if xs.size == 0:
+                    continue
+                # Split into contiguous runs for this row
+                runs = _contiguous_runs(xs)
+
+                # Candidate point per run: x with highest DT value (true center)
+                run_candidates = []
+                for a, b in runs:
+                    run_xs = np.arange(a, b + 1)
+                    run_d = dist[y, run_xs]
+                    best_local_idx = int(np.argmax(run_d))
+                    cx = int(run_xs[best_local_idx])
+                    run_candidates.append((cx, float(run_d[best_local_idx])))
+
+                if prev_mid is None:
+                    # First row: choose strongest center candidate.
+                    mid = max(run_candidates, key=lambda item: item[1])[0]
+                else:
+                    # Keep path smooth: prioritize nearest candidate to previous x,
+                    # with a small tie-break toward stronger center points.
+                    mid = min(
+                        run_candidates,
+                        key=lambda item: (abs(item[0] - prev_mid), -item[1])
+                    )[0]
+
+                path_points.append((mid, y))
+                prev_mid = mid
         else:
-            # Levels 1/3/4: scan rows (y changes, x follows nearest run midpoint)
+            # Level 1: scan rows (y changes, x follows nearest run midpoint)
             prev_mid = None
             for y in range(actual_h):
                 xs = np.where(pat_crop[y, :] > self.pattern_alpha_threshold)[0]
