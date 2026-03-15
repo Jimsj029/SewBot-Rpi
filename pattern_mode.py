@@ -260,6 +260,7 @@ class PatternMode:
         # and reused every frame — saves ~40 ms/frame on RPi4.
         self._cached_centerline     = None  # int32 path array from _build_centerline_path
         self._cached_centerline_f32 = None  # float32 copy for fast argmin
+        self._cached_centerline_mask = None  # uint8 full centerline mask (all branches)
         self._cached_pat_px         = None  # int32 x-coords of all pattern pixels
         self._cached_pat_py         = None  # int32 y-coords of all pattern pixels
         self._cached_pat_px_f32     = None  # float32 versions for distance calc
@@ -742,6 +743,7 @@ class PatternMode:
         # Clear per-level derivative caches
         self._cached_centerline     = None
         self._cached_centerline_f32 = None
+        self._cached_centerline_mask = None
         self._cached_pat_px         = None
         self._cached_pat_py         = None
         self._cached_pat_px_f32     = None
@@ -1094,6 +1096,36 @@ class PatternMode:
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
         self._cached_outline_mask = cv2.dilate(pat_binary, kernel, iterations=1)
         return self._cached_outline_mask
+
+    def _get_centerline_mask(self, pattern_alpha, actual_w, actual_h):
+        """Return a full-branch centerline mask (uint8 0/255) for the pattern.
+
+        This finds the medial ridge from a distance transform, so the resulting
+        line sits near the geometric middle of the overlay thickness and includes
+        all branches, not just a single traversed path.
+        """
+        if self._cached_centerline_mask is not None:
+            return self._cached_centerline_mask
+
+        pat_crop = pattern_alpha[:actual_h, :actual_w]
+        pat_binary = (pat_crop > self.pattern_alpha_threshold).astype(np.uint8)
+        if int(np.count_nonzero(pat_binary)) == 0:
+            self._cached_centerline_mask = np.zeros_like(pat_binary, dtype=np.uint8)
+            return self._cached_centerline_mask
+
+        dist = cv2.distanceTransform(pat_binary, cv2.DIST_L2, 3)
+        # Local maxima of distance map (3x3) approximates medial axis ridge.
+        dist_dil = cv2.dilate(dist, np.ones((3, 3), np.uint8))
+        ridge = (dist >= (dist_dil - 1e-6)) & (pat_binary > 0) & (dist > 0.5)
+        center = (ridge.astype(np.uint8) * 255)
+
+        # Light cleanup to drop isolated single-pixel noise while preserving branches.
+        if int(np.count_nonzero(center)) > 0:
+            k = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
+            center = cv2.morphologyEx(center, cv2.MORPH_OPEN, k)
+
+        self._cached_centerline_mask = center
+        return self._cached_centerline_mask
 
     def _build_centerline_path(self, pattern_alpha, actual_w, actual_h):
         """Build an ordered centerline path from the binary blueprint mask.
@@ -1947,19 +1979,33 @@ class PatternMode:
 
                     pattern_src = realtime_pattern if realtime_pattern is not None else pattern_overlay
 
-                    # ── Draw path guide dots in pattern space before blending ────────
-                    # Dots are placed in pattern coordinates so they scroll with the
-                    # overlay and are visible across the full shape.
+                    # ── Draw full centerline guide in pattern space before blending ──
+                    # Use a medial centerline mask (all branches), not a single
+                    # traversed chain, so the guide reflects the middle of the
+                    # entire overlay shape.
                     _pat_display = pattern_src.copy()
-                    if movement_path is not None and len(movement_path) > 0:
-                        _path_len = len(movement_path)
-                        _dot_step = max(1, _path_len // 150)
-                        for _pi in range(0, _path_len, _dot_step):
-                            _dpx = int(movement_path[_pi][0])
-                            _dpy = int(movement_path[_pi][1])
-                            if 0 <= _dpx < _pat_display.shape[1] and 0 <= _dpy < _pat_display.shape[0]:
-                                _dot_color = (0, 220, 220) if _pi <= cur_idx else (255, 255, 255)
-                                cv2.circle(_pat_display, (_dpx, _dpy), 2, _dot_color, -1)
+                    _center_mask = self._get_centerline_mask(pattern_alpha, actual_w, actual_h)
+                    if _center_mask is not None and int(np.count_nonzero(_center_mask)) > 0:
+                        cy_all, cx_all = np.where(_center_mask > 0)
+
+                        # Mark completed portions by overlap with completed stitch mask.
+                        _completed = self.completed_stitch_mask
+                        if _completed is None:
+                            _completed = np.zeros((_center_mask.shape[0], _center_mask.shape[1]), dtype=np.uint8)
+                        elif _completed.shape != _center_mask.shape:
+                            _completed = cv2.resize(_completed, (_center_mask.shape[1], _center_mask.shape[0]), interpolation=cv2.INTER_NEAREST)
+
+                        # Draw sampled points for speed on Pi while preserving full shape.
+                        _n = len(cx_all)
+                        _step = max(1, _n // 1800)
+                        for _i in range(0, _n, _step):
+                            _x = int(cx_all[_i])
+                            _y = int(cy_all[_i])
+                            if _completed[_y, _x] > 0:
+                                _dot_color = (0, 220, 220)  # cyan = done
+                            else:
+                                _dot_color = (255, 255, 255)  # white = todo
+                            cv2.circle(_pat_display, (_x, _y), 1, _dot_color, -1)
 
                     # ── Blend full visible overlay ─────────────────────────────────
                     b_w = dst_x2 - dst_x1
