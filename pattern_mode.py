@@ -1267,13 +1267,38 @@ class PatternMode:
             runs.append((s, p))
             return runs
 
-        # Levels 3/4: direct center-ridge path from the mask itself.
+        # Levels 3/4: follow a one-line center skeleton from top-left endpoint.
         if self.current_level in (3, 4):
             dist_center = cv2.distanceTransform(bin_mask, cv2.DIST_L2, 3)
-            dist_dil = cv2.dilate(dist_center, np.ones((3, 3), np.uint8))
-            ridge = ((dist_center >= (dist_dil - 1e-6)) & (bin_mask > 0) & (dist_center > 0.5)).astype(np.uint8)
 
-            ys, xs = np.where(ridge > 0)
+            # Build a one-pixel skeleton/ridge (prefer true thinning when available).
+            skel = None
+            try:
+                from skimage.morphology import skeletonize as _sk
+                skel = _sk(bin_mask.astype(bool)).astype(np.uint8)
+            except Exception:
+                pass
+            if skel is None:
+                try:
+                    skel = cv2.ximgproc.thinning(bin_mask * 255) // 255
+                except Exception:
+                    pass
+            if skel is None:
+                # OpenCV-only morphological skeleton fallback.
+                img = (bin_mask.copy() * 255).astype(np.uint8)
+                skel_img = np.zeros_like(img)
+                element = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
+                while True:
+                    eroded = cv2.erode(img, element)
+                    opened = cv2.dilate(eroded, element)
+                    temp = cv2.subtract(img, opened)
+                    skel_img = cv2.bitwise_or(skel_img, temp)
+                    img = eroded
+                    if cv2.countNonZero(img) == 0:
+                        break
+                skel = (skel_img > 0).astype(np.uint8)
+
+            ys, xs = np.where(skel > 0)
             if ys.size > 0:
                 node_set = set(zip(ys.tolist(), xs.tolist()))  # (y, x)
 
@@ -1313,22 +1338,24 @@ class PatternMode:
                 else:
                     start_node = min(node_set, key=lambda p: (p[0], p[1]))
 
-                end_node, _, _ = _bfs(start_node)
-                _, parent, _ = _bfs(end_node)
+                # End at the farthest reachable endpoint from the top-left start.
+                far_node, parent_map, dist_map = _bfs(start_node)
+                if endpoints:
+                    end_node = max(endpoints, key=lambda p: dist_map.get(p, -1))
+                    if dist_map.get(end_node, -1) < 0:
+                        end_node = far_node
+                else:
+                    end_node = far_node
 
                 rev = []
-                cur = start_node
-                # Recover path from end_node back to start_node, then reverse.
-                far_node, parent2, _ = _bfs(start_node)
-                cur = far_node
+                cur = end_node
                 while cur is not None:
                     rev.append(cur)
-                    cur = parent2[cur]
+                    cur = parent_map[cur]
                 rev.reverse()
                 path_points = [(x, y) for (y, x) in rev]
 
-                # Keep the one-line path centered by snapping each interior point
-                # to the local maximum of the distance map along the local normal.
+                # Re-center interior points to local stroke center along normal.
                 if path_points:
                     centered_points = []
                     path_len = len(path_points)
@@ -1349,7 +1376,7 @@ class PatternMode:
                         ny = tx / norm
                         best_x = int(x)
                         best_y = int(y)
-                        best_score = float(dist_center[int(y), int(x)])
+                        best_score = float(dist_center[int(np.clip(y, 0, actual_h - 1)), int(np.clip(x, 0, actual_w - 1))])
                         best_offset = 0
                         for step in range(-normal_radius, normal_radius + 1):
                             sx = int(np.clip(round(x + nx * step), 0, actual_w - 1))
@@ -1365,13 +1392,7 @@ class PatternMode:
                         centered_points.append((best_x, best_y))
                     path_points = centered_points
 
-                if len(path_points) >= 2:
-                    first_x, first_y = path_points[0]
-                    last_x, last_y = path_points[-1]
-                    if (last_y < first_y) or (last_y == first_y and last_x < first_x):
-                        path_points = list(reversed(path_points))
-
-            # Fallback if ridge extraction fails: use current row midpoint path.
+            # Fallback if skeleton path extraction fails.
             if not path_points:
                 prev_mid = None
                 for y in range(actual_h):
