@@ -1,7 +1,4 @@
-﻿"""
-SewBot - Pattern Recognition System
-Optimized for Raspberry Pi
-"""
+﻿
 
 import cv2
 import numpy as np
