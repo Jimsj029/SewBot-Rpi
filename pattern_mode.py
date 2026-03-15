@@ -1267,37 +1267,13 @@ class PatternMode:
             runs.append((s, p))
             return runs
 
-        # Levels 3/4: use a single continuous skeleton centerline path.
+        # Levels 3/4: direct center-ridge path from the mask itself.
         if self.current_level in (3, 4):
-            skel = None
             dist_center = cv2.distanceTransform(bin_mask, cv2.DIST_L2, 3)
-            try:
-                from skimage.morphology import skeletonize as _sk
-                skel = _sk(bin_mask.astype(bool)).astype(np.uint8)
-            except Exception:
-                pass
-            if skel is None:
-                try:
-                    skel = cv2.ximgproc.thinning(bin_mask * 255) // 255
-                except Exception:
-                    pass
-            if skel is None:
-                # Pure OpenCV morphological skeleton fallback for systems
-                # without skimage / ximgproc (e.g. Raspberry Pi builds).
-                img = (bin_mask.copy() * 255).astype(np.uint8)
-                skel_img = np.zeros_like(img)
-                element = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
-                while True:
-                    eroded = cv2.erode(img, element)
-                    opened = cv2.dilate(eroded, element)
-                    temp = cv2.subtract(img, opened)
-                    skel_img = cv2.bitwise_or(skel_img, temp)
-                    img = eroded
-                    if cv2.countNonZero(img) == 0:
-                        break
-                skel = (skel_img > 0).astype(np.uint8)
+            dist_dil = cv2.dilate(dist_center, np.ones((3, 3), np.uint8))
+            ridge = ((dist_center >= (dist_dil - 1e-6)) & (bin_mask > 0) & (dist_center > 0.5)).astype(np.uint8)
 
-            ys, xs = np.where(skel > 0)
+            ys, xs = np.where(ridge > 0)
             if ys.size > 0:
                 node_set = set(zip(ys.tolist(), xs.tolist()))  # (y, x)
 
@@ -1313,9 +1289,7 @@ class PatternMode:
                                 out.append(nb)
                     return out
 
-                endpoints = [node for node in node_set if len(_neighbors(node)) == 1]
-
-                def _bfs_farthest(start_node):
+                def _bfs(start_node):
                     queue = [start_node]
                     parent = {start_node: None}
                     dist = {start_node: 0}
@@ -1333,61 +1307,29 @@ class PatternMode:
                                 queue.append(nb)
                     return farthest, parent, dist
 
+                endpoints = [node for node in node_set if len(_neighbors(node)) == 1]
                 if endpoints:
-                    seed = min(endpoints, key=lambda p: (p[0], p[1]))
+                    start_node = min(endpoints, key=lambda p: (p[0], p[1]))
                 else:
-                    seed = min(node_set, key=lambda p: (p[0], p[1]))
+                    start_node = min(node_set, key=lambda p: (p[0], p[1]))
 
-                # Graph diameter path on the skeleton tree/graph.
-                a, _, _ = _bfs_farthest(seed)
-                b, parent, _ = _bfs_farthest(a)
+                end_node, _, _ = _bfs(start_node)
+                _, parent, _ = _bfs(end_node)
 
                 rev = []
-                cur = b
+                cur = start_node
+                # Recover path from end_node back to start_node, then reverse.
+                far_node, parent2, _ = _bfs(start_node)
+                cur = far_node
                 while cur is not None:
                     rev.append(cur)
-                    cur = parent[cur]
+                    cur = parent2[cur]
                 rev.reverse()
                 path_points = [(x, y) for (y, x) in rev]
 
-                # Re-center each skeleton point onto the local stroke midpoint.
-                # Raw thinning can bias slightly to one side; this snaps points
-                # back to the visual center of the overlay thickness while
-                # keeping the one-line order from the skeleton path.
+                # Keep the one-line path centered by snapping each interior point
+                # to the local maximum of the distance map along the local normal.
                 if path_points:
-                    refined_points = []
-
-                    def _pick_mid_from_runs(values, target):
-                        runs = _contiguous_runs(values)
-                        mids = [(a + b) // 2 for a, b in runs]
-                        return min(mids, key=lambda m: abs(m - target))
-
-                    path_len = len(path_points)
-                    for idx, (x, y) in enumerate(path_points):
-                        prev_x, prev_y = path_points[max(0, idx - 1)]
-                        next_x, next_y = path_points[min(path_len - 1, idx + 1)]
-                        dx = next_x - prev_x
-                        dy = next_y - prev_y
-
-                        # If tangent is more horizontal, recenter vertically in
-                        # the current column. Otherwise recenter horizontally in
-                        # the current row.
-                        if abs(dx) >= abs(dy):
-                            y_candidates = np.where(bin_mask[:, int(np.clip(x, 0, actual_w - 1))] > 0)[0]
-                            if y_candidates.size > 0:
-                                y = _pick_mid_from_runs(y_candidates, y)
-                        else:
-                            x_candidates = np.where(bin_mask[int(np.clip(y, 0, actual_h - 1)), :] > 0)[0]
-                            if x_candidates.size > 0:
-                                x = _pick_mid_from_runs(x_candidates, x)
-
-                        refined_points.append((int(x), int(y)))
-
-                    path_points = refined_points
-
-                    # Final pass: project each point to the true local mask
-                    # center by maximizing the distance-transform value along
-                    # the local normal direction.
                     centered_points = []
                     path_len = len(path_points)
                     normal_radius = 8
@@ -1395,24 +1337,20 @@ class PatternMode:
                         if idx == 0 or idx == path_len - 1:
                             centered_points.append((int(x), int(y)))
                             continue
-                        prev_x, prev_y = path_points[max(0, idx - 1)]
-                        next_x, next_y = path_points[min(path_len - 1, idx + 1)]
+                        prev_x, prev_y = path_points[idx - 1]
+                        next_x, next_y = path_points[idx + 1]
                         tx = float(next_x - prev_x)
                         ty = float(next_y - prev_y)
                         norm = math.hypot(tx, ty)
                         if norm < 1e-5:
                             centered_points.append((int(x), int(y)))
                             continue
-
-                        # Unit normal to the local tangent
                         nx = -ty / norm
                         ny = tx / norm
-
                         best_x = int(x)
                         best_y = int(y)
-                        best_score = -1.0
-                        best_offset = 0.0
-
+                        best_score = float(dist_center[int(y), int(x)])
+                        best_offset = 0
                         for step in range(-normal_radius, normal_radius + 1):
                             sx = int(np.clip(round(x + nx * step), 0, actual_w - 1))
                             sy = int(np.clip(round(y + ny * step), 0, actual_h - 1))
@@ -1423,34 +1361,31 @@ class PatternMode:
                                 best_score = score
                                 best_x = sx
                                 best_y = sy
-                                best_offset = float(step)
-
+                                best_offset = step
                         centered_points.append((best_x, best_y))
-
                     path_points = centered_points
 
-                    # Force the one-line path to start at the very top.
-                    if len(path_points) >= 2:
-                        first_x, first_y = path_points[0]
-                        last_x, last_y = path_points[-1]
-                        if (last_y < first_y) or (last_y == first_y and last_x < first_x):
-                            path_points = list(reversed(path_points))
+                if len(path_points) >= 2:
+                    first_x, first_y = path_points[0]
+                    last_x, last_y = path_points[-1]
+                    if (last_y < first_y) or (last_y == first_y and last_x < first_x):
+                        path_points = list(reversed(path_points))
 
-                # Fallback if endpoints are unavailable or path was not found
-                if not path_points:
-                    prev_mid = None
-                    for y in range(actual_h):
-                        xs = np.where(bin_mask[y, :] > 0)[0]
-                        if xs.size == 0:
-                            continue
-                        runs = _contiguous_runs(xs)
-                        mids = [(a + b) // 2 for a, b in runs]
-                        if prev_mid is None:
-                            mid = mids[0]
-                        else:
-                            mid = min(mids, key=lambda m: abs(m - prev_mid))
-                        path_points.append((mid, y))
-                        prev_mid = mid
+            # Fallback if ridge extraction fails: use current row midpoint path.
+            if not path_points:
+                prev_mid = None
+                for y in range(actual_h):
+                    xs = np.where(bin_mask[y, :] > 0)[0]
+                    if xs.size == 0:
+                        continue
+                    runs = _contiguous_runs(xs)
+                    mids = [(a + b) // 2 for a, b in runs]
+                    if prev_mid is None:
+                        mid = mids[0]
+                    else:
+                        mid = min(mids, key=lambda m: abs(m - prev_mid))
+                    path_points.append((mid, y))
+                    prev_mid = mid
 
         # Levels 2/5: scan columns (x changes, y follows nearest run midpoint)
         elif self.current_level in (2, 5):
