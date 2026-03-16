@@ -81,6 +81,12 @@ class PatternMode:
             'w': self.score_panel_width - 40,
             'h': 50,
         }
+        self.reset_button = {
+            'x': self.start_button['x'],
+            'y': self.start_button['y'],
+            'w': self.start_button['w'],
+            'h': self.start_button['h'],
+        }
         self.sewing_started = False  # Gates cloth/thread color detection
 
         # Back button
@@ -1997,7 +2003,12 @@ class PatternMode:
                     follow_check_ready = True
 
             # Outside-pattern warning (color-gated + hysteresis stabilized)
-            if follow_check_ready and not self.needle_on_pattern and self.raw_progress >= 2.0:
+            if (
+                follow_check_ready
+                and not self.needle_on_pattern
+                and self.raw_progress >= 2.0
+                and self.raw_progress < 100.0
+            ):
                 ow_h = 36
                 ow_y = 60
                 _ov2 = cam_frame.copy()
@@ -2070,6 +2081,8 @@ class PatternMode:
 
             # If progress reached 100%, show a prominent overlay on the camera
             if getattr(self, 'raw_progress', 0.0) >= 100.0:
+                self.out_of_segment_warning = False
+                self.warning_message = ""
                 instr = "Overlap your work with the pattern"
                 inst_scale = text_scale(0.9, self.width, self.height, floor=0.7, ceiling=1.0)
                 inst_thick = text_thickness(2, self.width, self.height, min_thickness=2, max_thickness=4)
@@ -2112,7 +2125,7 @@ class PatternMode:
                 self._put_text(frame, label, tx, ty, 0.9, self.COLORS['text_primary'], 2)
 
             # Draw warning overlay if out of segment
-            if self.out_of_segment_warning:
+            if self.out_of_segment_warning and self.raw_progress < 100.0:
                 self.draw_warning_overlay(frame)
             
         # Draw corner accents
@@ -2792,6 +2805,8 @@ class PatternMode:
         # Draw Start button inside the stats panel when sewing has not begun
         if not self.sewing_started:
             self.draw_start_button(frame)
+        elif not self.is_evaluated:
+            self.draw_reset_button(frame)
 
     def draw_start_button(self, frame):
         """Draw the Start button inside the stats panel.
@@ -2818,6 +2833,33 @@ class PatternMode:
         (text_w, text_h), _ = get_text_size(text, FONT_DISPLAY, font_scale, thickness)
         text_x = sb['x'] + (sb['w'] - text_w) // 2
         text_y = sb['y'] + (sb['h'] + text_h) // 2
+        self._put_text(frame, text, text_x, text_y, font_scale,
+                       self.COLORS['text_primary'], thickness, font=FONT_DISPLAY)
+
+    def draw_reset_button(self, frame):
+        """Draw reset button while tracing to restart the current level."""
+        rb = self.reset_button
+        pulse = 0.45 + 0.30 * abs(math.sin(self.glow_phase * 1.6))
+        self.draw_glow_rect(frame, rb['x'], rb['y'], rb['w'], rb['h'],
+                            self.COLORS['bright_blue'], pulse)
+
+        overlay = frame.copy()
+        cv2.rectangle(
+            overlay,
+            (rb['x'] + 2, rb['y'] + 2),
+            (rb['x'] + rb['w'] - 2, rb['y'] + rb['h'] - 2),
+            self.COLORS['button_normal'],
+            -1,
+        )
+        cv2.addWeighted(overlay, 0.72, frame, 0.28, 0, frame)
+
+        text = "RESET"
+        font_scale = text_scale(0.80, self.width, self.height, floor=0.72, ceiling=0.92)
+        thickness = text_thickness(2, self.width, self.height, min_thickness=2, max_thickness=3)
+        font_scale = fit_text_scale(text, FONT_DISPLAY, rb['w'] - 14, font_scale, thickness, min_scale=0.62)
+        (text_w, text_h), _ = get_text_size(text, FONT_DISPLAY, font_scale, thickness)
+        text_x = rb['x'] + (rb['w'] - text_w) // 2
+        text_y = rb['y'] + (rb['h'] + text_h) // 2
         self._put_text(frame, text, text_x, text_y, font_scale,
                        self.COLORS['text_primary'], thickness, font=FONT_DISPLAY)
 
@@ -2963,7 +3005,7 @@ class PatternMode:
         # Title
         content_y = panel_y + 60
         if self.level_completed:
-            title = "LEVEL COMPLETED!"
+            title = "CONGRATULATIONS!" if self.current_level >= 5 else "LEVEL COMPLETED!"
             title_color = self.COLORS['glow_cyan']
         else:
             title = "LEVEL INCOMPLETE"
@@ -2975,6 +3017,16 @@ class PatternMode:
         (title_w, title_h), _ = get_text_size(title, FONT_DISPLAY, title_scale, title_thickness)
         title_x = panel_x + (panel_w - title_w) // 2
         self._put_text(frame, title, title_x, content_y, title_scale, title_color, title_thickness, font=FONT_DISPLAY)
+
+        if self.level_completed and self.current_level >= 5:
+            congrats_text = "YOU COMPLETED ALL 5 LEVELS!"
+            congrats_scale = text_scale(0.74, self.width, self.height, floor=0.66, ceiling=0.84)
+            congrats_thick = text_thickness(2, self.width, self.height, min_thickness=1, max_thickness=2)
+            congrats_scale = fit_text_scale(congrats_text, FONT_MAIN, panel_w - 50, congrats_scale, congrats_thick, min_scale=0.58)
+            (cw, ch), _ = get_text_size(congrats_text, FONT_MAIN, congrats_scale, congrats_thick)
+            cx = panel_x + (panel_w - cw) // 2
+            cy = content_y + ch + 12
+            self._put_text(frame, congrats_text, cx, cy, congrats_scale, self.COLORS['text_secondary'], congrats_thick)
         
         # Show final score and wrong-stitch percentage (replace raw progress)
         content_y += 60
@@ -3064,7 +3116,7 @@ class PatternMode:
         cv2.addWeighted(overlay, 0.9, frame, 0.1, 0, frame)
         
         # Button text
-        text = "NEXT LEVEL >"
+        text = "FINISH" if self.current_level >= 5 else "NEXT LEVEL >"
         font_scale = text_scale(0.92, self.width, self.height, floor=0.8, ceiling=1.04)
         thickness = text_thickness(3, self.width, self.height, min_thickness=2, max_thickness=4)
         font_scale = fit_text_scale(text, FONT_DISPLAY, button_w - 20, font_scale, thickness, min_scale=0.72)
@@ -3085,6 +3137,20 @@ class PatternMode:
             outline_color=self.COLORS['glow_cyan'],
             outline_extra=2,
         )
+
+    def _reset_current_level_state(self, reason=""):
+        """Reset current level and return to fresh pre-start state."""
+        self.unload_evaluation_model()
+        self.reset_progress()
+        self.highest_segment_reached = 1
+        self.current_accuracy = 0.0
+        self.total_score = 0
+        self.out_of_segment_warning = False
+        self.warning_message = ""
+        self.is_evaluated = False
+        self.level_completed = False
+        if reason:
+            print(reason)
     
     def draw_stat_item(self, frame, label, value, x, y, max_width, value_color=None):
         """Helper method to draw a stat item (label and value)"""
@@ -3145,6 +3211,14 @@ class PatternMode:
             self.play_button_click_sound()
             self.sewing_started = True
             print("▶️  Sewing started — color detection enabled")
+            return None
+
+        rb = self.reset_button
+        if (self.sewing_started and not self.is_evaluated
+                and rb['x'] <= x <= rb['x'] + rb['w']
+                and rb['y'] <= y <= rb['y'] + rb['h']):
+            self.play_button_click_sound()
+            self._reset_current_level_state(f"🔄 Progress reset for Level {self.current_level}")
             return None
         
         # Check evaluate button (only if not evaluated yet)
@@ -3208,17 +3282,7 @@ class PatternMode:
             tb = self.try_again_button
             if tb['x'] <= x <= tb['x'] + tb['w'] and tb['y'] <= y <= tb['y'] + tb['h']:
                 self.play_button_click_sound()
-                self.unload_evaluation_model()
-                # Fully reset all progress and caches
-                self.reset_progress()
-                self.highest_segment_reached = 1
-                self.current_accuracy = 0.0
-                self.total_score = 0
-                self.out_of_segment_warning = False
-                self.warning_message = ""
-                self.is_evaluated = False
-                self.level_completed = False
-                print(f"🔄 Progress reset - Try again!")
+                self._reset_current_level_state("🔄 Progress reset - Try again!")
                 return None
         
         # Check next level button (only if evaluated and passed)
