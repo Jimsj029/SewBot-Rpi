@@ -372,6 +372,11 @@ class WalletTutorialPlayer:
                 'display_label': f'Wallet Step {step_number}',
             })
 
+        # If no explicit showcase file was detected by name, use one remaining
+        # extra video (if any) as the final showcase clip.
+        if showcase_path is None and remaining_step_paths:
+            showcase_path = remaining_step_paths.pop(-1)
+
         self.step_entries.append({
             'path': showcase_path,
             'kind': 'showcase',

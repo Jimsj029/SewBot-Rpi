@@ -42,6 +42,7 @@ class PatternMode:
         self.camera_y      = 120
         self.camera_width  = 560
         self.camera_height = 420
+        self.camera_available = False
         # Camera zoom buttons (drawn over camera feed)
         self.zoom_in_button = {'x': self.camera_x + self.camera_width - 46, 'y': self.camera_y + 8, 'w': 40, 'h': 36}
         self.zoom_out_button = {'x': self.camera_x + self.camera_width - 46 - 46, 'y': self.camera_y + 8, 'w': 40, 'h': 36}
@@ -1066,10 +1067,17 @@ class PatternMode:
         if int(np.count_nonzero(m)) < 32:
             return 0.0
         dist = cv2.distanceTransform(m, cv2.DIST_L2, 5)
-        vals = dist[m > 0]
+        vals = dist[m > 0].astype(np.float32, copy=False)
         if vals.size == 0:
             return 0.0
-        return float(np.median(vals) * 2.0)
+        vals = vals[np.isfinite(vals)]
+        if vals.size == 0:
+            return 0.0
+        width = float(np.median(vals) * 2.0)
+        if not np.isfinite(width) or width <= 0.0:
+            return 0.0
+        # Clamp to a sane range for robustness in pathological masks.
+        return float(min(width, 2048.0))
 
     def _match_detected_mask_width_to_pattern(self, detected_mask, pattern_mask):
         """Adjust detected mask thickness to match pattern-mask thickness."""
@@ -1078,11 +1086,18 @@ class PatternMode:
 
         det_w = self._estimate_binary_stroke_width(det_u8)
         pat_w = self._estimate_binary_stroke_width(pat_u8)
-        if det_w <= 0.0 or pat_w <= 0.0:
+        if (
+            det_w <= 0.0
+            or pat_w <= 0.0
+            or (not np.isfinite(det_w))
+            or (not np.isfinite(pat_w))
+        ):
             return det_u8 > 0
 
         delta = pat_w - det_w
-        px = int(round(abs(delta) / 2.0))
+        if not np.isfinite(delta):
+            return det_u8 > 0
+        px = int(round(float(abs(delta)) / 2.0))
         px = min(max(0, px), int(max(0, getattr(self, 'eval_width_match_max_px', 8))))
         if px <= 0:
             return det_u8 > 0
@@ -1270,6 +1285,7 @@ class PatternMode:
         ys, xs = np.where(skel > 0)
         if ys.size == 0:
             return None
+        center_x = float(np.mean(xs))
 
         # ── Build adjacency set for O(1) neighbor lookup ──────────────────────
         skel_set = set(zip(ys.tolist(), xs.tolist()))
@@ -1317,10 +1333,12 @@ class PatternMode:
             path_yx.append(start)
 
             def _unvisited_down_first(node):
-                return sorted(
-                    [nb for nb in get_neighbors_8(*node) if nb not in visited],
-                    key=lambda p: -p[0]   # larger y (lower on screen) first
-                )
+                candidates = [nb for nb in get_neighbors_8(*node) if nb not in visited]
+                if self.current_level == 5:
+                    # Prioritize branches closest to the pattern middle before
+                    # switching to far side branches.
+                    return sorted(candidates, key=lambda p: (abs(float(p[1]) - center_x), -p[0]))
+                return sorted(candidates, key=lambda p: -p[0])
 
             dfs_stack = [(start, _unvisited_down_first(start))]
             while dfs_stack:
@@ -1604,8 +1622,9 @@ class PatternMode:
         # Draw evaluate button (right, below stats)
         self.draw_evaluate_button(frame)
 
-        # Draw thread colour panel (left, top)
-        self.draw_thread_color_panel(frame)
+        # Draw thread colour panel (left, top) only when camera is available
+        if self.camera_available:
+            self.draw_thread_color_panel(frame)
 
         # (Cloth colour panel removed — cloth detection no longer used)
         
@@ -1646,10 +1665,12 @@ class PatternMode:
         
         # Display camera feed or placeholder
         if camera_frame is None:
+            self.camera_available = False
+            self.last_camera_frame = None
             cv2.rectangle(frame, (self.camera_x, self.camera_y), 
                          (self.camera_x + self.camera_width, self.camera_y + self.camera_height), 
                          self.COLORS['dark_blue'], -1)
-            text = "Camera not available"
+            text = "Camera not detected - check your camera"
             text_scale_value = text_scale(0.84, self.width, self.height, floor=0.74, ceiling=0.96)
             text_thick = text_thickness(2, self.width, self.height, min_thickness=1, max_thickness=2)
             text_scale_value = fit_text_scale(text, FONT_MAIN, self.camera_width - 30, text_scale_value, text_thick, min_scale=0.62)
@@ -1658,6 +1679,7 @@ class PatternMode:
             ty = self.camera_y + (self.camera_height + th) // 2
             self._put_text(frame, text, tx, ty, text_scale_value, self.COLORS['text_primary'], text_thick)
         else:
+            self.camera_available = True
             cam_frame = cv2.resize(camera_frame, (self.camera_width, self.camera_height))
             # Keep a copy of the raw camera frame for screenshot-based evaluation.
             self.last_camera_frame = cam_frame.copy()
@@ -2804,6 +2826,8 @@ class PatternMode:
                  self.COLORS['medium_blue'], 1)
 
         # Draw Start button inside the stats panel when sewing has not begun
+        if not self.camera_available:
+            return
         if not self.sewing_started:
             self.draw_start_button(frame)
         elif not self.is_evaluated:
@@ -2869,7 +2893,7 @@ class PatternMode:
         eb = self.evaluate_button
         # Only show evaluate button when progress reached 100% and not
         # already evaluated. The evaluate action is gated by full progress.
-        if self.is_evaluated or self.raw_progress < 100.0:
+        if (not self.camera_available) or self.is_evaluated or self.raw_progress < 100.0:
             return
         
         # Button glow
@@ -3249,6 +3273,10 @@ class PatternMode:
             self.play_button_click_sound()
             return 'back'
 
+        # Keep only BACK active when camera isn't detected.
+        if not self.camera_available:
+            return None
+
         # Zoom buttons
         zib = self.zoom_in_button
         zob = self.zoom_out_button
@@ -3393,6 +3421,13 @@ class PatternMode:
             print("=" * 72)
             return
 
+        # Ensure ONNX evaluation model is loaded before detection.
+        if self.eval_model is None:
+            try:
+                self.load_evaluation_model()
+            except Exception as e:
+                print(f"⚠ Could not load evaluation model: {e}")
+
         # 1) Detect stitches from the current camera snapshot.
         #    Try AI model first (if available); fall through to image processing.
         detected_camera_mask = None
@@ -3402,8 +3437,12 @@ class PatternMode:
                 if ai_mask is not None and int(np.count_nonzero(ai_mask > 0)) > 0:
                     detected_camera_mask = ai_mask
                     print(f"✓ AI model detection used ({int(np.count_nonzero(ai_mask > 0))} px)")
+                else:
+                    print("⚠ AI model returned no stitch pixels; falling back to color detection")
             except Exception as e:
                 print(f"⚠ AI inference error: {e}")
+        else:
+            print("⚠ Evaluation ONNX model unavailable; using color detection")
 
         if detected_camera_mask is None or not np.any(detected_camera_mask > 0):
             print("🔍 Using color-based image processing for stitch detection")
