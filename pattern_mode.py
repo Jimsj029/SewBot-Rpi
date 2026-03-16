@@ -2942,9 +2942,9 @@ class PatternMode:
                      (20, 10, 5), -1)
         cv2.addWeighted(overlay, 0.7, frame, 0.3, 0, frame)
 
-        # Stage 2: final congratulation screen after finishing Level 5 results.
-        # Disabled: remove special 'congratulations' screen for Level 5
-        if False and getattr(self, 'eval_screen_stage', 0) == 2:
+        # Stage 2: final result screen after finishing Level 5 results.
+        # Render a neutral final screen (no special congratulation wording).
+        if getattr(self, 'eval_screen_stage', 0) == 2:
             panel_w = 560
             panel_h = 320
             panel_x = (self.width - panel_w) // 2
