@@ -38,7 +38,7 @@ LOG_FILE="${HOME}/sewguider-launch.log"
 {
   echo "============================================================"
   echo "Sew Guider launcher start: $(date)"
-  echo "Project: ${PROJECT_DIR}"
+  echo "Project: ${SCRIPT_DIR}"
 } >> "${LOG_FILE}"
 
 if [ -x "${RUN_SH}" ]; then
