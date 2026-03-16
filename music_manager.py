@@ -18,6 +18,7 @@ class MusicManager:
         self.current_track = None
         self.volume = 0.3  # Default volume (0.0 to 1.0)
         self.sound_effects = {}  # Store loaded sound effects
+        self.failed_sound_effects = set()  # Avoid repeated warnings for unsupported SFX files
         self.sfx_volume = 0.7  # Sound effects volume (0.0 to 1.0)
         
         # Initialize pygame mixer
@@ -68,16 +69,24 @@ class MusicManager:
                 if not self.load_music(track_name):
                     return False
             
-            # Start playback
+            # Start playback (RPi pygame builds differ in supported play() signatures)
             if fade_ms > 0:
                 try:
-                    pygame.mixer.music.play(loops=loops, fade_ms=fade_ms)
-                except Exception:
-                    # Compatibility fallback for pygame builds that don't support
-                    # keyword arguments (or fade_ms kwarg) on music.play().
-                    pygame.mixer.music.play(loops, 0.0, int(fade_ms))
+                    pygame.mixer.music.play(loops=loops, fade_ms=int(fade_ms))
+                except TypeError:
+                    # Older pygame: no fade_ms support; fall back to regular play.
+                    try:
+                        pygame.mixer.music.play(int(loops), 0.0)
+                    except TypeError:
+                        pygame.mixer.music.play(int(loops))
             else:
-                pygame.mixer.music.play(loops=loops)
+                try:
+                    pygame.mixer.music.play(loops=loops)
+                except TypeError:
+                    try:
+                        pygame.mixer.music.play(int(loops), 0.0)
+                    except TypeError:
+                        pygame.mixer.music.play(int(loops))
             
             print(f"♪ Playing: {self.current_track}")
             return True
@@ -166,21 +175,43 @@ class MusicManager:
             # Check if already loaded
             if sfx_name in self.sound_effects:
                 return True
-            
-            # Build the full path to the sound effect file
-            sfx_path = os.path.join(self.music_folder, sfx_name)
-            
-            if not os.path.exists(sfx_path):
-                print(f"⚠ Sound effect file not found: {sfx_path}")
+            if sfx_name in self.failed_sound_effects:
                 return False
             
-            # Load the sound effect
-            sound = pygame.mixer.Sound(sfx_path)
-            sound.set_volume(self.sfx_volume)
-            self.sound_effects[sfx_name] = sound
-            print(f"✓ Sound effect loaded: {sfx_name}")
-            return True
+            # Build the full path to the sound effect file
+            primary_path = os.path.join(self.music_folder, sfx_name)
+            base_name, ext = os.path.splitext(sfx_name)
+            candidate_names = [sfx_name]
+            if ext.lower() == '.mp3':
+                candidate_names.extend([f"{base_name}.ogg", f"{base_name}.wav"])
+            elif ext == '':
+                candidate_names.extend([f"{sfx_name}.ogg", f"{sfx_name}.wav", f"{sfx_name}.mp3"])
+
+            candidate_paths = [os.path.join(self.music_folder, name) for name in candidate_names]
+            existing_paths = [path for path in candidate_paths if os.path.exists(path)]
+
+            if not existing_paths:
+                print(f"⚠ Sound effect file not found: {primary_path}")
+                self.failed_sound_effects.add(sfx_name)
+                return False
+            
+            # Load the first decodable candidate (mp3 can fail on some RPi builds).
+            last_error = None
+            for sfx_path in existing_paths:
+                try:
+                    sound = pygame.mixer.Sound(sfx_path)
+                    sound.set_volume(self.sfx_volume)
+                    self.sound_effects[sfx_name] = sound
+                    print(f"✓ Sound effect loaded: {os.path.basename(sfx_path)}")
+                    return True
+                except Exception as e:
+                    last_error = e
+
+            self.failed_sound_effects.add(sfx_name)
+            print(f"⚠ Could not load sound effect: {last_error}")
+            return False
         except Exception as e:
+            self.failed_sound_effects.add(sfx_name)
             print(f"⚠ Could not load sound effect: {e}")
             return False
     
