@@ -64,6 +64,8 @@ COLORS = {
     'bg_dark': (60, 30, 10),
     'glow_cyan': (255, 255, 0),
     'glow_blue': (255, 150, 0),
+    'button_detect_on':  (30, 130, 50),    # Green  – detection ON
+    'button_detect_off': (40, 40, 160),    # Blue   – detection OFF (bypassed)
 }
 
 FONTS = {
@@ -195,6 +197,7 @@ class WalletTutorialPlayer:
 
         # ── Needle centring detection ─────────────────────────────────────────
         self.needle_confirmed        = False  # True when needle is currently centred
+        self.needle_detection_disabled = False  # True when user has skipped detection
         self.NEEDLE_CONF_THRESHOLD   = 0.35   # YOLO confidence threshold
         self.NEEDLE_CENTER_TOLERANCE = 40     # px tolerance from ROI column midpoint
         self.NEEDLE_CHECK_INTERVAL   = 6      # Run model every N draw-frames (~5 Hz @ 30 fps)
@@ -317,6 +320,20 @@ class WalletTutorialPlayer:
             'h': 50,
             'text': '< BACK'
         }
+
+        # ── Skip Detection button (shown in Your Turn screen, top-right area) ──
+        # Positioned below the back button on the top-left to keep it accessible
+        # without overlapping NEXT / PREVIOUS.
+        # ── Detection toggle button (shown in Your Turn screen, top-right) ────
+        # Text and colour flip each click to reflect the current state.
+        self.skip_detection_button = {
+            'x': self.width - 200,
+            'y': 400,
+            'w': 180,
+            'h': 44,
+            'text': 'DETECTION: ON'   # reflects current state (detection is ON by default)
+        }
+        # ─────────────────────────────────────────────────────────────────────
     
     def load_video_list(self):
         """Load wallet tutorial videos from the Wallet folder into the fixed 15-step flow."""
@@ -416,7 +433,15 @@ class WalletTutorialPlayer:
         self.video_paused = False
         self.last_frame_time = time.time()
         self.frame_accumulator = 0.0
-        
+
+        # Reset needle detection state for the new step
+        self.needle_detection_disabled = False
+        self.needle_confirmed = False
+        self._needle_check_counter = 0
+        # Guard: button may not exist yet when called from __init__
+        if hasattr(self, 'skip_detection_button'):
+            self.skip_detection_button['text'] = 'DETECTION: ON'
+
         # Load current step's video
         if self.current_step < len(self.video_files) and self.video_files[self.current_step]:
             video_path = self.video_files[self.current_step]
@@ -485,7 +510,9 @@ class WalletTutorialPlayer:
         self.video_paused = False
         self.your_turn_mode = False  # Reset your turn mode
         self.needle_confirmed = False
+        self.needle_detection_disabled = False
         self._needle_check_counter = 0
+        self.skip_detection_button['text'] = 'DETECTION: ON'
         self.current_frame_img = None
         self.last_frame_time = time.time()
         self.frame_accumulator = 0.0
@@ -509,7 +536,30 @@ class WalletTutorialPlayer:
             pass  # Silently fail if sound effect doesn't exist
     
     def handle_click(self, x, y):
-        """Handle mouse clicks, returns action: 'next', 'done', 'replay_current', 'replay', 'continue', 'your_turn_next', 'previous', or None"""
+        """Handle mouse clicks, returns action: 'next', 'done', 'replay_current', 'replay',
+        'continue', 'your_turn_next', 'previous', 'toggle_detection', or None"""
+
+        # ── Detection toggle button (Your Turn screen only) ──────────────────
+        if self.your_turn_mode:
+            btn = self.skip_detection_button
+            if btn['x'] <= x <= btn['x'] + btn['w'] and btn['y'] <= y <= btn['y'] + btn['h']:
+                self.play_button_click_sound()
+                # Toggle: flip the disabled flag and sync button label + needle state.
+                self.needle_detection_disabled = not self.needle_detection_disabled
+                if self.needle_detection_disabled:
+                    # Detection OFF → treat needle as already centred immediately.
+                    self.needle_confirmed = True
+                    self.skip_detection_button['text'] = 'DETECTION: OFF'
+                    print("Needle detection disabled – proceeding as centred.")
+                else:
+                    # Detection ON → reset so model must re-verify.
+                    self.needle_confirmed = False
+                    self._needle_check_counter = 0
+                    self.skip_detection_button['text'] = 'DETECTION: ON'
+                    print("Needle detection re-enabled.")
+                return 'toggle_detection'
+        # ─────────────────────────────────────────────────────────────────────
+
         # Check your_turn_previous button when in your turn mode
         if self.your_turn_mode:
             btn = self.your_turn_previous_button
@@ -581,6 +631,7 @@ class WalletTutorialPlayer:
                 if current_entry is not None and current_entry.get('needs_practice', False):
                     # Transition to your_turn mode
                     self.needle_confirmed = False
+                    self.needle_detection_disabled = False
                     self._needle_check_counter = 0
                     self.your_turn_mode = True
                     return 'enter_your_turn'
@@ -1052,14 +1103,13 @@ class WalletTutorialPlayer:
             # Copy frame to main image
             img[camera_y:camera_y + camera_h, camera_x:camera_x + camera_w] = cam_frame_resized
 
-            # Throttled bidirectional needle centring check:
-            # runs every NEEDLE_CHECK_INTERVAL frames so it's cheap on RPi 4,
-            # but always updates needle_confirmed (including back to False if
-            # the needle moves away from the ROI centre).
-            self._needle_check_counter += 1
-            if self._needle_check_counter >= self.NEEDLE_CHECK_INTERVAL:
-                self._needle_check_counter = 0
-                self.needle_confirmed = self._run_needle_check(cam_frame_resized)
+            # Throttled bidirectional needle centring check.
+            # Skip entirely when detection has been disabled by the user.
+            if not self.needle_detection_disabled:
+                self._needle_check_counter += 1
+                if self._needle_check_counter >= self.NEEDLE_CHECK_INTERVAL:
+                    self._needle_check_counter = 0
+                    self.needle_confirmed = self._run_needle_check(cam_frame_resized)
         else:
             # Dark background for camera
             cv2.rectangle(img, (camera_x, camera_y), (camera_x + camera_w, camera_y + camera_h), 
@@ -1074,7 +1124,7 @@ class WalletTutorialPlayer:
             msg_y = camera_y + (camera_h + msg_h) // 2
             _put_text(img, msg, msg_x, msg_y, font_scale_msg, COLORS['text_primary'], thickness_msg)
         
-        # ── ROI guide overlay (drawn over the camera area onto img) ──────────────
+        # ── ROI guide overlay ─────────────────────────────────────────────────
         abs_cx  = camera_x + self.ROI_CENTER_X
         roi_top = camera_y + self.ROI_TOP_Y
         roi_bot = camera_y + camera_h - self.ROI_BOT_MARGIN
@@ -1082,13 +1132,8 @@ class WalletTutorialPlayer:
         col_x1  = abs_cx - half_w
         col_x2  = abs_cx + half_w
 
-        # Column outline – always visible so user knows where to position needle
-        glow_a    = 0.5 + 0.5 * abs(math.sin(self.glow_phase))
-        col_color = tuple(int(c * glow_a) for c in self.ROI_COL_COLOR)
-        cv2.rectangle(img, (col_x1, roi_top), (col_x2, roi_bot), col_color, 2)
-
         if self.needle_confirmed:
-            # Dashed centre stitch line (only shown once needle is centred)
+            # Dashed centre stitch line – shown when needle is confirmed OR detection is OFF.
             y = roi_top
             while y < roi_bot:
                 y_end = min(y + self.ROI_DASH_LEN, roi_bot)
@@ -1105,7 +1150,12 @@ class WalletTutorialPlayer:
                         cv2.line(img, (side_x, y), (side_x, y_end), self.ROI_LINE_COLOR, 2)
                         y += self.ROI_DASH_LEN + self.ROI_DASH_GAP
         else:
-            # Warning banner: needle not yet centred (shown only while camera is live)
+            # Detection is ON and needle not yet centred:
+            # show column outline guide + warning banner.
+            glow_a    = 0.5 + 0.5 * abs(math.sin(self.glow_phase))
+            col_color = tuple(int(c * glow_a) for c in self.ROI_COL_COLOR)
+            cv2.rectangle(img, (col_x1, roi_top), (col_x2, roi_bot), col_color, 2)
+
             if camera_frame is not None:
                 warn_h  = 44
                 warn_y  = camera_y + 8
@@ -1127,6 +1177,11 @@ class WalletTutorialPlayer:
 
         # Draw back button (top left)
         self.draw_button(img, self.back_button, COLORS['button_hover'])
+
+        # ── Detection toggle button (top right – always visible, color shows state) ──
+        btn_color = COLORS['button_detect_off'] if self.needle_detection_disabled else COLORS['button_detect_on']
+        self.draw_button(img, self.skip_detection_button, btn_color)
+        # ─────────────────────────────────────────────────────────────────────
         
         # Draw PREVIOUS button to go back to video (bottom left)
         self.draw_button(img, self.your_turn_previous_button, COLORS['button_hover'])
@@ -1137,8 +1192,10 @@ class WalletTutorialPlayer:
     def _run_needle_check(self, cam_resized):
         """Crop the ROI column from *cam_resized* and run needle.onnx.
         Returns True if the highest-confidence detection centre-X is within
-        NEEDLE_CENTER_TOLERANCE pixels of the column's horizontal midpoint."""
-        if self.needle_model is None:
+        NEEDLE_CENTER_TOLERANCE pixels of the column's horizontal midpoint.
+        Always returns False (skipping inference) when needle_detection_disabled
+        is True – callers should check that flag before calling this method."""
+        if self.needle_model is None or self.needle_detection_disabled:
             return False
         h, w = cam_resized.shape[:2]
         x1 = max(0, self.ROI_CENTER_X - self.ROI_COL_WIDTH // 2)
