@@ -64,6 +64,22 @@ source .venv/bin/activate
 python main.py
 ```
 
+### Create a Clickable Desktop Icon (Raspberry Pi)
+
+Run these commands once on your Raspberry Pi:
+
+```bash
+cd ~/SewBot-Rpi
+chmod +x install_desktop_icon.sh
+./install_desktop_icon.sh
+```
+
+This creates:
+- `~/Desktop/SewBot-Rpi.desktop` (desktop icon)
+- `~/.local/share/applications/SewBot-Rpi.desktop` (app menu entry)
+
+If Raspberry Pi still blocks launching, right-click the desktop icon and choose **Allow Launching**.
+
 ### Why This Works
 
 The script uses **system packages** (python3-numpy, python3-opencv, python3-pygame) which are pre-compiled for ARM by Raspberry Pi OS. This completely avoids the "Illegal instruction" error that happens when pip installs x86 packages.
