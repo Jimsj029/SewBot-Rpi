@@ -26,18 +26,19 @@ if [ ! -f "${ICON_PATH}" ]; then
   ICON_PATH=""
 fi
 
+# Safely write the launcher script with absolute paths.
 cat > "${LAUNCHER_SCRIPT}" <<EOF
 #!/bin/bash
 set -euo pipefail
 
 PROJECT_DIR="${SCRIPT_DIR}"
-RUN_SH="${PROJECT_DIR}/run.sh"
+RUN_SH="${SCRIPT_DIR}/run.sh"
 LOG_FILE="${HOME}/sewguider-launch.log"
 
 {
   echo "============================================================"
-  echo "Sew Guider launcher start: \\$(date)"
-  echo "Project: \\${PROJECT_DIR}"
+  echo "Sew Guider launcher start: $(date)"
+  echo "Project: ${PROJECT_DIR}"
 } >> "${LOG_FILE}"
 
 if [ -x "${RUN_SH}" ]; then
@@ -48,6 +49,14 @@ else
   exit 1
 fi
 EOF
+
+# Ensure launcher is executable
+chmod +x "${LAUNCHER_SCRIPT}" || true
+
+# Ensure run.sh is executable so launcher can run it
+if [ -f "${SCRIPT_DIR}/run.sh" ]; then
+  chmod +x "${SCRIPT_DIR}/run.sh" || true
+fi
 
 chmod +x "${LAUNCHER_SCRIPT}"
 
