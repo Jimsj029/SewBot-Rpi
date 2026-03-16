@@ -27,38 +27,37 @@ if [ ! -f "${ICON_PATH}" ]; then
 fi
 
 # Safely write the launcher script with absolute paths.
+RUN_SH_PATH="${SCRIPT_DIR}/run.sh"
+LOG_FILE_PATH="${LOG_FILE}"
+
 cat > "${LAUNCHER_SCRIPT}" <<EOF
 #!/bin/bash
 set -euo pipefail
 
 PROJECT_DIR="${SCRIPT_DIR}"
-RUN_SH="${SCRIPT_DIR}/run.sh"
-LOG_FILE="${HOME}/sewguider-launch.log"
+RUN_SH="${RUN_SH_PATH}"
+LOG_FILE="${LOG_FILE_PATH}"
 
 {
   echo "============================================================"
-  echo "Sew Guider launcher start: $(date)"
-  echo "Project: ${SCRIPT_DIR}"
-} >> "${LOG_FILE}"
+  echo "Sew Guider launcher start: \$(date)"
+  echo "Project: \${PROJECT_DIR}"
+} >> "\${LOG_FILE}"
 
-if [ -x "${RUN_SH}" ]; then
-  nohup "${RUN_SH}" >> "${LOG_FILE}" 2>&1 &
+if [ -x "\${RUN_SH}" ]; then
+  nohup "\${RUN_SH}" >> "\${LOG_FILE}" 2>&1 &
   disown || true
 else
-  echo "ERROR: run.sh is missing or not executable at ${RUN_SH}" >> "${LOG_FILE}"
+  echo "ERROR: run.sh is missing or not executable at \${RUN_SH}" >> "\${LOG_FILE}"
   exit 1
 fi
 EOF
 
-# Ensure launcher is executable
+# Ensure launcher is executable and run.sh is executable
 chmod +x "${LAUNCHER_SCRIPT}" || true
-
-# Ensure run.sh is executable so launcher can run it
-if [ -f "${SCRIPT_DIR}/run.sh" ]; then
-  chmod +x "${SCRIPT_DIR}/run.sh" || true
+if [ -f "${RUN_SH_PATH}" ]; then
+  chmod +x "${RUN_SH_PATH}" || true
 fi
-
-chmod +x "${LAUNCHER_SCRIPT}"
 
 DESKTOP_CONTENT="[Desktop Entry]
 Version=1.0
