@@ -2943,7 +2943,8 @@ class PatternMode:
         cv2.addWeighted(overlay, 0.7, frame, 0.3, 0, frame)
 
         # Stage 2: final congratulation screen after finishing Level 5 results.
-        if getattr(self, 'eval_screen_stage', 0) == 2:
+        # Disabled: remove special 'congratulations' screen for Level 5
+        if False and getattr(self, 'eval_screen_stage', 0) == 2:
             panel_w = 560
             panel_h = 320
             panel_x = (self.width - panel_w) // 2
@@ -3110,7 +3111,8 @@ class PatternMode:
         # Title
         content_y = panel_y + 60
         if self.level_completed:
-            title = "CONGRATULATIONS!" if self.current_level >= 5 else "LEVEL COMPLETED!"
+            # Always show a neutral completion title; remove special congratulations for level 5
+            title = "LEVEL COMPLETED!"
             title_color = self.COLORS['glow_cyan']
         else:
             title = "LEVEL INCOMPLETE"
@@ -3323,6 +3325,12 @@ class PatternMode:
         # Check evaluate button (only if not evaluated yet)
         for color_name, btn in self.color_buttons.items():
             if btn['x'] <= x <= btn['x'] + btn['w'] and btn['y'] <= y <= btn['y'] + btn['h']:
+                # Prevent changing thread detection color while tracing is in progress
+                if getattr(self, 'sewing_started', False) and not getattr(self, 'is_evaluated', False) and getattr(self, 'raw_progress', 0.0) < 100.0:
+                    # Block change during active tracing
+                    print("⚠ Cannot change thread color while tracing is in progress")
+                    return None
+
                 self.play_button_click_sound()
                 self.selected_detection_color = color_name
                 # Auto-fix cloth if it now conflicts with the new thread color
