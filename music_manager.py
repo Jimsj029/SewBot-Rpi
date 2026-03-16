@@ -9,7 +9,11 @@ import os
 class MusicManager:
     def __init__(self, music_folder='music'):
         """Initialize the music manager"""
-        self.music_folder = music_folder
+        if os.path.isabs(music_folder):
+            self.music_folder = music_folder
+        else:
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            self.music_folder = os.path.join(base_dir, music_folder)
         self.initialized = False
         self.current_track = None
         self.volume = 0.3  # Default volume (0.0 to 1.0)
@@ -66,7 +70,12 @@ class MusicManager:
             
             # Start playback
             if fade_ms > 0:
-                pygame.mixer.music.play(loops=loops, fade_ms=fade_ms)
+                try:
+                    pygame.mixer.music.play(loops=loops, fade_ms=fade_ms)
+                except Exception:
+                    # Compatibility fallback for pygame builds that don't support
+                    # keyword arguments (or fade_ms kwarg) on music.play().
+                    pygame.mixer.music.play(loops, 0.0, int(fade_ms))
             else:
                 pygame.mixer.music.play(loops=loops)
             

@@ -243,7 +243,7 @@ class PatternMode:
         self.skeleton_tangent_lookahead = 10  # Points used for tangent estimation
         # Auto-move speed: steps per frame along the skeleton when thread color is detected.
         # Increase to move faster, decrease to move slower.
-        self.auto_move_speed = 0.5
+        self.auto_move_speed = 1.0
         # Speed control buttons (positions set dynamically in draw_score_panel)
 
         self.needle_on_pattern = True  # Whether the needle is currently on a pattern pixel
@@ -1744,10 +1744,37 @@ class PatternMode:
                             _outline_full = self._get_pattern_outline_mask(pattern_alpha, _pat_w, _pat_h)
                             _outline_crop = _outline_full[_sy1:_sy2, _sx1:_sx2]
                             _color_mask = self._get_selected_color_mask(_cam_region, hsv_patch=_hsv_region)
-                            _ink_mask = (_outline_crop > 0)
+                            # Restrict movement gating to a local region around the
+                            # fixed needle point. This avoids diluting the ratio with
+                            # the entire visible pattern and makes movement responsive.
+                            _local_half = int(max(8, self.outline_detect_local_half_size))
+                            _nx = int(round(self.NEEDLE_ROI_X))
+                            _ny = int(round(self.NEEDLE_ROI_Y))
+                            _lx1 = max(_dx1, _nx - _local_half)
+                            _ly1 = max(_dy1, _ny - _local_half)
+                            _lx2 = min(_dx2, _nx + _local_half + 1)
+                            _ly2 = min(_dy2, _ny + _local_half + 1)
+                            _rx1 = _lx1 - _dx1
+                            _ry1 = _ly1 - _dy1
+                            _rx2 = _lx2 - _dx1
+                            _ry2 = _ly2 - _dy1
+
+                            if _rx2 > _rx1 and _ry2 > _ry1:
+                                _color_local = _color_mask[_ry1:_ry2, _rx1:_rx2]
+                                _outline_local = _outline_crop[_ry1:_ry2, _rx1:_rx2]
+                                _pattern_local = pattern_alpha[
+                                    (_sy1 + _ry1):(_sy1 + _ry2),
+                                    (_sx1 + _rx1):(_sx1 + _rx2)
+                                ]
+                            else:
+                                _color_local = _color_mask
+                                _outline_local = _outline_crop
+                                _pattern_local = pattern_alpha[_sy1:_sy2, _sx1:_sx2]
+
+                            _ink_mask = (_outline_local > 0)
                             _ink_count = int(np.count_nonzero(_ink_mask))
                             if _ink_count > 0:
-                                _color_in_ink = int(np.count_nonzero(_color_mask[_ink_mask]))
+                                _color_in_ink = int(np.count_nonzero(_color_local[_ink_mask]))
                                 _ratio = float(_color_in_ink) / float(_ink_count)
                                 _min_outline_pixels = int(self.min_color_pixels_outline)
                                 if self.current_level == 3:
@@ -1761,10 +1788,8 @@ class PatternMode:
                                 )
                                 color_match_for_overlay_move = self.last_color_match
                                 if self.last_color_match:
-                                    _thread_mask = (_color_mask > 0)
-                                    _pattern_mask_crop = (
-                                        pattern_alpha[_sy1:_sy2, _sx1:_sx2] > self.pattern_alpha_threshold
-                                    )
+                                    _thread_mask = (_color_local > 0)
+                                    _pattern_mask_crop = (_pattern_local > self.pattern_alpha_threshold)
                                     if _pattern_mask_crop.shape == _thread_mask.shape:
                                         _thread_px = int(np.count_nonzero(_thread_mask))
                                         if _thread_px > 0:
@@ -1779,13 +1804,13 @@ class PatternMode:
                                             thread_overlaps_pattern = False
 
                                 # Persist color-in-outline debug mask for on-frame highlight.
-                                _masked = cv2.bitwise_and(_color_mask, _color_mask, mask=_outline_crop)
+                                _masked = cv2.bitwise_and(_color_local, _color_local, mask=_outline_local)
                                 self.last_color_mask = _masked.copy()
                                 self.last_color_mask_bounds = (
-                                    _dx1,
-                                    _dy1,
-                                    _dx2,
-                                    _dy2,
+                                    _lx1,
+                                    _ly1,
+                                    _lx2,
+                                    _ly2,
                                 )
                                 self.last_color_contour_box = self.last_color_mask_bounds
                             else:

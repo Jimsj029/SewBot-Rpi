@@ -214,11 +214,27 @@ class WalletTutorialPlayer:
                         _needle_path,
                         sess_options=_sess_opts,
                         providers=['CPUExecutionProvider'])
-                    self.needle_input_name = self.needle_model.get_inputs()[0].name
+                    needle_input = self.needle_model.get_inputs()[0]
+                    self.needle_input_name = needle_input.name
+                    input_shape = needle_input.shape
+                    detected_imgsz = None
+                    if isinstance(input_shape, (list, tuple)) and len(input_shape) >= 4:
+                        try:
+                            in_h = int(input_shape[2])
+                            in_w = int(input_shape[3])
+                            if in_h > 0 and in_h == in_w:
+                                detected_imgsz = in_h
+                        except Exception:
+                            detected_imgsz = None
+                    if detected_imgsz is not None:
+                        self._needle_imgsz = detected_imgsz
                     # Warm-up run so first real frame isn't slow
                     _w = np.zeros((1, 3, self._needle_imgsz, self._needle_imgsz), dtype=np.float32)
                     self.needle_model.run(None, {self.needle_input_name: _w})
-                    print(f"\u2713 Needle centring model loaded (ONNX Runtime direct): {_needle_path}")
+                    print(
+                        f"\u2713 Needle centring model loaded (ONNX Runtime direct): "
+                        f"{_needle_path} (imgsz={self._needle_imgsz})"
+                    )
                 else:
                     print(f"\u26a0 needle.onnx not found at {_needle_path}")
             except Exception as _e:
