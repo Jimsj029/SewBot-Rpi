@@ -30,22 +30,21 @@ cat > "${LAUNCHER_SCRIPT}" <<EOF
 #!/bin/bash
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RUN_SH="${PROJECT_DIR}/run.sh"
 LOG_FILE="${HOME}/sewguider-launch.log"
 
 {
   echo "============================================================"
   echo "Sew Guider launcher start: \\$(date)"
-  echo "Project: \\${SCRIPT_DIR}"
+  echo "Project: \\${PROJECT_DIR}"
 } >> "${LOG_FILE}"
 
-cd "${SCRIPT_DIR}"
-
-if [ -x "./run.sh" ]; then
-  nohup ./run.sh >> "${LOG_FILE}" 2>&1 &
+if [ -x "${RUN_SH}" ]; then
+  nohup "${RUN_SH}" >> "${LOG_FILE}" 2>&1 &
   disown || true
 else
-  echo "ERROR: run.sh is missing or not executable" >> "${LOG_FILE}"
+  echo "ERROR: run.sh is missing or not executable at ${RUN_SH}" >> "${LOG_FILE}"
   exit 1
 fi
 EOF
