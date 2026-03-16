@@ -30,13 +30,13 @@ cat > "${LAUNCHER_SCRIPT}" <<EOF
 #!/bin/bash
 set -euo pipefail
 
-PROJECT_DIR="${SCRIPT_DIR}"
-LOG_FILE="${LOG_FILE}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LOG_FILE="${HOME}/sewguider-launch.log"
 
 {
   echo "============================================================"
-  echo "SewBot launcher start: \\$(date)"
-  echo "Project: \\${PROJECT_DIR}"
+  echo "Sew Guider launcher start: \\$(date)"
+  echo "Project: \\${SCRIPT_DIR}"
 } >> "${LOG_FILE}"
 
 cd "${SCRIPT_DIR}"
