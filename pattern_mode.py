@@ -594,8 +594,8 @@ class PatternMode:
 
         # All extents are 60% of the full canvas so shapes are 40% smaller.
         # Usable half-extents from centre:  horiz ±65 px,  vert ±81 px
-        y_top = cy - 81   # 54
-        y_bot = cy + 81   # 216
+        y_top = cy - 69   # 54
+        y_bot = cy + 69   # 216
 
         if level == 1:
             # Straight vertical line, centred horizontally
@@ -604,12 +604,12 @@ class PatternMode:
         elif level == 2:
             # V shape – two lines from top-left / top-right meeting at bottom-centre tip
             tip = (cx, y_bot)
-            cv2.line(mask, (cx - 65, y_top), tip, 255, tk)
-            cv2.line(mask, (cx + 65, y_top), tip, 255, tk)
+            cv2.line(mask, (cx - 55, y_top), tip, 255, tk)
+            cv2.line(mask, (cx + 55, y_top), tip, 255, tk)
 
         elif level == 3:
             # U shape – two vertical arms joined by a bottom semicircular arc
-            arm_r  = 50          # horizontal half-width of U
+            arm_r  = 42          # horizontal half-width of U
             arc_cy = cy + 52     # 187 – vertical centre of the closing arc
             arc_ry = 29          # vertical radius of the arc
             arm_top = y_top      # 54
@@ -621,8 +621,8 @@ class PatternMode:
         elif level == 4:
             # S curve built from the same two-cubic-Bezier structure as sample.py.
             # We map those reference control points into this level's centered 60% box.
-            x_left = cx - 65
-            x_right = cx + 65
+            x_left = cx - 55
+            x_right = cx + 55
 
             # Reference extents from sample.py
             ref_x0, ref_x1 = 160.0, 430.0
@@ -664,14 +664,14 @@ class PatternMode:
 
         elif level == 5:
             # W shape – polyline: top-left → valley → centre peak → valley → top-right
-            valley_y = cy + 68   # 203
-            peak_y   = cy - 32   # 103
+            valley_y = cy + 58   # 203
+            peak_y   = cy - 27   # 103
             pts = np.array([
-                [cx - 65, y_top],    # top-left
-                [cx - 32, valley_y], # first valley
+                [cx - 55, y_top],    # top-left
+                [cx - 27, valley_y], # first valley
                 [cx,      peak_y],   # centre peak
-                [cx + 32, valley_y], # second valley
-                [cx + 65, y_top],    # top-right
+                [cx + 27, valley_y], # second valley
+                [cx + 55, y_top],    # top-right
             ], dtype=np.int32).reshape(-1, 1, 2)
             cv2.polylines(mask, [pts], False, 255, tk)
 
