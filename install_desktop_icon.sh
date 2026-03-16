@@ -1,5 +1,5 @@
 #!/bin/bash
-# Create Raspberry Pi desktop/app-menu launcher for SewBot-Rpi
+# Create Raspberry Pi desktop/app-menu launcher for Sew Guider
 
 set -euo pipefail
 
@@ -7,18 +7,19 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DESKTOP_DIR="${HOME}/Desktop"
 APPS_DIR="${HOME}/.local/share/applications"
 BIN_DIR="${HOME}/.local/bin"
-DESKTOP_FILE_NAME="SewBot-Rpi.desktop"
-LAUNCHER_SCRIPT="${BIN_DIR}/sewbot-rpi-launch.sh"
-LOG_FILE="${HOME}/sewbot-launch.log"
+DESKTOP_FILE_NAME="Sew Guider.desktop"
+LAUNCHER_SCRIPT="${BIN_DIR}/sew-guider-launch.sh"
+LOG_FILE="${HOME}/sewguider-launch.log"
 
 mkdir -p "${DESKTOP_DIR}" "${APPS_DIR}" "${BIN_DIR}"
 
-# Remove old conflicting desktop scripts if they exist.
-for LEGACY in "${DESKTOP_DIR}/SewBot-Rpi" "${DESKTOP_DIR}/SewBot-Rpi.sh"; do
+for LEGACY in "${DESKTOP_DIR}/SewBot-Rpi" "${DESKTOP_DIR}/SewBot-Rpi.sh" "${DESKTOP_DIR}/SewBot Guider" "${DESKTOP_DIR}/SewBot Guider.sh" "${DESKTOP_DIR}/Sew Guider" "${DESKTOP_DIR}/Sew Guider.sh"; do
   if [ -f "${LEGACY}" ]; then
     rm -f "${LEGACY}"
   fi
 done
+
+rm -f "${DESKTOP_DIR}/SewBot-Rpi.desktop" "${APPS_DIR}/SewBot-Rpi.desktop" "${DESKTOP_DIR}/SewBot Guider.desktop" "${APPS_DIR}/SewBot Guider.desktop"
 
 ICON_PATH="${SCRIPT_DIR}/images/logo.png"
 if [ ! -f "${ICON_PATH}" ]; then
@@ -57,8 +58,8 @@ chmod +x "${LAUNCHER_SCRIPT}"
 DESKTOP_CONTENT="[Desktop Entry]
 Version=1.0
 Type=Application
-Name=SewBot-Rpi
-Comment=Launch SewBot-Rpi
+Name=Sew Guider
+Comment=Launch Sew Guider
 Exec=${LAUNCHER_SCRIPT}
 Path=${SCRIPT_DIR}
 Icon=${ICON_PATH}

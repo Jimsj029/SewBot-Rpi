@@ -48,7 +48,7 @@ class SewBotApp:
     def __init__(self):
         self.width = 1024
         self.height = 600
-        self.window_name = 'SewBot - Pattern Recognition System'
+            self.window_name = 'Sew Guider - Pattern Recognition System'
         self.state = 'main_menu'  # main_menu, tutorial, wallet_tutorial, mode_selection, level_selection, pattern
         self.previous_state = None  # Track previous state for music transitions
         self.glow_phase = 0
