@@ -864,14 +864,29 @@ class PatternMode:
         # Base state: everything in the blueprint is still to be sewn (yellow).
         colored_overlay[pattern_pixels] = self.segment_colors['current']
 
-        # Completed stitch mask paints only stitched blueprint pixels cyan.
-        # No dilation or erosion — use the raw stamp mask so corners are
-        # covered exactly where the needle passed and bleed to other branches
-        # is prevented by keeping the stamp radius small (see _register_stitch).
+        # Completed stitch mask paints stitched blueprint pixels cyan.
+        # Expand the cyan area dynamically so its visual size scales with the
+        # overlay dimensions and current progress. This makes the cyan 'fill'
+        # feel proportional to the overlay as progress increases.
         if self.completed_stitch_mask is not None:
             completed_mask_resized = cv2.resize(self.completed_stitch_mask, (width, height), interpolation=cv2.INTER_NEAREST)
             completed_pattern_pixels = np.logical_and(pattern_pixels, completed_mask_resized > 0)
-            colored_overlay[completed_pattern_pixels] = self.segment_colors['completed']
+
+            # Determine a dynamic dilation radius based on overlay size and progress.
+            # Base radius uses configured cyan_spread_radius (fallback to 6px if unset).
+            base_radius = max(6, int(self.cyan_spread_radius)) if hasattr(self, 'cyan_spread_radius') else 6
+            # Scale factor from progress (0.0 - 1.0)
+            prog_scale = max(0.0, min(1.0, float(self.pattern_progress) / 100.0))
+            # Add extra radius proportional to overlay size (2% of max dimension) scaled by progress
+            extra = int(prog_scale * (max(width, height) * 0.02))
+            dyn_radius = base_radius + extra
+
+            # Create structuring element and dilate the completed mask
+            ksize = max(1, 2 * dyn_radius + 1)
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ksize, ksize))
+            dilated = cv2.dilate(completed_pattern_pixels.astype(np.uint8), kernel, iterations=1) > 0
+
+            colored_overlay[dilated] = self.segment_colors['completed']
 
         # Missed stitch mask paints off-pattern detections red.
         if self.missed_stitch_mask is not None:
