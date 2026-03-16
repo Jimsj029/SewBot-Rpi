@@ -48,12 +48,12 @@ class SewBotApp:
     def __init__(self):
         self.width = 1024
         self.height = 600
-        self.window_name = 'SewBot - Pattern Recognition System'
+        self.window_name = 'Sew Guider - Pattern Recognition System'
         self.state = 'main_menu'  # main_menu, tutorial, wallet_tutorial, mode_selection, level_selection, pattern
         self.previous_state = None  # Track previous state for music transitions
         self.glow_phase = 0
         self.running = True
-        self.fullscreen = False  # Fullscreen state
+        self.fullscreen = True  # Fullscreen state (start fullscreen)
         
         # Theme colors
         self.COLORS = {
@@ -188,6 +188,12 @@ class SewBotApp:
         try:
             cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
             cv2.setMouseCallback(self.window_name, self.mouse_callback)
+            # Start application in fullscreen by default
+            try:
+                cv2.setWindowProperty(self.window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+                print("Fullscreen mode enabled on startup")
+            except Exception:
+                pass
         except:
             print("Failed to create window")
             self.running = False
