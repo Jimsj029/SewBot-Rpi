@@ -53,7 +53,7 @@ class SewBotApp:
         self.previous_state = None  # Track previous state for music transitions
         self.glow_phase = 0
         self.running = True
-        self.fullscreen = False  # Fullscreen state
+        self.fullscreen = True  # Start in fullscreen by default
         
         # Theme colors
         self.COLORS = {
@@ -188,6 +188,8 @@ class SewBotApp:
         try:
             cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
             cv2.setMouseCallback(self.window_name, self.mouse_callback)
+            cv2.setWindowProperty(self.window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+            print("Fullscreen mode enabled")
         except:
             print("Failed to create window")
             self.running = False

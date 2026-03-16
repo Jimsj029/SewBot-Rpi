@@ -96,6 +96,12 @@ set_quick_exec "${HOME}/.config/libfm/libfm.conf"
 set_quick_exec "${HOME}/.config/pcmanfm/LXDE-pi/pcmanfm.conf"
 set_quick_exec "${HOME}/.config/pcmanfm/LXDE/pcmanfm.conf"
 
+# GNOME/Caja fallback: launch executable text files directly (no prompt)
+if command -v gsettings >/dev/null 2>&1; then
+  gsettings set org.gnome.nautilus.preferences executable-text-activation 'launch' >/dev/null 2>&1 || true
+  gsettings set org.caja.preferences executable-text-activation 'launch' >/dev/null 2>&1 || true
+fi
+
 # Mark Desktop launcher as trusted when supported (GNOME/Caja/Nautilus)
 if command -v gio >/dev/null 2>&1; then
   gio set "${DESKTOP_DIR}/${DESKTOP_FILE_NAME}" metadata::trusted true >/dev/null 2>&1 || true
@@ -113,3 +119,4 @@ echo "✅ Launcher script created: ${LAUNCHER_SCRIPT}"
 echo "✅ File manager quick-exec enabled (no execute prompt)"
 echo "📝 Launch log file: ${LOG_FILE}"
 echo "Tip: if Raspberry Pi still asks for permission, right-click the icon and choose 'Allow Launching'."
+echo "Tip: log out/in once after installation so desktop settings reload."
