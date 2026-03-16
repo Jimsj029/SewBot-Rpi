@@ -65,6 +65,37 @@ for TARGET in "${DESKTOP_DIR}/${DESKTOP_FILE_NAME}" "${APPS_DIR}/${DESKTOP_FILE_
   chmod +x "${TARGET}"
 done
 
+# Configure PCManFM/LibFM to launch executable text files directly
+# (disables the "Execute / Execute in Terminal" prompt).
+set_quick_exec() {
+  local conf_file="$1"
+  local conf_dir
+  conf_dir="$(dirname "${conf_file}")"
+  mkdir -p "${conf_dir}"
+
+  if [ ! -f "${conf_file}" ]; then
+    cat > "${conf_file}" <<'EOF'
+[config]
+quick_exec=1
+EOF
+    return
+  fi
+
+  if grep -q '^quick_exec=' "${conf_file}"; then
+    sed -i 's/^quick_exec=.*/quick_exec=1/' "${conf_file}"
+  else
+    if grep -q '^\[config\]' "${conf_file}"; then
+      sed -i '/^\[config\]/a quick_exec=1' "${conf_file}"
+    else
+      printf '\n[config]\nquick_exec=1\n' >> "${conf_file}"
+    fi
+  fi
+}
+
+set_quick_exec "${HOME}/.config/libfm/libfm.conf"
+set_quick_exec "${HOME}/.config/pcmanfm/LXDE-pi/pcmanfm.conf"
+set_quick_exec "${HOME}/.config/pcmanfm/LXDE/pcmanfm.conf"
+
 # Mark Desktop launcher as trusted when supported (GNOME/Caja/Nautilus)
 if command -v gio >/dev/null 2>&1; then
   gio set "${DESKTOP_DIR}/${DESKTOP_FILE_NAME}" metadata::trusted true >/dev/null 2>&1 || true
@@ -79,5 +110,6 @@ fi
 echo "✅ Desktop icon created: ${DESKTOP_DIR}/${DESKTOP_FILE_NAME}"
 echo "✅ App menu entry created: ${APPS_DIR}/${DESKTOP_FILE_NAME}"
 echo "✅ Launcher script created: ${LAUNCHER_SCRIPT}"
+echo "✅ File manager quick-exec enabled (no execute prompt)"
 echo "📝 Launch log file: ${LOG_FILE}"
 echo "Tip: if Raspberry Pi still asks for permission, right-click the icon and choose 'Allow Launching'."
