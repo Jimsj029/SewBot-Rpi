@@ -164,11 +164,11 @@ class PatternMode:
         self.evaluation_wrong_pct = 0.0  # % of wrong/off-pattern stitches among detections
         self.final_score = 0.0  # Adjusted score after accounting for wrong stitches
         self.level_pass_thresholds = {
-            1: 60.0,
-            2: 35.0,
-            3: 40.0,
-            4: 30.0,
-            5: 25.0,
+            1: 80.0,
+            2: 80.0,
+            3: 80.0,
+            4: 80.0,
+            5: 80.0,
         }
         self.session_start_time = None
         
@@ -2559,7 +2559,7 @@ class PatternMode:
                 ("you finish sewing.", self.COLORS['text_secondary'], 0.7, 2),
                 "",
                 ("Reach 100% progress to unlock", self.COLORS['text_secondary'], 0.7, 2),
-                (f"EVALUATE, then score {self.level_pass_thresholds.get(self.current_level, 80.0):.0f}%+ to pass.", self.COLORS['text_secondary'], 0.7, 2),
+                ("EVALUATE, then score 80%+ to pass.", self.COLORS['text_secondary'], 0.7, 2),
             ]
         
         y_pos = content_y
