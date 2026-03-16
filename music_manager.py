@@ -207,6 +207,39 @@ class MusicManager:
                 except Exception as e:
                     last_error = e
 
+            # If loading failed (commonly MP3 unsupported on some RPi builds),
+            # try converting an MP3 to WAV using ffmpeg/avconv if available.
+            try:
+                import shutil
+                converter = shutil.which('ffmpeg') or shutil.which('avconv')
+                if converter:
+                    # Prefer first existing mp3 candidate
+                    mp3_candidates = [p for p in existing_paths if p.lower().endswith('.mp3')]
+                    if mp3_candidates:
+                        src = mp3_candidates[0]
+                        cache_dir = os.path.join(self.music_folder, '.cache')
+                        os.makedirs(cache_dir, exist_ok=True)
+                        dst = os.path.join(cache_dir, os.path.splitext(os.path.basename(src))[0] + '.wav')
+                        if (not os.path.exists(dst)) or (os.path.getmtime(dst) < os.path.getmtime(src)):
+                            cmd = [converter, '-y', '-i', src, dst]
+                            try:
+                                subprocess_run = __import__('subprocess').run
+                                subprocess_run(cmd, check=True, stdout=__import__('subprocess').PIPE, stderr=__import__('subprocess').PIPE)
+                            except Exception as e:
+                                last_error = e
+                                raise
+
+                        try:
+                            sound = pygame.mixer.Sound(dst)
+                            sound.set_volume(self.sfx_volume)
+                            self.sound_effects[sfx_name] = sound
+                            print(f"✓ Sound effect loaded (converted): {os.path.basename(dst)}")
+                            return True
+                        except Exception as e:
+                            last_error = e
+            except Exception:
+                pass
+
             self.failed_sound_effects.add(sfx_name)
             print(f"⚠ Could not load sound effect: {last_error}")
             return False
