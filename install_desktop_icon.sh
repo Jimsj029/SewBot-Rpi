@@ -13,6 +13,13 @@ LOG_FILE="${HOME}/sewbot-launch.log"
 
 mkdir -p "${DESKTOP_DIR}" "${APPS_DIR}" "${BIN_DIR}"
 
+# Remove old conflicting desktop scripts if they exist.
+for LEGACY in "${DESKTOP_DIR}/SewBot-Rpi" "${DESKTOP_DIR}/SewBot-Rpi.sh"; do
+  if [ -f "${LEGACY}" ]; then
+    rm -f "${LEGACY}"
+  fi
+done
+
 ICON_PATH="${SCRIPT_DIR}/images/logo.png"
 if [ ! -f "${ICON_PATH}" ]; then
   ICON_PATH=""
@@ -96,6 +103,14 @@ set_quick_exec "${HOME}/.config/libfm/libfm.conf"
 set_quick_exec "${HOME}/.config/pcmanfm/LXDE-pi/pcmanfm.conf"
 set_quick_exec "${HOME}/.config/pcmanfm/LXDE/pcmanfm.conf"
 
+# Apply quick_exec for any other pcmanfm profile folders present.
+if [ -d "${HOME}/.config/pcmanfm" ]; then
+  for PROFILE_DIR in "${HOME}/.config/pcmanfm"/*; do
+    [ -d "${PROFILE_DIR}" ] || continue
+    set_quick_exec "${PROFILE_DIR}/pcmanfm.conf"
+  done
+fi
+
 # GNOME/Caja fallback: launch executable text files directly (no prompt)
 if command -v gsettings >/dev/null 2>&1; then
   gsettings set org.gnome.nautilus.preferences executable-text-activation 'launch' >/dev/null 2>&1 || true
@@ -111,6 +126,12 @@ fi
 # Make sure desktop environments refresh launcher cache
 if command -v update-desktop-database >/dev/null 2>&1; then
   update-desktop-database "${APPS_DIR}" >/dev/null 2>&1 || true
+fi
+
+# Reload/restart PCManFM so quick_exec changes take effect now.
+if command -v pcmanfm >/dev/null 2>&1; then
+  pkill -f pcmanfm >/dev/null 2>&1 || true
+  (nohup pcmanfm --desktop --profile LXDE-pi >/dev/null 2>&1 &) || true
 fi
 
 echo "✅ Desktop icon created: ${DESKTOP_DIR}/${DESKTOP_FILE_NAME}"
