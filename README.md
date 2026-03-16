@@ -80,6 +80,12 @@ This creates:
 
 If Raspberry Pi still blocks launching, right-click the desktop icon and choose **Allow Launching**.
 
+If the icon still does not open the app, check launcher logs:
+
+```bash
+tail -n 80 ~/sewbot-launch.log
+```
+
 ### Why This Works
 
 The script uses **system packages** (python3-numpy, python3-opencv, python3-pygame) which are pre-compiled for ARM by Raspberry Pi OS. This completely avoids the "Illegal instruction" error that happens when pip installs x86 packages.
