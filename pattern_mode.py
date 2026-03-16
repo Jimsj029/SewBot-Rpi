@@ -565,6 +565,110 @@ class PatternMode:
         pattern_mask[sy1:sy2, sx1:sx2] = (cam_crop > 0).astype(np.uint8) * 255
         return pattern_mask
 
+    def _generate_shape_mask(self, level):
+        """Generate a binary mask (0/255 uint8, shape uniform_height x uniform_width)
+        mathematically for each level shape, replacing image-file loading.
+
+        All shapes are scaled to 60% of the canvas (40% size reduction).
+        Line thickness is 10 px before dilation.
+
+        Level 1 – straight vertical line
+        Level 2 – V  (open at top, tip at bottom-centre)
+        Level 3 – U  (two arms joined by a bottom arc)
+        Level 4 – S curve (two cubic Bezier segments)
+        Level 5 – W  (two valleys, three peaks)
+        """
+        W, H = self.uniform_width, self.uniform_height  # 216, 270
+        mask = np.zeros((H, W), dtype=np.uint8)
+        tk = 10  # line thickness (px)
+        cx = W // 2   # 108
+        cy = H // 2   # 135
+
+        # All extents are 60% of the full canvas so shapes are 40% smaller.
+        # Usable half-extents from centre:  horiz ±65 px,  vert ±81 px
+        y_top = cy - 81   # 54
+        y_bot = cy + 81   # 216
+
+        if level == 1:
+            # Straight vertical line, centred horizontally
+            cv2.line(mask, (cx, y_top), (cx, y_bot), 255, tk)
+
+        elif level == 2:
+            # V shape – two lines from top-left / top-right meeting at bottom-centre tip
+            tip = (cx, y_bot)
+            cv2.line(mask, (cx - 65, y_top), tip, 255, tk)
+            cv2.line(mask, (cx + 65, y_top), tip, 255, tk)
+
+        elif level == 3:
+            # U shape – two vertical arms joined by a bottom semicircular arc
+            arm_r  = 50          # horizontal half-width of U
+            arc_cy = cy + 52     # 187 – vertical centre of the closing arc
+            arc_ry = 29          # vertical radius of the arc
+            arm_top = y_top      # 54
+            cv2.line(mask, (cx - arm_r, arm_top), (cx - arm_r, arc_cy), 255, tk)
+            cv2.line(mask, (cx + arm_r, arm_top), (cx + arm_r, arc_cy), 255, tk)
+            # Bottom half of ellipse closes the U
+            cv2.ellipse(mask, (cx, arc_cy), (arm_r, arc_ry), 0, 0, 180, 255, tk)
+
+        elif level == 4:
+            # S curve built from the same two-cubic-Bezier structure as sample.py.
+            # We map those reference control points into this level's centered 60% box.
+            x_left = cx - 65
+            x_right = cx + 65
+
+            # Reference extents from sample.py
+            ref_x0, ref_x1 = 160.0, 430.0
+            ref_y0, ref_y1 = 55.0, 310.0
+            ref_w = ref_x1 - ref_x0
+            ref_h = ref_y1 - ref_y0
+
+            def map_ref_point(px, py):
+                x = int(round(x_left + ((px - ref_x0) / ref_w) * (x_right - x_left)))
+                y = int(round(y_top + ((py - ref_y0) / ref_h) * (y_bot - y_top)))
+                return (x, y)
+
+            def cubic_bezier_points(p0, p1, p2, p3, num_points=150):
+                pts = []
+                for i in range(num_points + 1):
+                    t = i / num_points
+                    omt = 1.0 - t
+                    x = (omt ** 3) * p0[0] + 3 * (omt ** 2) * t * p1[0] + 3 * omt * (t ** 2) * p2[0] + (t ** 3) * p3[0]
+                    y = (omt ** 3) * p0[1] + 3 * (omt ** 2) * t * p1[1] + 3 * omt * (t ** 2) * p2[1] + (t ** 3) * p3[1]
+                    pts.append([int(round(x)), int(round(y))])
+                return pts
+
+            # Segment 1: left vertical drop -> bottom sweep -> inflection
+            s1_p0 = map_ref_point(160, 55)
+            s1_p1 = map_ref_point(160, 300)
+            s1_p2 = map_ref_point(280, 310)
+            s1_p3 = map_ref_point(295, 185)
+
+            # Segment 2: inflection -> top arch -> right vertical drop
+            s2_p0 = map_ref_point(295, 185)
+            s2_p1 = map_ref_point(310, 55)
+            s2_p2 = map_ref_point(430, 55)
+            s2_p3 = map_ref_point(430, 300)
+
+            seg1 = cubic_bezier_points(s1_p0, s1_p1, s1_p2, s1_p3, num_points=150)
+            seg2 = cubic_bezier_points(s2_p0, s2_p1, s2_p2, s2_p3, num_points=150)
+            curve = np.array(seg1 + seg2[1:], dtype=np.int32).reshape(-1, 1, 2)
+            cv2.polylines(mask, [curve], False, 255, tk)
+
+        elif level == 5:
+            # W shape – polyline: top-left → valley → centre peak → valley → top-right
+            valley_y = cy + 68   # 203
+            peak_y   = cy - 32   # 103
+            pts = np.array([
+                [cx - 65, y_top],    # top-left
+                [cx - 32, valley_y], # first valley
+                [cx,      peak_y],   # centre peak
+                [cx + 32, valley_y], # second valley
+                [cx + 65, y_top],    # top-right
+            ], dtype=np.int32).reshape(-1, 1, 2)
+            cv2.polylines(mask, [pts], False, 255, tk)
+
+        return mask
+
     def load_blueprint(self, level):
         """Load binary mask for the pattern"""
         # Reset progress if level changed
@@ -577,50 +681,8 @@ class PatternMode:
         if cached is not None:
             return cached
         
-        mask_path = os.path.join(self.blueprint_folder, f'level{level}_mask.png')
-        if not os.path.exists(mask_path):
-            return None, None
-        
-        mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
-        if mask is None:
-            return None, None
-        
-        # Resize the mask to the desired dimensions
-        mask = cv2.resize(mask, (self.uniform_width, self.uniform_height))
-
-        # Cut the binary mask in half (keep top half) — skipped for levels 3, 4 & 5
-        if level not in (2,3, 4, 5):
-            mask = mask[:mask.shape[0] // 2, :]
-
-        # Make level-specific width adjustments.
-        # Level 1 stays narrow; levels 2/3 are widened so the lower tip area
-        # has better pixel coverage and is easier to stitch through.
-        if level == 1:
-            # Reduce to ~28% of original width (adjustable)
-            new_w = int(round(mask.shape[1] * 0.28))
-        elif level == 2:
-            # Widen level 2 to full available width for better lower-tip coverage.
-            new_w = self.uniform_width
-        elif level == 3:
-            # Widen level 3 to full available width for better lower-tip coverage.
-            new_w = self.uniform_width
-        elif level == 5:
-            # Level 5: use the full canvas width for maximum width
-            new_w = self.uniform_width
-        elif level == 4:
-            # Level 4: use the full canvas width for a wide U shape
-            new_w = self.uniform_width
-        else:
-            new_w = int(round(mask.shape[1] * 0.625))
-        new_w = max(1, min(mask.shape[1], new_w))
-        mask = cv2.resize(mask, (new_w, mask.shape[0]), interpolation=cv2.INTER_NEAREST)
-
-        # Move the pattern to the middle of the cloth while keeping it centered horizontally
-        top_offset = (self.uniform_height - mask.shape[0]) // 2
-        left_offset = (self.uniform_width - mask.shape[1]) // 2
-        centered_mask = np.zeros((self.uniform_height, self.uniform_width), dtype=mask.dtype)
-        centered_mask[top_offset:top_offset + mask.shape[0], left_offset:left_offset + mask.shape[1]] = mask
-        mask = centered_mask
+        # Generate the shape mask mathematically (replaces file-based loading)
+        mask = self._generate_shape_mask(level)
 
         # Dilate pattern lines to achieve consistent visual thickness across levels.
         # Each non-level-1 pattern gets one extra iteration vs the previous baseline
@@ -664,39 +726,11 @@ class PatternMode:
         for visual/overlay purposes. Use this for precise evaluation scoring so
         that decisions are based on the original pattern pixels only.
         """
-        mask_path = os.path.join(self.blueprint_folder, f'level{level}_mask.png')
-        if not os.path.exists(mask_path):
-            return None
-
-        mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
-        if mask is None:
-            return None
-
-        # Resize to the uniform canvas used elsewhere
-        mask = cv2.resize(mask, (self.uniform_width, self.uniform_height), interpolation=cv2.INTER_NEAREST)
-
-        # Cut the binary mask in half (keep top half) — skipped for levels 3,4 & 5
-        if level not in (2, 3, 4, 5):
-            mask = mask[:mask.shape[0] // 2, :]
-
-        # Apply the same level-specific width adjustments as load_blueprint
-        if level == 1:
-            new_w = int(round(mask.shape[1] * 0.28))
-        elif level in (2, 3, 4, 5):
-            new_w = self.uniform_width
-        else:
-            new_w = int(round(mask.shape[1] * 0.625))
-        new_w = max(1, min(mask.shape[1], new_w))
-        mask = cv2.resize(mask, (new_w, mask.shape[0]), interpolation=cv2.INTER_NEAREST)
-
-        # Center the (possibly width-adjusted) mask into the uniform canvas
-        top_offset = (self.uniform_height - mask.shape[0]) // 2
-        left_offset = (self.uniform_width - mask.shape[1]) // 2
-        centered_mask = np.zeros((self.uniform_height, self.uniform_width), dtype=mask.dtype)
-        centered_mask[top_offset:top_offset + mask.shape[0], left_offset:left_offset + mask.shape[1]] = mask
+        # Generate the shape mask mathematically (replaces file-based loading)
+        mask = self._generate_shape_mask(level)
 
         # Return a clean binary mask (0/255) WITHOUT any dilation/outline
-        return (centered_mask > 0).astype(np.uint8) * 255
+        return (mask > 0).astype(np.uint8) * 255
     
     def reset_progress(self):
         """Reset progress tracking for a new level"""
