@@ -41,14 +41,11 @@ LOG_FILE="${HOME}/sewguider-launch.log"
 
 cd "${SCRIPT_DIR}"
 
-if [ -x "./run_rpi4.sh" ]; then
-  nohup ./run_rpi4.sh >> "${LOG_FILE}" 2>&1 &
-  disown || true
-elif [ -x "./run.sh" ]; then
+if [ -x "./run.sh" ]; then
   nohup ./run.sh >> "${LOG_FILE}" 2>&1 &
   disown || true
 else
-  echo "ERROR: run_rpi4.sh and run.sh are missing or not executable" >> "${LOG_FILE}"
+  echo "ERROR: run.sh is missing or not executable" >> "${LOG_FILE}"
   exit 1
 fi
 EOF
