@@ -150,6 +150,7 @@ class PatternMode:
         self.next_level_button = {'x': 0, 'y': 0, 'w': 200, 'h': 60}
         # Evaluation flow button/state: stage 0 = comparison preview, stage 1 = score modal
         self.eval_next_button = {'x': 0, 'y': 0, 'w': 200, 'h': 60}
+        self.eval_done_button = {'x': 0, 'y': 0, 'w': 240, 'h': 60}
         self.eval_screen_stage = 0
         
         # Game tracking variables
@@ -2902,6 +2903,71 @@ class PatternMode:
                      (20, 10, 5), -1)
         cv2.addWeighted(overlay, 0.7, frame, 0.3, 0, frame)
 
+        # Stage 2: final congratulation screen after finishing Level 5 results.
+        if getattr(self, 'eval_screen_stage', 0) == 2:
+            panel_w = 560
+            panel_h = 320
+            panel_x = (self.width - panel_w) // 2
+            panel_y = (self.height - panel_h) // 2
+
+            pulse = 0.6 + 0.4 * abs(math.sin(self.glow_phase * 0.8))
+            for i in range(3):
+                offset = i * 3
+                alpha = pulse * (1 - i * 0.3)
+                glow_color = tuple(int(c * alpha) for c in self.COLORS['glow_cyan'])
+                cv2.rectangle(frame, (panel_x - offset, panel_y - offset),
+                             (panel_x + panel_w + offset, panel_y + panel_h + offset),
+                             glow_color, 3)
+
+            cv2.rectangle(frame, (panel_x, panel_y),
+                         (panel_x + panel_w, panel_y + panel_h),
+                         self.COLORS['dark_blue'], -1)
+
+            title = "CONGRATULATIONS!"
+            title_scale = text_scale(1.2, self.width, self.height, floor=1.04, ceiling=1.35)
+            title_thickness = text_thickness(3, self.width, self.height, min_thickness=2, max_thickness=4)
+            title_scale = fit_text_scale(title, FONT_DISPLAY, panel_w - 50, title_scale, title_thickness, min_scale=0.92)
+            (tw, th), _ = get_text_size(title, FONT_DISPLAY, title_scale, title_thickness)
+            tx = panel_x + (panel_w - tw) // 2
+            ty = panel_y + 75
+            self._put_text(frame, title, tx, ty, title_scale, self.COLORS['glow_cyan'], title_thickness, font=FONT_DISPLAY)
+
+            msg = "YOU COMPLETED ALL 5 LEVELS!"
+            msg_scale = text_scale(0.82, self.width, self.height, floor=0.72, ceiling=0.94)
+            msg_thickness = text_thickness(2, self.width, self.height, min_thickness=1, max_thickness=3)
+            msg_scale = fit_text_scale(msg, FONT_MAIN, panel_w - 60, msg_scale, msg_thickness, min_scale=0.62)
+            (mw, mh), _ = get_text_size(msg, FONT_MAIN, msg_scale, msg_thickness)
+            mx = panel_x + (panel_w - mw) // 2
+            my = ty + mh + 46
+            self._put_text(frame, msg, mx, my, msg_scale, self.COLORS['text_secondary'], msg_thickness)
+
+            button_w = 250
+            button_h = 60
+            button_x = panel_x + (panel_w - button_w) // 2
+            button_y = panel_y + panel_h - 90
+            self.eval_done_button['x'] = button_x
+            self.eval_done_button['y'] = button_y
+            self.eval_done_button['w'] = button_w
+            self.eval_done_button['h'] = button_h
+
+            btn_pulse = 0.55 + 0.35 * abs(math.sin(self.glow_phase * 1.2))
+            self.draw_glow_rect(frame, button_x, button_y, button_w, button_h, self.COLORS['neon_blue'], btn_pulse)
+            _ov = frame.copy()
+            cv2.rectangle(_ov, (button_x + 2, button_y + 2),
+                         (button_x + button_w - 2, button_y + button_h - 2),
+                         self.COLORS['button_hover'], -1)
+            cv2.addWeighted(_ov, 0.85, frame, 0.15, 0, frame)
+
+            btxt = "BACK TO LEVELS"
+            bs = text_scale(0.84, self.width, self.height, floor=0.74, ceiling=0.96)
+            bt = text_thickness(2, self.width, self.height, min_thickness=2, max_thickness=3)
+            bs = fit_text_scale(btxt, FONT_DISPLAY, button_w - 20, bs, bt, min_scale=0.64)
+            (bw, bh), _ = get_text_size(btxt, FONT_DISPLAY, bs, bt)
+            bx = button_x + (button_w - bw) // 2
+            by = button_y + (button_h + bh) // 2
+            self._put_text(frame, btxt, bx, by, bs, self.COLORS['text_primary'], bt, font=FONT_DISPLAY)
+            return
+
         # Stage 0: show comparison preview first (centered), then NEXT to view score.
         if getattr(self, 'eval_screen_stage', 0) == 0:
             title = "COMPARISON PREVIEW"
@@ -3018,16 +3084,6 @@ class PatternMode:
         title_x = panel_x + (panel_w - title_w) // 2
         self._put_text(frame, title, title_x, content_y, title_scale, title_color, title_thickness, font=FONT_DISPLAY)
 
-        if self.level_completed and self.current_level >= 5:
-            congrats_text = "YOU COMPLETED ALL 5 LEVELS!"
-            congrats_scale = text_scale(0.74, self.width, self.height, floor=0.66, ceiling=0.84)
-            congrats_thick = text_thickness(2, self.width, self.height, min_thickness=1, max_thickness=2)
-            congrats_scale = fit_text_scale(congrats_text, FONT_MAIN, panel_w - 50, congrats_scale, congrats_thick, min_scale=0.58)
-            (cw, ch), _ = get_text_size(congrats_text, FONT_MAIN, congrats_scale, congrats_thick)
-            cx = panel_x + (panel_w - cw) // 2
-            cy = content_y + ch + 12
-            self._put_text(frame, congrats_text, cx, cy, congrats_scale, self.COLORS['text_secondary'], congrats_thick)
-        
         # Show final score and wrong-stitch percentage (replace raw progress)
         content_y += 60
         # Large score display
@@ -3290,8 +3346,20 @@ class PatternMode:
             nb = self.next_level_button
             if nb['x'] <= x <= nb['x'] + nb['w'] and nb['y'] <= y <= nb['y'] + nb['h']:
                 self.play_button_click_sound()
+                if self.current_level >= 5:
+                    self.eval_screen_stage = 2
+                    return None
                 self.unload_evaluation_model()
                 return 'next_level'
+
+        # Final congratulations screen button (after Level 5 results)
+        if self.is_evaluated and getattr(self, 'eval_screen_stage', 0) == 2:
+            db = self.eval_done_button
+            if db['x'] <= x <= db['x'] + db['w'] and db['y'] <= y <= db['y'] + db['h']:
+                self.play_button_click_sound()
+                self.unload_evaluation_model()
+                self._reset_current_level_state("🏁 All levels completed!")
+                return 'back'
         
         return None
     
