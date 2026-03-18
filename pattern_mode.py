@@ -75,6 +75,14 @@ class PatternMode:
             'h': 50,
         }
 
+        # Quick Evaluate button — available any time sewing has started, not just at 100%
+        self.quick_evaluate_button = {
+            'x': self.score_panel_x,
+            'y': self.score_panel_y + self.score_panel_height + _eval_gap + 58,
+            'w': self.score_panel_width,
+            'h': 50,
+        }
+
         # Start button — shown in the stats panel before sewing begins
         self.start_button = {
             'x': self.score_panel_x + 20,
@@ -2904,35 +2912,52 @@ class PatternMode:
                        self.COLORS['text_primary'], thickness, font=FONT_DISPLAY)
 
     def draw_evaluate_button(self, frame):
-        """Draw the evaluate button below stats panel"""
-        eb = self.evaluate_button
-        # Only show evaluate button when progress reached 100% and not
-        # already evaluated. The evaluate action is gated by full progress.
-        if (not self.camera_available) or self.is_evaluated or self.raw_progress < 100.0:
+        """Draw the evaluate button (requires 100%) and quick-evaluate button (any time)."""
+        if not self.camera_available or self.is_evaluated:
             return
-        
-        # Button glow
-        pulse = 0.5 + 0.3 * abs(math.sin(self.glow_phase * 1.2))
-        self.draw_glow_rect(frame, eb['x'], eb['y'], eb['w'], eb['h'], 
-                           self.COLORS['neon_blue'], pulse)
-        
-        # Button background
-        overlay = frame.copy()
-        cv2.rectangle(overlay, (eb['x'] + 2, eb['y'] + 2), 
-                     (eb['x'] + eb['w'] - 2, eb['y'] + eb['h'] - 2), 
-                     self.COLORS['button_hover'], -1)
-        cv2.addWeighted(overlay, 0.7, frame, 0.3, 0, frame)
-        
-        # Button text
-        text = "EVALUATE"
-        font_scale = text_scale(0.84, self.width, self.height, floor=0.76, ceiling=0.96)
-        thickness = text_thickness(2, self.width, self.height, min_thickness=2, max_thickness=3)
-        font_scale = fit_text_scale(text, FONT_DISPLAY, eb['w'] - 14, font_scale, thickness, min_scale=0.66)
-        (text_w, text_h), _ = get_text_size(text, FONT_DISPLAY, font_scale, thickness)
-        text_x = eb['x'] + (eb['w'] - text_w) // 2
-        text_y = eb['y'] + (eb['h'] + text_h) // 2
-        
-        self._put_text(frame, text, text_x, text_y, font_scale, self.COLORS['text_primary'], thickness, font=FONT_DISPLAY)
+
+        # ── Full EVALUATE (requires 100% progress) ────────────────────────────
+        if self.raw_progress >= 100.0:
+            eb = self.evaluate_button
+            pulse = 0.5 + 0.3 * abs(math.sin(self.glow_phase * 1.2))
+            self.draw_glow_rect(frame, eb['x'], eb['y'], eb['w'], eb['h'],
+                                self.COLORS['neon_blue'], pulse)
+            overlay = frame.copy()
+            cv2.rectangle(overlay, (eb['x'] + 2, eb['y'] + 2),
+                          (eb['x'] + eb['w'] - 2, eb['y'] + eb['h'] - 2),
+                          self.COLORS['button_hover'], -1)
+            cv2.addWeighted(overlay, 0.7, frame, 0.3, 0, frame)
+            text = "EVALUATE"
+            font_scale = text_scale(0.84, self.width, self.height, floor=0.76, ceiling=0.96)
+            thickness = text_thickness(2, self.width, self.height, min_thickness=2, max_thickness=3)
+            font_scale = fit_text_scale(text, FONT_DISPLAY, eb['w'] - 14, font_scale, thickness, min_scale=0.66)
+            (text_w, text_h), _ = get_text_size(text, FONT_DISPLAY, font_scale, thickness)
+            text_x = eb['x'] + (eb['w'] - text_w) // 2
+            text_y = eb['y'] + (eb['h'] + text_h) // 2
+            self._put_text(frame, text, text_x, text_y, font_scale,
+                           self.COLORS['text_primary'], thickness, font=FONT_DISPLAY)
+
+        # ── QUICK CHECK — available any time sewing has started ───────────────
+        if not self.sewing_started:
+            return
+        qb = self.quick_evaluate_button
+        # Amber/orange glow to distinguish from the main blue Evaluate button
+        amber = (0, 160, 220)  # BGR amber
+        pulse_q = 0.4 + 0.25 * abs(math.sin(self.glow_phase * 1.4))
+        self.draw_glow_rect(frame, qb['x'], qb['y'], qb['w'], qb['h'], amber, pulse_q)
+        overlay_q = frame.copy()
+        cv2.rectangle(overlay_q, (qb['x'] + 2, qb['y'] + 2),
+                      (qb['x'] + qb['w'] - 2, qb['y'] + qb['h'] - 2),
+                      (20, 60, 80), -1)
+        cv2.addWeighted(overlay_q, 0.75, frame, 0.25, 0, frame)
+        qtext = "QUICK CHECK"
+        qscale = text_scale(0.76, self.width, self.height, floor=0.68, ceiling=0.88)
+        qthick = text_thickness(2, self.width, self.height, min_thickness=2, max_thickness=3)
+        qscale = fit_text_scale(qtext, FONT_DISPLAY, qb['w'] - 14, qscale, qthick, min_scale=0.58)
+        (qtw, qth), _ = get_text_size(qtext, FONT_DISPLAY, qscale, qthick)
+        qtx = qb['x'] + (qb['w'] - qtw) // 2
+        qty = qb['y'] + (qb['h'] + qth) // 2
+        self._put_text(frame, qtext, qtx, qty, qscale, (0, 210, 255), qthick, font=FONT_DISPLAY)
     
     def draw_evaluation_results(self, frame):
         """Draw evaluation results as a large centered modal window"""
@@ -3372,6 +3397,14 @@ class PatternMode:
         if not self.is_evaluated and self.raw_progress >= 100.0:
             eb = self.evaluate_button
             if eb['x'] <= x <= eb['x'] + eb['w'] and eb['y'] <= y <= eb['y'] + eb['h']:
+                self.play_button_click_sound()
+                self.evaluate_pattern()
+                return None
+
+        # Quick Check — evaluate at any progress once sewing has started
+        if not self.is_evaluated and self.sewing_started:
+            qb = self.quick_evaluate_button
+            if qb['x'] <= x <= qb['x'] + qb['w'] and qb['y'] <= y <= qb['y'] + qb['h']:
                 self.play_button_click_sound()
                 self.evaluate_pattern()
                 return None
